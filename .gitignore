@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# ─────────────────────────────────────────────────────────
+# Nuxt / Frontend
+# ─────────────────────────────────────────────────────────
+frontend/.output
+frontend/.nuxt
+frontend/.nitro
+frontend/.cache
+frontend/dist
+frontend/node_modules
+
+# Active theme file (written by backend, read by frontend build)
+frontend/config/active-theme.json
+
+# ─────────────────────────────────────────────────────────
+# Backend user data (auto‑generated, not to be committed)
+# ─────────────────────────────────────────────────────────
+backend/data/**
+
+# ─────────────────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─────────────────────────────────────────────────────────
+# OS & IDE
+# ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.fleet
+.idea
+.vscode/
+*.swp
+*.swo
+
+# ─────────────────────────────────────────────────────────
+# Environment files (keep example, ignore the rest)
+# ─────────────────────────────────────────────────────────
+env/
+.env
+.env.*
+!.env.example

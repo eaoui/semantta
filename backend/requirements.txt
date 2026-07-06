@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+rdflib
+owlrl
+httpx
+pyshacl
+python-dotenv

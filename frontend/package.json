@@ -1,0 +1,30 @@
+{
+  "name": "semantta-frontend",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^0.11.3",
+    "nuxt": "^4.4.6",
+    "pinia": "^3.0.4",
+    "sortablejs": "^1.15.7",
+    "vis-network": "^10.1.0",
+    "vue": "^3.5.39",
+    "vue-router": "^5.0.7",
+    "vue-sonner": "^2.0.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "^26.1.0",
+    "@types/sortablejs": "^1.15.9",
+    "@vite-pwa/nuxt": "^1.1.1",
+    "nuxt-phosphor-icons": "^2.3.3",
+    "tailwindcss": "^4.3.2"
+  }
+}

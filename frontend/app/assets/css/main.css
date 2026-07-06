@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "vue-sonner/style.css";
+
+/* Enable class‑based dark mode (.dark on <html>) */
+@custom-variant dark (&:where(.dark, .dark *));
