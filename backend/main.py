@@ -2001,7 +2001,7 @@ async def get_state():
 async def upload_ontology(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(400, "No file selected")
-    filename: str = _require_safe_path_component(file.filename, "filename")
+    filename = _require_safe_path_component(file.filename, "filename")
 
     if any(o["filename"] == filename for o in state["ontologies"]):
         raise HTTPException(400, f"Ontology '{filename}' is already imported.")
@@ -2096,7 +2096,7 @@ async def upload_metadata(
         raise HTTPException(400, "No file selected.")
 
     # Safely capture the filename as a plain string
-    filename: str = _require_safe_path_component(file.filename, "filename")
+    filename = _require_safe_path_component(file.filename, "filename")
 
     if not state["metadata_files"] and not state["created_instances"]:
         merge_instances = True
@@ -2819,7 +2819,7 @@ async def upload_plugin(file: UploadFile = File(...)):
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid plugin structure: must contain a single folder with plugin.json")
-        plugin_folder = _require_safe_path_component(plugin_folder, "plugin folder name")
+        plugin_folder = _require_safe_path_component(entries[0], "plugin folder name")
         src = os.path.join(tmp_dir, plugin_folder)
         if not os.path.exists(os.path.join(src, "plugin.json")):
             raise HTTPException(400, "Missing plugin.json")
@@ -2873,7 +2873,7 @@ async def upload_theme(file: UploadFile = File(...)):
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid theme structure: must contain a single folder with theme.json")
-        theme_folder = _require_safe_path_component(theme_folder, "theme folder name")
+        theme_folder = _require_safe_path_component(entries[0], "theme folder name")
         src = os.path.join(tmp_dir, theme_folder)
         if not os.path.exists(os.path.join(src, "theme.json")):
             raise HTTPException(400, "Missing theme.json")
