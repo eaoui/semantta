@@ -1,5 +1,5 @@
 
-# Semantta — An Ontology‑based Linked Data Management System
+# Semantta
 
 A web‑based, RDF‑native platform for managing linked data based on OWL/RDF ontologies.
 Semantta is domain‑independent and can host data from any domain.
