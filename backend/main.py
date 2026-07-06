@@ -254,6 +254,18 @@ def is_valid_uri(uri: str) -> bool:
         uri.startswith(("http://", "https://", "urn:"))
     )
 
+def _require_safe_path_component(name: str, label: str = "name") -> str:
+    """
+    Raise HTTP 400 if *name* contains characters that could be used
+    for path traversal (``..``, ``/``, ``\\``) or other unsafe chars.
+    Returns the sanitised string on success.
+    """
+    if not name or not name.strip():
+        raise HTTPException(400, f"{label} must not be empty")
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or '..' in name:
+        raise HTTPException(400, f"{label} contains illegal characters")
+    return name.strip()
+
 def _is_specific_range(range_uri: str) -> bool:
     return range_uri not in GENERIC_RANGES
 
@@ -1989,9 +2001,7 @@ async def get_state():
 async def upload_ontology(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(400, "No file selected")
-    # At this point file.filename is guaranteed to be a string,
-    # but Pylance doesn't narrow it inside nested functions.
-    filename: str = file.filename
+    filename: str = _require_safe_path_component(file.filename, "filename")
 
     if any(o["filename"] == filename for o in state["ontologies"]):
         raise HTTPException(400, f"Ontology '{filename}' is already imported.")
@@ -2051,6 +2061,7 @@ async def upload_ontology(file: UploadFile = File(...)):
 
 @app.delete("/api/ontology/{filename}")
 async def delete_ontology(filename: str):
+    filename = _require_safe_path_component(filename, "filename")
     before = len(state["ontologies"])
     state["ontologies"] = [o for o in state["ontologies"] if o["filename"] != filename]
     if len(state["ontologies"]) == before:
@@ -2085,7 +2096,7 @@ async def upload_metadata(
         raise HTTPException(400, "No file selected.")
 
     # Safely capture the filename as a plain string
-    filename: str = file.filename
+    filename: str = _require_safe_path_component(file.filename, "filename")
 
     if not state["metadata_files"] and not state["created_instances"]:
         merge_instances = True
@@ -2400,12 +2411,14 @@ async def merge_file_metadata(filename: str):
 
 @app.get("/api/metadata/raw/{filename:path}")
 async def get_raw_metadata(filename: str):
+    filename = _require_safe_path_component(filename, "filename")
     filepath = os.path.join(METADATA_DIR, filename)
     if not os.path.exists(filepath): raise HTTPException(404, "Metadata file not found")
     return FileResponse(filepath)
 
 @app.delete("/api/metadata/{filename}")
 async def delete_metadata(filename: str):
+    filename = _require_safe_path_component(filename, "filename")
     before = len(state["metadata_files"])
     state["metadata_files"] = [mf for mf in state["metadata_files"] if mf["filename"] != filename]
     if len(state["metadata_files"]) == before: raise HTTPException(404, "Metadata file not found")
@@ -2747,6 +2760,7 @@ async def apply_base_iri():
 
 @app.get("/api/ontology/raw/{filename:path}")
 async def get_raw_ontology(filename: str):
+    filename = _require_safe_path_component(filename, "filename")
     filepath = os.path.join(ONTOLOGY_DIR, filename)
     if not os.path.exists(filepath): raise HTTPException(404, "Ontology file not found")
     return FileResponse(filepath)
@@ -2805,7 +2819,7 @@ async def upload_plugin(file: UploadFile = File(...)):
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid plugin structure: must contain a single folder with plugin.json")
-        plugin_folder = entries[0]
+        plugin_folder = _require_safe_path_component(plugin_folder, "plugin folder name")
         src = os.path.join(tmp_dir, plugin_folder)
         if not os.path.exists(os.path.join(src, "plugin.json")):
             raise HTTPException(400, "Missing plugin.json")
@@ -2823,7 +2837,7 @@ async def upload_plugin(file: UploadFile = File(...)):
 
 @app.post("/api/plugins/toggle")
 async def toggle_plugin(data: dict):
-    name = data.get("name")
+    name = _require_safe_path_component(data.get("name"), "plugin name")
     enabled = data.get("enabled", True)
     config = load_plugins_config()
     if name not in config: raise HTTPException(404, "Plugin not found")
@@ -2833,6 +2847,7 @@ async def toggle_plugin(data: dict):
 
 @app.delete("/api/plugins/{name:path}")
 async def delete_plugin(name: str):
+    name = _require_safe_path_component(name, "plugin name")
     config = load_plugins_config()
     if name not in config: raise HTTPException(404, "Plugin not found")
     plugin_path = os.path.join(PLUGINS_DIR, name)
@@ -2858,7 +2873,7 @@ async def upload_theme(file: UploadFile = File(...)):
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid theme structure: must contain a single folder with theme.json")
-        theme_folder = entries[0]
+        theme_folder = _require_safe_path_component(theme_folder, "theme folder name")
         src = os.path.join(tmp_dir, theme_folder)
         if not os.path.exists(os.path.join(src, "theme.json")):
             raise HTTPException(400, "Missing theme.json")
@@ -2875,7 +2890,7 @@ async def upload_theme(file: UploadFile = File(...)):
 
 @app.post("/api/themes/toggle")
 async def toggle_theme(data: dict):
-    name = data.get("name")
+    name = _require_safe_path_component(data.get("name"), "theme name")
     enabled = data.get("enabled", True)
     if name == "default": raise HTTPException(400, "The default theme cannot be disabled.")
     config = load_themes_config()
@@ -2886,6 +2901,7 @@ async def toggle_theme(data: dict):
 
 @app.delete("/api/themes/{name:path}")
 async def delete_theme(name: str):
+    name = _require_safe_path_component(name, "theme name")
     if name == "default": raise HTTPException(400, "The default theme cannot be deleted.")
     config = load_themes_config()
     if name not in config: raise HTTPException(404, "Theme not found")
@@ -2899,6 +2915,7 @@ async def delete_theme(name: str):
 async def set_active_theme_endpoint(data: dict):
     theme = data.get("theme", "default")
     if theme != "default" and not os.path.isdir(os.path.join(THEMES_DIR, theme)):
+        theme = _require_safe_path_component(theme, "theme name")
         raise HTTPException(404, "Theme not found")
     set_active_theme(theme)
     settings = load_settings()
