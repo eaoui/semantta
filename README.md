@@ -4,16 +4,12 @@
 A web‑based, RDF‑native platform for managing linked data based on OWL/RDF ontologies.
 Semantta is domain‑independent and can host data from any domain.
 
----
-
 ## Architecture
 
 Semantta is built around a three‑layer architecture:  
 1. **Ontology Layer**: Provides capability to import semantics that represent knowledge about a domain, including concepts in the domian and relationships among them.  
 2. **Application Profile (AP) Layer**: Provides capability to tailor the semantics from the *Ontology Layer* to the needs of a specific application.  
 3. **Metadata Layer**: Provides capability to apply the tailored semantics from the *AP Layer* to real data.
-
----
 
 ## Features
 
@@ -25,8 +21,6 @@ Semantta is built around a three‑layer architecture:
 - Plugin system and theme layers for extensibility and customisability
 - Progressive Web App (PWA) with dark and light mode support
 
----
-
 ## Used Technologies
 
 | Layer | Technology |
@@ -36,14 +30,11 @@ Semantta is built around a three‑layer architecture:
 | Triplestore | Apache Jena Fuseki |
 | Frontend  | Nuxt 4 (Vue 3, TypeScript), Pinia, Tailwind CSS 4, SortableJS, vis‑network, Phosphor Icons, vue‑sonner |
 
----
-
 ## Prerequisites
 
 - Python **3.10+** with `pip`
 - Node.js **18+** with `npm`
 - Apache Jena Fuseki – see the [installation guide](https://jena.apache.org/documentation/fuseki2/)
----
 
 ## Getting Started
 
@@ -108,8 +99,6 @@ Next time you only need steps 1 and 3.
   
 The app will be available at `http://localhost:3000`.
 
----
-
 ## Basic Workflow
 
 1. **Import an ontology**: Upload an RDF/XML, Turtle, or other supported format via the admin interface. The system applies OWL‑RL reasoning and caches the result.
@@ -117,8 +106,6 @@ The app will be available at `http://localhost:3000`.
 3. **Create or import metadata**: Create instances manually via the dynamic form, or upload RDF-based metadata files. Instances are validated against the AP.
 4. **Explore publicly**: You can search or browser the existing dataset. The `/dataset` page indexes all instances. Click any instance to see its
 description, syntax, and interactive graph.
-
----
 
 ## Project Structure
 
@@ -142,13 +129,9 @@ semantta/
 │       └── ...
 ```
 
----
-
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
-
----
 
 ## License
 
@@ -157,8 +140,6 @@ Semantta is free software: you can redistribute it and/or modify it under the te
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 See [LICENSE](LICENSE) for the full text.
-
----
 
 ## Applications
 
