@@ -127,6 +127,7 @@ semantta/
 │       ├── stores/          # Pinia store
 │       ├── types/           # TypeScript interfaces
 │       └── ...
+└── docs
 ```
 
 ## Contributing
@@ -144,3 +145,18 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 Have you built a public project on top of Semantta? Add it below!  
 
 - [Example Application Name](https://example.app)
+
+# Screenshots
+
+## Admin
+![Semantta Admin - Ontologies](docs/screenshots/admin-ontologies.png)
+![Semantta Admin - Application Profile](docs/screenshots/admin-ap.png)
+![Semantta Admin - Metadata - Instances](docs/screenshots/admin-metadata-instances.png)
+![Semantta Admin - Metadata - Imports](docs/screenshots/admin-metadata-imports.png)
+
+## Public
+![Semantta Public - Home](docs/screenshots/public-home.png)
+![Semantta Public - Data - Graph](docs/screenshots/public-data-description.png)
+![Semantta Public - Data - Graph](docs/screenshots/public-data-graph.png)
+
+View all screenshots in [docs/screenshots](docs/screenshots/)
