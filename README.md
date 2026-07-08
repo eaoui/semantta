@@ -2,8 +2,6 @@
 # Semantta
 
 A web‑based, RDF‑native platform for managing linked data based on OWL/RDF ontologies.
-Semantta is domain‑independent and can host data from any domain.
-
 ## Architecture
 
 Semantta is built around a three‑layer architecture:  
@@ -16,10 +14,14 @@ Semantta is built around a three‑layer architecture:
 - Import OWL/RDF ontologies and metadata in standard RDF formats (RDF/XML, Turtle, N‑Triples, JSON‑LD, …)
 - Build a SHACL‑based, ontology‑aware Application Profile (AP)
 - Create, import, edit, delete, and validate linked data against the AP and ontologies
-- Generate an AP from existing metadata in one click
-- Public dataset exploration with label‑first display and an interactive graph
-- Plugin system and theme layers for extensibility and customisability
-- Progressive Web App (PWA) with dark and light mode support
+- Generate a profile automatically from existing metadata
+- Explore the dataset publicly with label‑first display and an interactive graph
+- Switch between dark, light, and system theme modes
+- Extend the system with plugins and themes
+- Progressive Web App (PWA)
+
+Semantta is domain‑independent and can host data from any domain.
+
 
 ## Used Technologies
 
@@ -156,7 +158,7 @@ Have you built a public project on top of Semantta? Add it below!
 
 ## Public
 ![Semantta Public - Home](docs/screenshots/public-home.png)
-![Semantta Public - Data - Graph](docs/screenshots/public-data-description.png)
+![Semantta Public - Data - Description](docs/screenshots/public-data-description.png)
 ![Semantta Public - Data - Graph](docs/screenshots/public-data-graph.png)
 
 View all screenshots in [docs/screenshots](docs/screenshots/)
