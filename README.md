@@ -27,43 +27,49 @@ Semantta is domain‑independent and can host data from any domain.
 
 | Layer | Technology |
 | --- | --- |
-| Semantic Web | RDF, RDFS, OWL, SHACL, XSD, SPARQL |
+| Data | RDF, RDFS, OWL, SHACL, XSD, SPARQL |
 | Backend | FastAPI, rdflib, owlrl, pyshacl, httpx |
-| Triplestore | Apache Jena Fuseki |
 | Frontend  | Nuxt 4 (Vue 3, TypeScript), Pinia, Tailwind CSS 4, SortableJS, vis‑network, Phosphor Icons, vue‑sonner |
 
 ## Prerequisites
 
 - Python **3.10+** with `pip`
 - Node.js **18+** with `npm`
-- Apache Jena Fuseki – see the [installation guide](https://jena.apache.org/documentation/fuseki2/)
+- [Apache Jena Fuseki](https://jena.apache.org/documentation/fuseki2/) **5+** (requires Java **17+**)
 
 ## Getting Started
 
-### 1. Clone the repository
+### 1. Get Semantta
 
+clone the repository:
 ```bash
 git clone https://github.com/eaoui/semantta.git
 cd semantta
 ```
+or just download a [release](https://github.com/eaoui/semantta/releases).
 
-### 2. Triplestore
+### 2. Start a Fuseki Dataset
 
-Start (create/open) your Fuseki dataset. The simplest way is to run the fuseki-server script with a TDB2 location:
+Start an existing (or create a new) Fuseki dataset by running the `fuseki-server` script with a TDB2 location:
 
 ```bash
+# Linux/Mac
 ./fuseki-server --update --tdb2 --loc /path/to/database /dataset_name
+
+# Windows
+.\fuseki-server --update --tdb2 --loc path\to\database /dataset_name
 ```
 
-The default port is 3030 and the default dataset name is obmms.
+The default port is `3030` and the default dataset name is `obmms`.  
 If you use a different port or name, set `FUSEKI_DATASET_URL` in a `backend/.env` file:
 
 ```bash
 cd backend
-cp .env.example .env	# then edit FUSEKI_DATASET_URL if necessary
+cp .env.example .env  # Windows: copy .env.example .evn
+# then edit FUSEKI_DATASET_URL
 ```
 
-### 3. Backend
+### 3. Run the Backend
 
 ```bash
 # 1. move to the /backend directory
@@ -84,7 +90,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Next time you only need stepts 1, 3, and 5.
 
-### 4. Frontend
+### 4. Run the Frontend
 
 ```bash
 # 1. move to the /frontend directory
