@@ -27,7 +27,7 @@ class FusekiStore:
         self.query_url = f"{dataset_url}/query"
         self.update_url = f"{dataset_url}/update"
         self.data_url = f"{dataset_url}/data"
-        self.client = httpx.AsyncClient()
+        self.client = httpx.AsyncClient(timeout=120.0)
 
         # Optional list of label property URIs (rdfs:label sub‑properties)
         self.label_properties: List[str] = label_properties or []
