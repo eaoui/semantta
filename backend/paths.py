@@ -72,6 +72,16 @@ ACTIVE_THEME_FILE = DATA_DIR / "active-theme.json"
 OWL_FILE = APP_DIR / "vocab" / "owl.ttl"
 
 
+def reasoned_cache_path(filename: str) -> Path:
+    """Return the path of an ontology's derived reasoned-graph cache."""
+    return CACHE_DIR / f"{filename}.reasoned.ttl"
+
+
+def reasoned_cache_metadata_path(filename: str) -> Path:
+    """Return the path of an ontology's reasoned-cache metadata."""
+    return CACHE_DIR / f"{filename}.reasoned.meta.json"
+
+
 def ensure_data_dirs() -> None:
     """Create the mutable Semantta data directories when necessary."""
     for directory in (

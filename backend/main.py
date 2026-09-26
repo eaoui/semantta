@@ -67,12 +67,17 @@ from paths import (
     THEMES_CONFIG_FILE,
     THEMES_DIR,
     ensure_data_dirs,
+    reasoned_cache_metadata_path,
+    reasoned_cache_path,
 )
 
 # User-installed plugins are importable as a namespace package from the
 # user-data directory. This keeps plugin code outside the application tree.
 if str(DATA_DIR) not in sys.path:
     sys.path.insert(0, str(DATA_DIR))
+
+INDEX_CACHE_VERSION = 1
+REASONED_CACHE_VERSION = 1
 
 SH = Namespace("http://www.w3.org/ns/shacl#")
 GENERIC_RANGES = {str(OWL.Thing), str(RDFS.Resource)}
@@ -544,6 +549,49 @@ def get_ontology_namespaces(g: Graph) -> List[str]:
                     break
     return sorted(used_ns)
 
+
+def _file_signature(path: str | os.PathLike) -> dict:
+    """
+    Return a lightweight signature for a persistent source file.
+
+    Modification time and file size are used deliberately instead of hashing
+    the whole file, because ontology files may be very large.
+    """
+    stat = os.stat(path)
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _ontology_source_signature() -> dict:
+    """
+    Return the signature of all ontology sources that contribute to the
+    precomputed indexes.
+
+    The built-in OWL vocabulary is included because it participates in
+    reasoning and therefore can affect the resulting ontology graph.
+    """
+    ontologies = {}
+
+    if os.path.isdir(ONTOLOGY_DIR):
+        for filename in sorted(os.listdir(ONTOLOGY_DIR)):
+            if not filename.endswith(
+                (".rdf", ".owl", ".xml", ".ttl", ".nt", ".jsonld",
+                 ".json", ".trig", ".trix")
+            ):
+                continue
+
+            path = os.path.join(ONTOLOGY_DIR, filename)
+
+            if os.path.isfile(path):
+                ontologies[filename] = _file_signature(path)
+
+    return {
+        "owl_vocabulary": _file_signature(OWL_FILE),
+        "ontologies": ontologies,
+    }
+
 # ---------------------------------------------------------------------------
 #  Index Building & Caching
 # ---------------------------------------------------------------------------
@@ -594,7 +642,10 @@ def rebuild_precomputed():
 
 def save_indexes():
     os.makedirs(CACHE_DIR, exist_ok=True)
+
     data = {
+        "cache_version": INDEX_CACHE_VERSION,
+        "source_signature": _ontology_source_signature(),
         "subclass_pairs": list(_subclass_pairs),
         "property_domains": dict(_property_domains),
         "property_ranges": dict(_property_ranges),
@@ -605,15 +656,25 @@ def save_indexes():
         "disjoint_pairs": list(_disjoint_pairs),
         "full_label_properties": state.get("full_label_properties", []),
     }
+
     with open(INDEX_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 def load_indexes() -> bool:
     if not os.path.exists(INDEX_CACHE_FILE):
         return False
+
     try:
         with open(INDEX_CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Derived indexes are valid only when their format and all of their
+        # authoritative ontology sources are unchanged.
+        if data.get("cache_version") != INDEX_CACHE_VERSION:
+            return False
+
+        if data.get("source_signature") != _ontology_source_signature():
+            return False
 
         _subclass_pairs.clear()
         _subclass_pairs.update((a, b) for a, b in data["subclass_pairs"])
@@ -1823,25 +1884,61 @@ def add_default_prefixes():
 
 def get_reasoned_graph(original_path: str, fmt: str) -> tuple[Graph, Graph]:
     os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_filename = os.path.basename(original_path) + ".reasoned.ttl"
-    cache_path = os.path.join(CACHE_DIR, cache_filename)
 
-    if os.path.exists(cache_path) and os.path.getmtime(cache_path) >= os.path.getmtime(original_path):
+    filename = os.path.basename(original_path)
+    cache_path = reasoned_cache_path(filename)
+    metadata_path = reasoned_cache_metadata_path(filename)
+
+    source_signature = _file_signature(original_path)
+    owl_signature = _file_signature(OWL_FILE)
+
+    cache_valid = False
+
+    if os.path.exists(cache_path) and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+
+            cache_valid = (
+                metadata.get("cache_version") == REASONED_CACHE_VERSION
+                and metadata.get("source_signature") == source_signature
+                and metadata.get("owl_vocabulary_signature") == owl_signature
+            )
+        except Exception:
+            cache_valid = False
+
+    if cache_valid:
         g = Graph()
         g.parse(cache_path, format="turtle")
-        with open(original_path, 'rb') as fh:
+
+        with open(original_path, "rb") as fh:
             content = fh.read()
+
         unreasoned = parse_ontology(content, fmt)
         return unreasoned, g
 
-    with open(original_path, 'rb') as fh:
+    with open(original_path, "rb") as fh:
         content = fh.read()
+
     unreasoned = parse_ontology(content, fmt)
+
     g = Graph()
     for t in unreasoned:
         g.add(t)
+
     apply_reasoning(g)
+
     g.serialize(destination=cache_path, format="turtle")
+
+    metadata = {
+        "cache_version": REASONED_CACHE_VERSION,
+        "source_signature": source_signature,
+        "owl_vocabulary_signature": owl_signature,
+    }
+
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
     return unreasoned, g
 
 def load_saved_ontologies():
@@ -2034,10 +2131,26 @@ async def upload_ontology(file: UploadFile = File(...)):
         os.makedirs(ONTOLOGY_DIR, exist_ok=True)
         with open(os.path.join(ONTOLOGY_DIR, filename), 'wb') as f:
             f.write(contents)
+        cache_path = reasoned_cache_path(filename)
+        metadata_path = reasoned_cache_metadata_path(filename)
+
         g.serialize(
-            destination=os.path.join(CACHE_DIR, filename + ".reasoned.ttl"),
-            format="turtle"
+            destination=cache_path,
+            format="turtle",
         )
+
+        with open(metadata_path, "w", encoding="utf-8") as mf:
+            json.dump(
+                {
+                    "cache_version": REASONED_CACHE_VERSION,
+                    "source_signature": _file_signature(
+                        os.path.join(ONTOLOGY_DIR, filename)
+                    ),
+                    "owl_vocabulary_signature": _file_signature(OWL_FILE),
+                },
+                mf,
+                indent=2,
+            )
         return unreasoned, g, entities, meta
 
     try:
@@ -2075,8 +2188,16 @@ async def delete_ontology(filename: str):
         raise HTTPException(404, "Ontology not found")
     filepath = os.path.join(ONTOLOGY_DIR, filename)
     if os.path.exists(filepath): os.remove(filepath)
-    cache_path = os.path.join(CACHE_DIR, filename + ".reasoned.ttl")
-    if os.path.exists(cache_path): os.remove(cache_path)
+    
+    cache_path = reasoned_cache_path(filename)
+    metadata_path = reasoned_cache_metadata_path(filename)
+
+    if os.path.exists(cache_path):
+        os.remove(cache_path)
+
+    if os.path.exists(metadata_path):
+        os.remove(metadata_path)
+
     state["combined_onto_graph"] = Graph()
     state["prefix_map"].clear()
     for o in state["ontologies"]:
