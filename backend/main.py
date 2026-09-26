@@ -39,8 +39,9 @@ from rdflib import BNode, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, RDFS, split_uri
 
-from fuseki_store import FusekiStore, SHAPES_GRAPH
 from config import FUSEKI_CONFIG
+from fuseki_store import FusekiStore, SHAPES_GRAPH
+from rdf_store import RDFStore
 from utils import shape_uri_for_entity, property_shape_uri
 
 # ---------------------------------------------------------------------------
@@ -781,7 +782,7 @@ def invalidate_everything():
 async def get_global_property_order() -> Dict[str, int]:
     order_map = {}
     try:
-        rows = await store._sparql_query(f"""
+        rows = await store.query(f"""
             SELECT ?propUri (SAMPLE(?order) AS ?ord) WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?propShape <{SH}path> ?propUri ;
@@ -798,7 +799,7 @@ async def get_global_property_order() -> Dict[str, int]:
 async def rebuild_used_uris():
     global _used_uris_set
     try:
-        rows = await store._sparql_query("""
+        rows = await store.query("""
             SELECT DISTINCT ?uri WHERE {
                 { ?uri a ?type . } UNION { ?s ?uri ?o . } UNION { ?s a ?uri . }
                 FILTER(ISIRI(?uri) && !STRSTARTS(STR(?uri), "urn:bnid:"))
@@ -841,7 +842,7 @@ async def get_instance_suggestions(range_uris: list) -> list:
         FILTER(!STRSTARTS(STR(?instance), "urn:bnid:"))
     }} LIMIT 100"""
     try:
-        rows = await store._sparql_query(query)
+        rows = await store.query(query)
         return [{"uri": r["instance"], "label": get_label(r["instance"])} for r in rows]
     except Exception:
         return []
@@ -850,7 +851,7 @@ async def check_disjoint_classes(class_uris: List[str]):
     all_disjoint = set(_disjoint_pairs)
     for cls in class_uris:
         shape_uri = shape_uri_for_entity(cls, "class", state["prefix_map"])
-        rows = await store._sparql_query(f"""
+        rows = await store.query(f"""
             PREFIX owl: <http://www.w3.org/2002/07/owl#>
             SELECT ?other WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1004,7 +1005,7 @@ def validate_constraints(entity_uri: str, entity_type: str, proposed: dict):
 async def _apply_constraints(shape_uri: str, constraints: dict,
                              keep_predicates: set) -> None:
     keep_filter = ", ".join(f"<{p}>" for p in keep_predicates)
-    await store._sparql_update(f"""
+    await store.update(f"""
         DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}
         WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{
             <{shape_uri}> ?p ?o .
@@ -1021,7 +1022,7 @@ async def _apply_constraints(shape_uri: str, constraints: dict,
         else:
             triples += f"<{shape_uri}> <{pred}> {_format_constraint_value(pred, val)} .\n"
     if triples:
-        await store._sparql_update(
+        await store.update(
             f"INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ {triples} }} }}"
         )
 
@@ -1054,7 +1055,7 @@ class ApplicationProfile:
             return
         self._order_map.clear()
         try:
-            rows = await self.store._sparql_query(f"""
+            rows = await self.store.query(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 SELECT ?propUri (SAMPLE(?order) AS ?ord) WHERE {{
                     GRAPH <{SHAPES_GRAPH}> {{
@@ -1112,7 +1113,7 @@ class ApplicationProfile:
             values = " ".join(f"<{u}>" for u in md_uri_list)
             batch_query = f"SELECT ?uri ?type WHERE {{ VALUES ?uri {{ {values} }} . ?uri a ?type . }}"
             try:
-                rows = await self.store._sparql_query(batch_query)
+                rows = await self.store.query(batch_query)
                 for r in rows:
                     types_map.setdefault(r["uri"], []).append(r["type"])
             except Exception:
@@ -1183,7 +1184,7 @@ class ApplicationProfile:
 
     async def _list_active_properties(self, class_uri: str) -> List[dict]:
         shape_uri = shape_uri_for_entity(class_uri, "class", state["prefix_map"])
-        linked = await self.store._sparql_query(f"""
+        linked = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?propUri ?order WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1193,7 +1194,7 @@ class ApplicationProfile:
                 }}
             }}""")
 
-        orphan = await self.store._sparql_query(f"""
+        orphan = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?propUri ?order WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1209,7 +1210,7 @@ class ApplicationProfile:
 
     async def _get_property_constraints(self, prop_uri: str) -> dict:
         pshape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-        rows = await self.store._sparql_query(f"""
+        rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?pred ?val WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1301,17 +1302,17 @@ class ApplicationProfile:
         # Three concurrent SELECT DISTINCT queries – each returns URIs of one role
         async def select_classes():
             q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s a ?uri }}"
-            rows = await self.store._sparql_query(q)
+            rows = await self.store.query(q)
             return {r["uri"] for r in rows}
 
         async def select_object_props():
             q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s ?uri ?o . FILTER(isIRI(?o)) }}"
-            rows = await self.store._sparql_query(q)
+            rows = await self.store.query(q)
             return {r["uri"] for r in rows}
 
         async def select_datatype_props():
             q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s ?uri ?o . FILTER(isLiteral(?o)) }}"
-            rows = await self.store._sparql_query(q)
+            rows = await self.store.query(q)
             return {r["uri"] for r in rows}
 
         classes_set, obj_props_set, data_props_set = await asyncio.gather(
@@ -1334,7 +1335,7 @@ class ApplicationProfile:
     async def _get_shacl_domains(self) -> Dict[str, List[str]]:
         if hasattr(self, '_cached_domains') and self._cached_domains is not None:
             return self._cached_domains
-        rows = await self.store._sparql_query(f"""
+        rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?propUri ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1392,7 +1393,7 @@ class SHACLProfile:
 
         for pred, val in constraints.items():
             val_triple = _format_constraint_value(pred, val)
-            await self.store._sparql_update(f"""
+            await self.store.update(f"""
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> <{pred}> {val_triple} }}
                 }}
@@ -1422,7 +1423,7 @@ class SHACLProfile:
         class_shape_uri = shape_uri_for_entity(class_uri, "class", state["prefix_map"])
 
         # Ensure property shape exists
-        await self.store._sparql_update(f"""
+        await self.store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             INSERT {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1437,7 +1438,7 @@ class SHACLProfile:
         """)
 
         # Link class to property (if not already linked)
-        await self.store._sparql_update(f"""
+        await self.store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             INSERT {{
                 GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
@@ -1464,7 +1465,7 @@ class SHACLProfile:
 
     async def remove_datatype(self, uri: str):
         shape_uri = shape_uri_for_entity(uri, "datatype", state["prefix_map"])
-        await self.store._sparql_update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
         self._changed()
 
     async def add_individual(self, uri: str):
@@ -1477,12 +1478,12 @@ class SHACLProfile:
         if uri in CORE_ACTIVE_DATATYPES:
             raise HTTPException(400, "Core datatypes cannot be removed.")
         shape_uri = shape_uri_for_entity(uri, "individual", state["prefix_map"])
-        await self.store._sparql_update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
         self._changed()
 
     async def add_property_global(self, prop_uri: str):
         shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-        await self.store._sparql_update(f"""
+        await self.store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             INSERT {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1502,11 +1503,11 @@ class SHACLProfile:
         if prop_uri in CORE_ACTIVE_ANNOTATION_PROPERTIES:
             raise HTTPException(400, "Core annotation properties cannot be removed.")
         shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-        await self.store._sparql_update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
         self._changed()
 
     async def get_active_classes(self) -> List[str]:
-        rows = await self.store._sparql_query(f"""
+        rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT DISTINCT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1517,7 +1518,7 @@ class SHACLProfile:
         return [r["class"] for r in rows]
 
     async def get_active_properties(self) -> List[str]:
-        rows = await self.store._sparql_query(f"""
+        rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT DISTINCT ?prop WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1528,7 +1529,7 @@ class SHACLProfile:
         return [r["prop"] for r in rows]
 
     async def get_active_individuals(self) -> List[str]:
-        rows = await self.store._sparql_query(f"""
+        rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT DISTINCT ?uri WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1541,7 +1542,7 @@ class SHACLProfile:
     async def generate_from_metadata(self):
         if not _used_uris_set:
             await rebuild_used_uris()
-        rows = await self.store._sparql_query("""
+        rows = await self.store.query("""
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT DISTINCT ?class ?prop WHERE {
                 ?instance a ?class . ?instance ?prop ?value .
@@ -1558,7 +1559,7 @@ class SHACLProfile:
 
         for class_uri in pairs:
             class_shape_uri = shape_uri_for_entity(class_uri, "class", state["prefix_map"])
-            await self.store._sparql_update(f"""
+            await self.store.update(f"""
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a <{NS}NodeShape> ; <{NS}targetClass> <{class_uri}> . }}
                 }}
@@ -1568,7 +1569,7 @@ class SHACLProfile:
         all_props = {prop for props in pairs.values() for prop in props}
         for prop_uri in all_props:
             prop_shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-            await self.store._sparql_update(f"""
+            await self.store.update(f"""
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a <{NS}PropertyShape> ; <{NS}path> <{prop_uri}> . }}
                 }}
@@ -1578,7 +1579,7 @@ class SHACLProfile:
             if prop_uri in order_map:
                 ord_val = order_map[prop_uri]
                 ord_triple = f"<{prop_shape_uri}> <{NS}order> {_format_constraint_value(NS+'order', ord_val)} ."
-                await self.store._sparql_update(f"""
+                await self.store.update(f"""
                     INSERT {{ GRAPH <{SHAPES_GRAPH}> {{ {ord_triple} }} }}
                     WHERE {{ FILTER NOT EXISTS {{
                         GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> <{NS}order> ?o }} }} }}""")
@@ -1593,7 +1594,7 @@ class SHACLProfile:
             if valid_props:
                 await _sync_entity_links(class_uri, "class", valid_props)
 
-        dt_rows = await self.store._sparql_query("""
+        dt_rows = await self.store.query("""
             SELECT DISTINCT ?dt WHERE { ?s ?p ?o . FILTER(isLiteral(?o))
             BIND(DATATYPE(?o) AS ?dt) FILTER(?dt != "") }""")
         for r in dt_rows:
@@ -1603,7 +1604,7 @@ class SHACLProfile:
                 except Exception:
                     pass
 
-        prop_rows = await self.store._sparql_query("SELECT DISTINCT ?prop WHERE { ?s ?prop ?o . }")
+        prop_rows = await self.store.query("SELECT DISTINCT ?prop WHERE { ?s ?prop ?o . }")
         for r in prop_rows:
             if r["prop"] in SYSTEM_ANNOTATION_PROPERTIES:
                 try:
@@ -1659,7 +1660,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
         prop_shape_uri = shape_uri_for_entity(entity_uri, "property", state["prefix_map"])
         desired_classes = set(linked_uris)
 
-        cur_rows = await store._sparql_query(f"""
+        cur_rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -1671,7 +1672,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
 
         for cls in current_classes - desired_classes:
             class_shape_uri = shape_uri_for_entity(cls, "class", state["prefix_map"])
-            await store._sparql_update(f"""
+            await store.update(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }} }}
                 WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }} }}
@@ -1684,7 +1685,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
                     f"Class {cls} is not in the domain of property {entity_uri}")
             class_shape_uri = shape_uri_for_entity(cls, "class", state["prefix_map"])
             # Ensure class shape exists
-            await store._sparql_update(f"""
+            await store.update(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a sh:NodeShape ; sh:targetClass <{cls}> }}
@@ -1695,7 +1696,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
                     }}
                 }}
             """)
-            await store._sparql_update(f"""
+            await store.update(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
@@ -1711,7 +1712,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
         class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
         desired_props = set(linked_uris)
 
-        await store._sparql_update(f"""
+        await store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property ?ps }} }}
             WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property ?ps }} }}
@@ -1723,7 +1724,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
                 raise HTTPException(400,
                     f"Property {prop_uri} does not have class {entity_uri} in its domain")
             prop_shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-            await store._sparql_update(f"""
+            await store.update(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 INSERT {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a sh:PropertyShape ; sh:path <{prop_uri}> }}
@@ -1734,7 +1735,7 @@ async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]
                     }}
                 }}
             """)
-            await store._sparql_update(f"""
+            await store.update(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 INSERT DATA {{
                     GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
@@ -2014,7 +2015,7 @@ def load_saved_metadata():
             print(f"Warning: Could not load metadata {f}: {e}")
 
 # Create global service instances (after all class definitions)
-store = FusekiStore(
+store: RDFStore = FusekiStore(
     config=FUSEKI_CONFIG,
     label_properties=LABEL_PROPERTIES,
 )
@@ -2050,7 +2051,7 @@ async def lifespan(app: FastAPI):
                 f"CONSTRUCT {{ ?s ?p ?o }} "
                 f"WHERE {{ VALUES ?s {{ {values} }} . ?s ?p ?o . }}"
             )
-            turtle = await store._sparql_construct(query)
+            turtle = await store.construct(query)
             state["created_instances_graph"].parse(
                 data=turtle,
                 format="turtle",
@@ -2353,7 +2354,7 @@ async def upload_metadata(
 
     progress["phase"] = "Importing into Fuseki…"
     nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store._sparql_update("CLEAR DEFAULT")
+    await store.update("CLEAR DEFAULT")
     await store.bulk_load_nt(nt_data)
 
     if integrate_vocab:
@@ -2398,7 +2399,7 @@ async def create_instance(data: dict):
             instance_uri = f"urn:uuid:{uuid.uuid4()}"
             while True:
                 candidate = f"urn:uuid:{uuid.uuid4()}"
-                rows = await store._sparql_query(f"SELECT ?p WHERE {{ <{candidate}> ?p ?o }} LIMIT 1")
+                rows = await store.query(f"SELECT ?p WHERE {{ <{candidate}> ?p ?o }} LIMIT 1")
                 if not rows:
                     instance_uri = candidate
                     break
@@ -2416,7 +2417,7 @@ async def create_instance(data: dict):
                 safe = val.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                 lines.append(f'<{instance_uri}> <{pred}> "{safe}" .')
     triples = "\n".join(lines)
-    await store._sparql_update(f"INSERT DATA {{ {triples} }}")
+    await store.update(f"INSERT DATA {{ {triples} }}")
     g = Graph()
     g.parse(data=triples, format="turtle")
     for t in g: state["created_instances_graph"].add(t)
@@ -2441,9 +2442,15 @@ async def get_instance_syntax(uri: str, format: str = "turtle"):
         CONSTRUCT {{ <{uri}> ?p ?o . ?s ?p <{uri}> . }}
         WHERE {{ {{ <{uri}> ?p ?o . }} UNION {{ ?s ?p <{uri}> . }} }}
     """
-    resp = await store.client.get(store.query_url, params={"query": query}, headers={"Accept": accept})
-    resp.raise_for_status()
-    return Response(content=resp.text, media_type=accept)
+    rdf_data = await store.construct(
+        query,
+        accept=accept,
+    )
+
+    return Response(
+        content=rdf_data,
+        media_type=accept,
+    )
 
 @app.post("/api/instances/{uri:path}/star")
 async def toggle_star(uri: str):
@@ -2471,7 +2478,7 @@ async def get_instance(uri: str):
     if uri == "undefined" or not uri.startswith(("http://", "https://", "urn:")):
         raise HTTPException(400, "Invalid instance URI")
 
-    rows = await store._sparql_query(f"""
+    rows = await store.query(f"""
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
         SELECT ?type ?prop ?value WHERE {{
             <{uri}> a ?type .
@@ -2500,7 +2507,7 @@ async def get_instance(uri: str):
     blank_node_uris = [val for vals in props.values() for val in vals if val.startswith("urn:bnid:")]
     if blank_node_uris:
         values = " ".join(f"<{u}>" for u in blank_node_uris)
-        bnode_rows = await store._sparql_query(f"""
+        bnode_rows = await store.query(f"""
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
             SELECT ?bnode ?type ?prop ?value WHERE {{
@@ -2537,7 +2544,7 @@ async def update_instance(uri: str, data: dict):
     await check_disjoint_classes(class_uris)
     properties = data.get("properties", {})
     await shacl.validate_instance(class_uris, properties)
-    await store._sparql_update(f"DELETE {{ <{uri}> ?p ?o }} WHERE {{ <{uri}> ?p ?o }}")
+    await store.update(f"DELETE {{ <{uri}> ?p ?o }} WHERE {{ <{uri}> ?p ?o }}")
     triples = "\n".join(f"<{uri}> a <{c}> ." for c in class_uris)
     for pred, vals in properties.items():
         if not isinstance(vals, list): vals = [vals]
@@ -2547,15 +2554,15 @@ async def update_instance(uri: str, data: dict):
             else:
                 safe_val = val.replace("\\","\\\\").replace('"','\\"').replace("\n","\\n")
                 triples += f'\n<{uri}> <{pred}> "{safe_val}" .'
-    if triples: await store._sparql_update(f"INSERT DATA {{ {triples} }}")
+    if triples: await store.update(f"INSERT DATA {{ {triples} }}")
     await refresh_instances_from_store()
     invalidate_profile()
     return {"status": "ok"}
 
 @app.delete("/api/instances/{uri:path}")
 async def delete_instance(uri: str):
-    await store._sparql_update(f"DELETE WHERE {{ <{uri}> ?p ?o }}")
-    await store._sparql_update(f"DELETE WHERE {{ ?s ?p <{uri}> }}")
+    await store.update(f"DELETE WHERE {{ <{uri}> ?p ?o }}")
+    await store.update(f"DELETE WHERE {{ ?s ?p <{uri}> }}")
     state["created_instances"].discard(uri)
     for t in list(state["created_instances_graph"].triples((URIRef(uri), None, None))):
         state["created_instances_graph"].remove(t)
@@ -2591,7 +2598,7 @@ async def merge_file_metadata(filename: str):
     for t in mf["graph"]: state["merged_metadata_graph"].add(t)
     collapse_identical_blank_nodes(state["merged_metadata_graph"])
     nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store._sparql_update("CLEAR DEFAULT")
+    await store.update("CLEAR DEFAULT")
     await store.bulk_load_nt(nt_data)
     mf["instances_merged"] = True
     await refresh_instances_from_store()
@@ -2624,7 +2631,7 @@ async def delete_metadata(filename: str):
     for mf in state["metadata_files"]:
         for t in mf["graph"]: state["merged_metadata_graph"].add(t)
     for t in state["created_instances_graph"]: state["merged_metadata_graph"].add(t)
-    await store._sparql_update("CLEAR DEFAULT")
+    await store.update("CLEAR DEFAULT")
     if state["metadata_files"] or state["created_instances_graph"]:
         nt_data = state["merged_metadata_graph"].serialize(format="nt")
         await store.bulk_load_nt(nt_data)
@@ -2665,7 +2672,7 @@ async def get_entity_constraints(entity_uri: str):
     overrides = {}
 
     if etype in ("object_property", "datatype_property", "annotation_property"):
-        rows = await store._sparql_query(f"""
+        rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT ?pred ?val WHERE {{
@@ -2683,7 +2690,7 @@ async def get_entity_constraints(entity_uri: str):
             else: overrides[pred] = vals[0]
 
         prop_shape_uri = shape_uri_for_entity(entity_uri, "property", state["prefix_map"])
-        domain_rows = await store._sparql_query(f"""
+        domain_rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
@@ -2705,7 +2712,7 @@ async def get_entity_constraints(entity_uri: str):
 
     elif etype == "class":
         class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
-        rows = await store._sparql_query(f"""
+        rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT ?pred ?val WHERE {{
@@ -2722,7 +2729,7 @@ async def get_entity_constraints(entity_uri: str):
             if pred in multi_valued or len(vals) > 1: overrides[pred] = vals
             else: overrides[pred] = vals[0]
 
-        prop_shape_rows = await store._sparql_query(f"""
+        prop_shape_rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?propShape WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property ?propShape . }}
@@ -2731,7 +2738,7 @@ async def get_entity_constraints(entity_uri: str):
         if prop_shape_rows:
             prop_shape_uris = [r["propShape"] for r in prop_shape_rows]
             values = " ".join(f"<{u}>" for u in prop_shape_uris)
-            prop_uri_rows = await store._sparql_query(f"""
+            prop_uri_rows = await store.query(f"""
                 PREFIX sh: <http://www.w3.org/ns/shacl#>
                 SELECT ?propShape ?propUri WHERE {{
                     GRAPH <{SHAPES_GRAPH}> {{
@@ -2757,7 +2764,7 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
     validate_constraints(entity_uri, etype, constraints)
 
     if etype in ("object_property", "datatype_property", "annotation_property"):
-        rows = await store._sparql_query(f"""
+        rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?ps WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{ ?ps sh:path <{entity_uri}> . }}
@@ -2850,14 +2857,14 @@ async def update_profile_order(data: dict):
         order_val = item["order"]
         shape_uri = shape_uri_for_entity(uri, "property", state["prefix_map"])
 
-        await store._sparql_update(f"""
+        await store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order ?old }} }}
             WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order ?old }} }}
         """)
 
         ord_triple = _format_constraint_value(str(SH.order), order_val)
-        await store._sparql_update(f"""
+        await store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order {ord_triple} }} }}
         """)
@@ -2873,7 +2880,7 @@ async def check_instances_exist(data: dict):
     if not safe: return {"existing": []}
     values = " ".join(f"<{u}>" for u in safe)
     query = f"SELECT ?uri WHERE {{ VALUES ?uri {{ {values} }} {{ ?uri ?p ?o . }} UNION {{ ?s ?p ?uri . }} }}"
-    rows = await store._sparql_query(query)
+    rows = await store.query(query)
     return {"existing": list({r["uri"] for r in rows})}
 
 @app.post("/api/preferences/public/blank-nodes")
@@ -2942,7 +2949,7 @@ async def apply_base_iri():
     rewrite_uris_in_graph(state["merged_metadata_graph"], mapping)
     rewrite_uris_in_graph(state["created_instances_graph"], mapping)
     nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store._sparql_update("CLEAR DEFAULT")
+    await store.update("CLEAR DEFAULT")
     await store.bulk_load_nt(nt_data)
     await refresh_instances_from_store()
     await rebuild_used_uris()
@@ -2957,12 +2964,12 @@ async def get_raw_ontology(filename: str):
 
 @app.post("/api/admin/purge")
 async def purge_all_data():
-    try: await store._sparql_update("CLEAR ALL")
+    try: await store.update("CLEAR ALL")
     except Exception:
         try:
-            await store._sparql_update("CLEAR DEFAULT")
-            await store._sparql_update("CLEAR GRAPH <urn:profile:shapes>")
-            await store._sparql_update("CLEAR GRAPH <urn:profile:constraints>")
+            await store.update("CLEAR DEFAULT")
+            await store.update("CLEAR GRAPH <urn:profile:shapes>")
+            await store.update("CLEAR GRAPH <urn:profile:constraints>")
         except Exception: raise HTTPException(500, "Could not clear Fuseki store.")
 
     for directory in [ONTOLOGY_DIR, METADATA_DIR, CACHE_DIR]:

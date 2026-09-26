@@ -45,7 +45,7 @@ class FusekiStore:
 
     async def healthcheck(self) -> bool:
         """Check whether the configured Fuseki dataset is reachable."""
-        await self._sparql_query(
+        await self.query(
             "SELECT (1 AS ?ok) WHERE {}"
         )
         return True
@@ -56,8 +56,8 @@ class FusekiStore:
 
     # ── Core SPARQL operations ──────────────────────────────────────────
 
-    async def _sparql_query(self, sparql: str) -> List[Dict[str, str]]:
-        """Execute a SPARQL SELECT/ASK query and return the bindings."""
+    async def query(self, sparql: str) -> List[Dict[str, str]]:
+        """Execute a SPARQL SELECT query and return the bindings."""
         try:
             resp = await self.client.get(
                 self.query_url,
@@ -74,7 +74,7 @@ class FusekiStore:
         bindings = resp.json()["results"]["bindings"]
         return [{k: v["value"] for k, v in row.items()} for row in bindings]
 
-    async def _sparql_update(self, sparql: str):
+    async def update(self, sparql: str) -> None:
         """Execute a SPARQL UPDATE request."""
         try:
             resp = await self.client.post(
@@ -90,7 +90,11 @@ class FusekiStore:
                 detail=f"SPARQL query failed: {detail}",
             )
 
-    async def _sparql_construct(self, sparql: str, accept: str = "text/turtle") -> str:
+    async def construct(
+        self,
+        sparql: str,
+        accept: str = "text/turtle",
+    ) -> str:
         """Execute a SPARQL CONSTRUCT query and return the serialised RDF."""
         try:
             resp = await self.client.get(
@@ -140,7 +144,7 @@ class FusekiStore:
                 {" ".join(clauses)}
             }}
         """
-        rows = await self._sparql_query(query)
+        rows = await self.query(query)
         label_map = {}
         for r in rows:
             lbl = r.get("label")
@@ -153,7 +157,7 @@ class FusekiStore:
         Retrieve every instance (subject with rdf:type) from the default graph,
         including their properties and a best‑effort label.
         """
-        rows = await self._sparql_query("""
+        rows = await self.query("""
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT ?instance ?type ?prop ?value WHERE {
                 ?instance a ?type .
@@ -208,13 +212,13 @@ class FusekiStore:
     async def load_shapes_graph(self) -> Graph:
         """Return a copy of the SHACL shapes named graph."""
         query = f"CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ ?s ?p ?o }} }}"
-        turtle = await self._sparql_construct(query)
+        turtle = await self.construct(query)
         g = Graph()
         g.parse(data=turtle, format="turtle")
         return g
 
     async def insert_shapes(self, triples: str):
-        await self._sparql_update(
+        await self.update(
             f"PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
             f"INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ {triples} }} }}"
         )
@@ -223,13 +227,13 @@ class FusekiStore:
         shape_uri = shape_uri_for_entity(prop_uri, "property", prefix_map)
         class_shape = shape_uri_for_entity(class_uri, "class", prefix_map)
 
-        await self._sparql_update(
+        await self.update(
             f"PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
             f"INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ "
             f"<{shape_uri}> a sh:PropertyShape ; sh:path <{prop_uri}> . "
             f"}} }}"
         )
-        await self._sparql_update(
+        await self.update(
             f"PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
             f"INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ "
             f"<{class_shape}> sh:property <{shape_uri}> . "
@@ -240,7 +244,7 @@ class FusekiStore:
         shape_uri = shape_uri_for_entity(prop_uri, "property", prefix_map)
         class_shape = shape_uri_for_entity(class_uri, "class", prefix_map)
 
-        await self._sparql_update(
+        await self.update(
             f"PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
             f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ "
             f"<{class_shape}> sh:property <{shape_uri}> . "
@@ -250,6 +254,6 @@ class FusekiStore:
     async def remove_class_shape(self, class_uri: str, prefix_map: dict):
         """Remove a class shape and all its attached property shapes."""
         shape_uri = shape_uri_for_entity(class_uri, "class", prefix_map)
-        await self._sparql_update(
+        await self.update(
             f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}"
         )
