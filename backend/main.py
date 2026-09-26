@@ -55,15 +55,6 @@ from rdf_store import RDFStore
 from utils import shape_uri_for_entity, property_shape_uri
 from logging_config import logger
 
-# ---------------------------------------------------------------------------
-#  Constants & Configuration
-# ---------------------------------------------------------------------------
-RDF_FORMAT_MAP = {
-    "rdf": "xml", "owl": "xml", "xml": "xml",
-    "ttl": "turtle", "n3": "n3", "nt": "nt", "nq": "nquads",
-    "jsonld": "json-ld", "json": "json-ld",
-    "trix": "trix", "trig": "trig",
-}
 
 from paths import (
     ACTIVE_THEME_FILE,
@@ -76,14 +67,28 @@ from paths import (
     PLUGINS_CONFIG_FILE,
     PLUGINS_DIR,
     PREFERENCES_FILE,
+    reasoned_cache_metadata_path,
+    reasoned_cache_path,
     SETTINGS_FILE,
     STARS_FILE,
     THEMES_CONFIG_FILE,
     THEMES_DIR,
     ensure_data_dirs,
-    reasoned_cache_metadata_path,
-    reasoned_cache_path,
+    plugin_dir,
+    plugin_manifest_path,
+    theme_dir,
+    theme_manifest_path,
 )
+
+# ---------------------------------------------------------------------------
+#  Constants & Configuration
+# ---------------------------------------------------------------------------
+RDF_FORMAT_MAP = {
+    "rdf": "xml", "owl": "xml", "xml": "xml",
+    "ttl": "turtle", "n3": "n3", "nt": "nt", "nq": "nquads",
+    "jsonld": "json-ld", "json": "json-ld",
+    "trix": "trix", "trig": "trig",
+}
 
 # User-installed plugins are importable as a namespace package from the
 # user-data directory. This keeps plugin code outside the application tree.
@@ -1708,10 +1713,10 @@ def list_plugins():
     config = load_plugins_config()
     plugins = []
     for entry in os.listdir(PLUGINS_DIR):
-        plugin_path = os.path.join(PLUGINS_DIR, entry)
-        if not os.path.isdir(plugin_path):
+        plugin_path = plugin_dir(entry)
+        if not plugin_path.is_dir():
             continue
-        meta_file = os.path.join(plugin_path, "plugin.json")
+        meta_file = plugin_manifest_path(entry)
         if not os.path.exists(meta_file):
             continue
         try:
@@ -1733,13 +1738,13 @@ def load_plugins():
         return
     config = load_plugins_config()
     for entry in os.listdir(PLUGINS_DIR):
-        plugin_path = os.path.join(PLUGINS_DIR, entry)
+        plugin_path = plugin_dir(entry)
         if not os.path.isdir(plugin_path):
             continue
         if not config.get(entry, {}).get("enabled", False):
             continue
-        backend_init = os.path.join(plugin_path, "backend", "__init__.py")
-        if not os.path.exists(backend_init):
+        backend_init = plugin_path / "backend" / "__init__.py"
+        if not backend_init.is_file():
             continue
         try:
             mod = importlib.import_module(f"plugins.{entry}.backend")
@@ -1778,10 +1783,10 @@ def list_themes():
         return themes
     config = load_themes_config()
     for entry in os.listdir(THEMES_DIR):
-        theme_path = os.path.join(THEMES_DIR, entry)
-        if not os.path.isdir(theme_path):
+        theme_path = theme_dir(entry)
+        if not theme_path.is_dir():
             continue
-        meta_file = os.path.join(theme_path, "theme.json")
+        meta_file = theme_manifest_path(entry)
         if not os.path.exists(meta_file):
             continue
         try:
@@ -3028,7 +3033,7 @@ async def upload_theme(file: UploadFile = File(...)):
         src = os.path.join(tmp_dir, theme_folder)
         if not os.path.exists(os.path.join(src, "theme.json")):
             raise HTTPException(400, "Missing theme.json")
-        dest = os.path.join(THEMES_DIR, theme_folder)
+        dest = theme_dir(theme_folder)
         if os.path.exists(dest): raise HTTPException(400, f"Theme '{theme_folder}' already exists.")
         os.makedirs(THEMES_DIR, exist_ok=True)
         shutil.move(src, dest)
@@ -3056,7 +3061,7 @@ async def delete_theme(name: str):
     if name == "default": raise HTTPException(400, "The default theme cannot be deleted.")
     config = load_themes_config()
     if name not in config: raise HTTPException(404, "Theme not found")
-    theme_path = os.path.join(THEMES_DIR, name)
+    theme_path = theme_dir(name)
     if os.path.exists(theme_path): shutil.rmtree(theme_path)
     del config[name]
     save_themes_config(config)
@@ -3065,14 +3070,23 @@ async def delete_theme(name: str):
 @app.post("/api/themes/set-active")
 async def set_active_theme_endpoint(data: dict):
     theme = data.get("theme", "default")
-    if theme != "default" and not os.path.isdir(os.path.join(THEMES_DIR, theme)):
+    if theme != "default" and not theme_dir(theme).is_dir():
         theme = _require_safe_path_component(theme, "theme name")
         raise HTTPException(404, "Theme not found")
     set_active_theme(theme)
     settings = load_settings()
     settings["active_theme"] = theme
     save_settings(settings)
-    return {"status": "ok", "message": f"Active theme set to '{theme}'. Restart frontend to apply."}
+    return {
+    "status": "ok",
+    "theme": theme,
+    "requires_frontend_restart": True,
+    "requires_frontend_rebuild": theme != "default",
+    "message": (
+        f"Active theme set to '{theme}'. "
+        "The frontend must be rebuilt and restarted to apply the theme."
+    ),
+}
 
 @app.get("/api/progress")
 async def get_progress():

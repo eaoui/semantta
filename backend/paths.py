@@ -58,6 +58,8 @@ METADATA_DIR = DATA_DIR / "metadata"
 CACHE_DIR = DATA_DIR / "cache"
 PLUGINS_DIR = DATA_DIR / "plugins"
 THEMES_DIR = DATA_DIR / "themes"
+PLUGIN_CONFIG_NAME = "plugin.json"
+THEME_CONFIG_NAME = "theme.json"
 LOG_DIR = DATA_DIR / "logs"
 
 INDEX_CACHE_FILE = CACHE_DIR / "_indexes.json"
@@ -72,6 +74,25 @@ ACTIVE_THEME_FILE = DATA_DIR / "active-theme.json"
 
 # Application-owned immutable resource.
 OWL_FILE = APP_DIR / "vocab" / "owl.ttl"
+
+def plugin_dir(name: str) -> Path:
+    """Return the directory containing a user-installed plugin."""
+    return PLUGINS_DIR / name
+
+
+def theme_dir(name: str) -> Path:
+    """Return the directory containing a user-installed theme."""
+    return THEMES_DIR / name
+
+
+def plugin_manifest_path(name: str) -> Path:
+    """Return the manifest path of a user-installed plugin."""
+    return plugin_dir(name) / PLUGIN_CONFIG_NAME
+
+
+def theme_manifest_path(name: str) -> Path:
+    """Return the manifest path of a user-installed theme."""
+    return theme_dir(name) / THEME_CONFIG_NAME
 
 
 def reasoned_cache_path(filename: str) -> Path:
