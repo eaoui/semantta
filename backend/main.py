@@ -16,9 +16,11 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 import zipfile
+from pathlib import Path
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -49,24 +51,28 @@ RDF_FORMAT_MAP = {
     "trix": "trix", "trig": "trig",
 }
 
-_BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(_BASE_DIR, "data")
-PLUGINS_DIR = os.path.join(_BASE_DIR, "plugins")
-THEMES_DIR = os.path.join(DATA_DIR, "themes")
-ONTOLOGY_DIR = os.path.join(DATA_DIR, "ontologies")
-METADATA_DIR = os.path.join(DATA_DIR, "metadata")
-CACHE_DIR = os.path.join(DATA_DIR, "cache")
-INDEX_CACHE_FILE = os.path.join(CACHE_DIR, "_indexes.json")
-STARS_FILE = os.path.join(DATA_DIR, "stars.json")
-
-OWL_FILE = os.path.join(_BASE_DIR, "vocab", "owl.ttl")
-PREFERENCES_FILE = os.path.join(DATA_DIR, "preferences.json")
-SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-PLUGINS_CONFIG_FILE = os.path.join(DATA_DIR, "plugins.json")
-THEMES_CONFIG_FILE = os.path.join(DATA_DIR, "themes.json")
-FRONTEND_ACTIVE_THEME_FILE = os.path.join(
-    _BASE_DIR, "..", "frontend", "config", "active-theme.json"
+from paths import (
+    ACTIVE_THEME_FILE,
+    CACHE_DIR,
+    DATA_DIR,
+    INDEX_CACHE_FILE,
+    METADATA_DIR,
+    ONTOLOGY_DIR,
+    OWL_FILE,
+    PLUGINS_CONFIG_FILE,
+    PLUGINS_DIR,
+    PREFERENCES_FILE,
+    SETTINGS_FILE,
+    STARS_FILE,
+    THEMES_CONFIG_FILE,
+    THEMES_DIR,
+    ensure_data_dirs,
 )
+
+# User-installed plugins are importable as a namespace package from the
+# user-data directory. This keeps plugin code outside the application tree.
+if str(DATA_DIR) not in sys.path:
+    sys.path.insert(0, str(DATA_DIR))
 
 SH = Namespace("http://www.w3.org/ns/shacl#")
 GENERIC_RANGES = {str(OWL.Thing), str(RDFS.Resource)}
@@ -1784,8 +1790,8 @@ def list_themes():
     return themes
 
 def set_active_theme(theme_folder: str):
-    os.makedirs(os.path.dirname(FRONTEND_ACTIVE_THEME_FILE), exist_ok=True)
-    with open(FRONTEND_ACTIVE_THEME_FILE, "w") as f:
+    os.makedirs(os.path.dirname(ACTIVE_THEME_FILE), exist_ok=True)
+    with open(ACTIVE_THEME_FILE, "w") as f:
         json.dump({"active_theme": theme_folder}, f)
 
 # ---------------------------------------------------------------------------
@@ -1916,6 +1922,7 @@ shacl = SHACLProfile(store, on_change=invalidate_profile)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    ensure_data_dirs()
     add_default_prefixes()
     progress["phase"] = "Loading ontologies…"
     load_saved_ontologies()

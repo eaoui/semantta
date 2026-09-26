@@ -17,13 +17,10 @@ frontend/.cache
 frontend/dist
 frontend/node_modules
 
-# Active theme file (written by backend, read by frontend build)
-frontend/config/active-theme.json
-
 # ─────────────────────────────────────────────────────────
-# Backend user data (auto‑generated, not to be committed)
+# User data (auto-generated, not to be committed)
 # ─────────────────────────────────────────────────────────
-backend/data/**
+data/**
 
 # ─────────────────────────────────────────────────────────
 # Logs

@@ -124,18 +124,18 @@ semantta/
 │   ├── fuseki_store.py      # Async Fuseki client
 │   ├── utils.py             # URI helpers
 │   ├── vocab/               # OWL vocabulary for reasoning
-│   ├── data/                # Runtime data (cache, uploads, settings)
 │   └── plugins/             # User‑installed plugins
-├── frontend/
-│   └── app/
-│       ├── components/      # Vue components
-│       ├── composables/     # Reusable logic
-│       ├── layouts/         # Admin and public layouts
-│       ├── pages/           # Nuxt pages (admin & public)
-│       ├── stores/          # Pinia store
-│       ├── types/           # TypeScript interfaces
-│       └── ...
-└── docs
+├── data/                    # User data (development only; ignored by Git)
+├── docs/                    # Documentation
+└── frontend/
+    └── app/
+        ├── components/      # Vue components
+        ├── composables/     # Reusable logic
+        ├── layouts/         # Admin and public layouts
+        ├── pages/           # Nuxt pages (admin & public)
+        ├── stores/          # Pinia store
+        ├── types/           # TypeScript interfaces
+        └── ...
 ```
 
 ## Contributing

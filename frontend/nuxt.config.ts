@@ -3,7 +3,12 @@ import fs from 'fs'
 import path from 'path'
 
 // ── Active theme detection (written by backend settings) ──────────────
-const activeThemeFile = path.resolve(__dirname, 'config', 'active-theme.json')
+const activeThemeFile = path.resolve(
+  __dirname,
+  '..',
+  'data',
+  'active-theme.json'
+)
 let activeTheme = 'default'
 try {
   const config = JSON.parse(fs.readFileSync(activeThemeFile, 'utf-8'))
@@ -15,7 +20,13 @@ try {
 // ── Theme layers (user‑installed themes) ──────────────────────────────
 const themeLayers = []
 if (activeTheme !== 'default') {
-  const themePath = path.resolve(__dirname, '..', 'backend', 'data', 'themes', activeTheme)
+  const themePath = path.resolve(
+    __dirname,
+    '..',
+    'data',
+    'themes',
+    activeTheme
+  )
   if (fs.existsSync(themePath)) {
     themeLayers.push(themePath)
   }
@@ -60,7 +71,7 @@ export default defineNuxtConfig({
     head: {
       link: [
         { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
-        { rel: 'alternate icon', type: 'image/png', href: '/favicon.png' }
+        { rel: 'icon', type: 'image/png', href: '/favicon.png' }
       ],
       script: [
         {
