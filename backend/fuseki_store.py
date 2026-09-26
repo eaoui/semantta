@@ -10,6 +10,7 @@ from fastapi import HTTPException
 import httpx
 from rdflib import Graph
 
+from config import FUSEKI_CONFIG, FusekiConfig
 from utils import shape_uri_for_entity
 
 SHAPES_GRAPH = "urn:profile:shapes"
@@ -20,16 +21,23 @@ class FusekiStore:
 
     def __init__(
         self,
-        dataset_url: str = "http://localhost:3030/obmms",
+        dataset_url: Optional[str] = None,
         label_properties: Optional[List[str]] = None,
+        config: Optional[FusekiConfig] = None,
     ):
-        self.dataset = dataset_url
-        self.query_url = f"{dataset_url}/query"
-        self.update_url = f"{dataset_url}/update"
-        self.data_url = f"{dataset_url}/data"
-        self.client = httpx.AsyncClient(timeout=120.0)
+        fuseki_config = config or FUSEKI_CONFIG
 
-        # Optional list of label property URIs (rdfs:label sub‑properties)
+        # Explicit dataset_url remains supported for compatibility and testing.
+        dataset_url = dataset_url or fuseki_config.dataset_url
+        timeout = fuseki_config.timeout
+
+        self.dataset = dataset_url.rstrip("/")
+        self.query_url = f"{self.dataset}/query"
+        self.update_url = f"{self.dataset}/update"
+        self.data_url = f"{self.dataset}/data"
+        self.client = httpx.AsyncClient(timeout=timeout)
+
+        # Optional list of label property URIs (rdfs:label sub-properties)
         self.label_properties: List[str] = label_properties or []
 
     async def close(self):

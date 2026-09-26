@@ -40,6 +40,7 @@ from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, RDFS, split_uri
 
 from fuseki_store import FusekiStore, SHAPES_GRAPH
+from config import FUSEKI_CONFIG
 from utils import shape_uri_for_entity, property_shape_uri
 
 # ---------------------------------------------------------------------------
@@ -2013,8 +2014,10 @@ def load_saved_metadata():
             print(f"Warning: Could not load metadata {f}: {e}")
 
 # Create global service instances (after all class definitions)
-FUSEKI_DATASET_URL = os.getenv("FUSEKI_DATASET_URL", "http://localhost:3030/obmms")
-store = FusekiStore(dataset_url=FUSEKI_DATASET_URL, label_properties=LABEL_PROPERTIES)
+store = FusekiStore(
+    config=FUSEKI_CONFIG,
+    label_properties=LABEL_PROPERTIES,
+)
 ap = ApplicationProfile(store)
 shacl = SHACLProfile(store, on_change=invalidate_profile)
 
