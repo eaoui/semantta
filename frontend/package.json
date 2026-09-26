@@ -1,13 +1,20 @@
 {
   "name": "semantta-frontend",
   "type": "module",
+  "version": "0.1.0",
+  "description": "An Ontology-Based Linked Data Management System",
+  "author": "Ehsan Rouhi",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "start": "node .output/server/index.mjs",
+    "electron": "electron .",
+    "electron:generate": "nuxt generate",
+    "electron:package": "npm run electron:generate && electron-builder --dir",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
@@ -25,7 +32,22 @@
     "@types/node": "^26.1.0",
     "@types/sortablejs": "^1.15.9",
     "@vite-pwa/nuxt": "^1.1.1",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
     "nuxt-phosphor-icons": "^2.3.3",
     "tailwindcss": "^4.3.2"
+  },
+  "build": {
+    "appId": "org.eaoui.semantta",
+    "productName": "Semantta",
+    "asar": true,
+    "directories": {
+      "output": "out"
+    },
+    "files": [
+      "electron/**/*",
+      ".output/public/**/*",
+      "package.json"
+    ]
   }
 }

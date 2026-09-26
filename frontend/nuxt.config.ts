@@ -38,6 +38,8 @@ if (activeTheme !== 'default') {
 }
 
 export default defineNuxtConfig({
+  ssr: false,
+
   devtools: {
     enabled: process.env.NODE_ENV !== 'production',
   },
@@ -65,6 +67,10 @@ export default defineNuxtConfig({
     plugins: [
       tailwindcss(),
     ],
+
+    server: {
+      strictPort: true,
+    },
 
     optimizeDeps: {
       include: [
