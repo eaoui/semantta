@@ -58,8 +58,10 @@ METADATA_DIR = DATA_DIR / "metadata"
 CACHE_DIR = DATA_DIR / "cache"
 PLUGINS_DIR = DATA_DIR / "plugins"
 THEMES_DIR = DATA_DIR / "themes"
+LOG_DIR = DATA_DIR / "logs"
 
 INDEX_CACHE_FILE = CACHE_DIR / "_indexes.json"
+LOG_FILE = LOG_DIR / "semantta.log"
 
 STARS_FILE = DATA_DIR / "stars.json"
 PREFERENCES_FILE = DATA_DIR / "preferences.json"
@@ -91,5 +93,6 @@ def ensure_data_dirs() -> None:
         CACHE_DIR,
         PLUGINS_DIR,
         THEMES_DIR,
+        LOG_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)

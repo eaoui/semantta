@@ -53,6 +53,7 @@ from config import FUSEKI_CONFIG
 from fuseki_store import FusekiStore, SHAPES_GRAPH
 from rdf_store import RDFStore
 from utils import shape_uri_for_entity, property_shape_uri
+from logging_config import logger
 
 # ---------------------------------------------------------------------------
 #  Constants & Configuration
@@ -1751,7 +1752,7 @@ def load_plugins():
                     "ap": ap,
                 })
         except Exception as e:
-            print(f"Failed to load plugin {entry}: {e}")
+            logger.exception("Failed to load plugin %s", entry)
 
 def load_themes_config():
     if not os.path.exists(THEMES_CONFIG_FILE):
@@ -1916,7 +1917,7 @@ def load_saved_ontologies():
                 state["combined_onto_graph"].add(t)
             update_prefix_map(g, state["prefix_map"])
         except Exception as e:
-            print(f"Warning: Could not load {f}: {e}")
+            logger.warning("Could not load ontology %s: %s", f, e, exc_info=True)
 
 def load_saved_metadata():
     if not os.path.isdir(METADATA_DIR):
@@ -1957,7 +1958,7 @@ def load_saved_metadata():
                             if not uri.startswith("urn:bnid:"):
                                 state["non_integrated_uris"].add(uri)
         except Exception as e:
-            print(f"Warning: Could not load metadata {f}: {e}")
+            logger.warning("Could not load metadata %s: %s", f, e, exc_info=True)
 
 # Create global service instances (after all class definitions)
 store: RDFStore = FusekiStore(
@@ -1972,6 +1973,8 @@ async def lifespan(app: FastAPI):
     ensure_data_dirs()
 
     try:
+        logger.info("Starting Semantta backend")
+
         add_default_prefixes()
 
         progress["phase"] = "Loading ontologies…"
@@ -2025,11 +2028,17 @@ async def lifespan(app: FastAPI):
         await seed_core_active_entities()
 
         progress["phase"] = ""
+        logger.info("Semantta backend is ready")
+
         yield
 
     finally:
         progress["phase"] = "Shutting down…"
+        logger.info("Shutting down Semantta backend")
+
         await store.close()
+
+        logger.info("Semantta backend stopped")
         progress["phase"] = ""
 
 app = FastAPI(lifespan=lifespan)
