@@ -38,7 +38,9 @@ if (activeTheme !== 'default') {
 }
 
 export default defineNuxtConfig({
-  devtools: { enabled: true },
+  devtools: {
+    enabled: process.env.NODE_ENV !== 'production',
+  },
 
   modules: [
     '@pinia/nuxt',
@@ -129,7 +131,7 @@ export default defineNuxtConfig({
     },
     // Enable PWA in development (disabled by default)
     devOptions: {
-      enabled: true,
+      enabled: process.env.NODE_ENV !== 'production',
       type: 'module',
     },
   },
