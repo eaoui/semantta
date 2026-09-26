@@ -254,7 +254,7 @@ def is_valid_uri(uri: str) -> bool:
         uri.startswith(("http://", "https://", "urn:"))
     )
 
-def _require_safe_path_component(name: str, label: str = "name") -> str:
+def _require_safe_path_component(name: str | None, label: str = "name") -> str:
     """
     Raise HTTP 400 if *name* contains characters that could be used
     for path traversal (``..``, ``/``, ``\\``) or other unsafe chars.
