@@ -2,31 +2,36 @@ import tailwindcss from '@tailwindcss/vite'
 import fs from 'fs'
 import path from 'path'
 
-// ── Active theme detection (written by backend settings) ──────────────
-const activeThemeFile = path.resolve(
-  __dirname,
-  '..',
-  'data',
-  'active-theme.json'
+// ── Development-time active theme detection ───────────────────────────
+
+const dataDir = path.resolve(__dirname, '..', 'data')
+
+const activeThemeFile = path.join(
+  dataDir,
+  'active-theme.json',
 )
+
 let activeTheme = 'default'
+
 try {
-  const config = JSON.parse(fs.readFileSync(activeThemeFile, 'utf-8'))
+  const config = JSON.parse(
+    fs.readFileSync(activeThemeFile, 'utf-8'),
+  )
+
   activeTheme = config.active_theme || 'default'
 } catch {
-  // file not found – stay with the built‑in default theme
+  // File not found or invalid: use the built-in default theme.
 }
 
-// ── Theme layers (user‑installed themes) ──────────────────────────────
-const themeLayers = []
+const themeLayers: string[] = []
+
 if (activeTheme !== 'default') {
-  const themePath = path.resolve(
-    __dirname,
-    '..',
-    'data',
+  const themePath = path.join(
+    dataDir,
     'themes',
-    activeTheme
+    activeTheme,
   )
+
   if (fs.existsSync(themePath)) {
     themeLayers.push(themePath)
   }
