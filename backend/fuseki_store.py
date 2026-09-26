@@ -35,6 +35,13 @@ class FusekiStore:
     async def close(self):
         await self.client.aclose()
 
+    async def healthcheck(self) -> bool:
+        """Check whether the configured Fuseki dataset is reachable."""
+        await self._sparql_query(
+            "SELECT (1 AS ?ok) WHERE {}"
+        )
+        return True
+
     def set_label_properties(self, uris: List[str]):
         """Update the label property list used for instance labelling."""
         self.label_properties = uris[:]

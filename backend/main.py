@@ -31,6 +31,7 @@ load_dotenv()
 import owlrl
 import pyshacl
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -2053,6 +2054,33 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/api/health")
+async def health_check():
+    """
+    Return application readiness and RDF datastore availability.
+
+    A 200 response means the backend is running and Fuseki is reachable.
+    A 503 response means the backend is running but its RDF datastore is
+    unavailable.
+    """
+    try:
+        await store.healthcheck()
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "backend": "ok",
+                "fuseki": "unavailable",
+            },
+        )
+
+    return {
+        "status": "ok",
+        "backend": "ok",
+        "fuseki": "ok",
+    }
 
 # ===========================================================================
 #  API ENDPOINTS
