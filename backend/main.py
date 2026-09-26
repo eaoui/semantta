@@ -2021,36 +2021,67 @@ shacl = SHACLProfile(store, on_change=invalidate_profile)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_data_dirs()
-    add_default_prefixes()
-    progress["phase"] = "Loading ontologies…"
-    load_saved_ontologies()
-    progress["phase"] = "Building indexes…"
-    rebuild_precomputed()
-    store.set_label_properties(LABEL_PROPERTIES)
-    progress["phase"] = "Loading metadata…"
-    load_saved_metadata()
-    # Load starred instances
-    if os.path.exists(STARS_FILE):
-        with open(STARS_FILE) as f:
-            state["starred_instance_uris"] = set(json.load(f))
-    if state["created_instances"]:
-        values = " ".join(f"<{u}>" for u in state["created_instances"])
-        query = f"CONSTRUCT {{ ?s ?p ?o }} WHERE {{ VALUES ?s {{ {values} }} . ?s ?p ?o . }}"
-        turtle = await store._sparql_construct(query)
-        state["created_instances_graph"].parse(data=turtle, format="turtle")
-    await rebuild_used_uris()
-    load_plugins()
-    state["display_format"] = load_preferences().get("display_format", "iri")
-    state["public_display_blank_nodes"] = load_preferences().get("public_display_blank_nodes", False)
-    settings = load_settings()
-    state["site_title"] = settings.get("site_title", "Semantta")
-    state["base_iri"] = settings.get("base_iri", "")
-    active_theme = settings.get("active_theme", "default")
-    set_active_theme(active_theme)
-    await seed_core_active_entities()
-    progress["phase"] = ""
-    yield
-    await store.close()
+
+    try:
+        add_default_prefixes()
+
+        progress["phase"] = "Loading ontologies…"
+        load_saved_ontologies()
+
+        progress["phase"] = "Building indexes…"
+        rebuild_precomputed()
+
+        store.set_label_properties(LABEL_PROPERTIES)
+
+        progress["phase"] = "Loading metadata…"
+        load_saved_metadata()
+
+        # Load starred instances
+        if os.path.exists(STARS_FILE):
+            with open(STARS_FILE) as f:
+                state["starred_instance_uris"] = set(json.load(f))
+
+        if state["created_instances"]:
+            values = " ".join(f"<{u}>" for u in state["created_instances"])
+            query = (
+                f"CONSTRUCT {{ ?s ?p ?o }} "
+                f"WHERE {{ VALUES ?s {{ {values} }} . ?s ?p ?o . }}"
+            )
+            turtle = await store._sparql_construct(query)
+            state["created_instances_graph"].parse(
+                data=turtle,
+                format="turtle",
+            )
+
+        await rebuild_used_uris()
+
+        load_plugins()
+
+        state["display_format"] = load_preferences().get(
+            "display_format",
+            "iri",
+        )
+        state["public_display_blank_nodes"] = load_preferences().get(
+            "public_display_blank_nodes",
+            False,
+        )
+
+        settings = load_settings()
+        state["site_title"] = settings.get("site_title", "Semantta")
+        state["base_iri"] = settings.get("base_iri", "")
+
+        active_theme = settings.get("active_theme", "default")
+        set_active_theme(active_theme)
+
+        await seed_core_active_entities()
+
+        progress["phase"] = ""
+        yield
+
+    finally:
+        progress["phase"] = "Shutting down…"
+        await store.close()
+        progress["phase"] = ""
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
