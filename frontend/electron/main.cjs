@@ -7,6 +7,8 @@ const {
 } = require('electron')
 
 const path = require('node:path')
+const fs = require('node:fs')
+const os = require('node:os')
 
 const { spawn } = require('node:child_process')
 const http = require('node:http')
@@ -19,9 +21,277 @@ const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = 8000
 const BACKEND_STARTUP_TIMEOUT = 30000
 
+const FUSEKI_HOST = '127.0.0.1'
+const FUSEKI_PORT = 3030
+const FUSEKI_DATASET_NAME = 'obmms'
+
 let mainWindow = null
 let backendProcess = null
 
+
+function getSemanttaDataDir() {
+  const home = os.homedir()
+
+  let base
+
+  if (process.platform === 'win32') {
+    base =
+      process.env.APPDATA ||
+      path.join(
+        home,
+        'AppData',
+        'Roaming',
+      )
+  } else if (process.platform === 'darwin') {
+    base = path.join(
+      home,
+      'Library',
+      'Application Support',
+    )
+  } else {
+    base =
+      process.env.XDG_DATA_HOME ||
+      path.join(
+        home,
+        '.local',
+        'share',
+      )
+  }
+
+  return path.join(
+    base,
+    'Semantta',
+  )
+}
+
+function getFusekiExecutable() {
+  if (process.platform === 'win32') {
+    return path.join(
+      process.resourcesPath,
+      'runtime',
+      'fuseki',
+      'fuseki-server.bat',
+    )
+  }
+
+  return path.join(
+    process.resourcesPath,
+    'runtime',
+    'fuseki',
+    'fuseki-server',
+  )
+}
+
+function getJavaHome() {
+  return path.join(
+    process.resourcesPath,
+    'runtime',
+    'java',
+  )
+}
+
+let fusekiProcess = null
+
+function startFuseki() {
+  const fusekiExecutable = getFusekiExecutable()
+  const javaHome = getJavaHome()
+
+  const databaseDir = path.join(
+    getSemanttaDataDir(),
+    'database',
+    'fuseki',
+  )
+
+  fs.mkdirSync(
+    databaseDir,
+    {
+      recursive: true,
+    },
+  )
+
+  const args = [
+    '--tdb2',
+    `--loc=${databaseDir}`,
+    '--update',
+    '--localhost',
+    `--port=${FUSEKI_PORT}`,
+    `/${FUSEKI_DATASET_NAME}`,
+  ]
+
+  const env = {
+    ...process.env,
+    JAVA_HOME: javaHome,
+    PATH: [
+      path.join(
+        javaHome,
+        'bin',
+      ),
+      process.env.PATH || '',
+    ].join(
+      process.platform === 'win32'
+        ? ';'
+        : ':',
+    ),
+  }
+
+  if (process.platform === 'win32') {
+    fusekiProcess = spawn(
+      fusekiExecutable,
+      args,
+      {
+        cwd: path.dirname(
+          fusekiExecutable,
+        ),
+        env,
+        shell: true,
+        windowsHide: true,
+        stdio: 'ignore',
+      },
+    )
+  } else {
+    fusekiProcess = spawn(
+      fusekiExecutable,
+      args,
+      {
+        cwd: path.dirname(
+          fusekiExecutable,
+        ),
+        env,
+        detached: true,
+        stdio: 'ignore',
+      },
+    )
+  }
+
+  fusekiProcess.on(
+    'error',
+    (error) => {
+      console.error(
+        'Failed to start Fuseki:',
+        error,
+      )
+    },
+  )
+
+  fusekiProcess.on(
+    'exit',
+    (code, signal) => {
+      console.log(
+        `Fuseki exited: code=${code}, signal=${signal}`,
+      )
+
+      fusekiProcess = null
+    },
+  )
+}
+
+function waitForFuseki() {
+  const startedAt = Date.now()
+
+  return new Promise(
+    (resolve, reject) => {
+      const check = () => {
+        if (
+          Date.now() - startedAt >
+          BACKEND_STARTUP_TIMEOUT
+        ) {
+          reject(
+            new Error(
+              'Timed out waiting for Fuseki.',
+            ),
+          )
+          return
+        }
+
+        const request = http.get(
+          `http://${FUSEKI_HOST}:${FUSEKI_PORT}/$/ping`,
+          (response) => {
+            response.resume()
+
+            if (
+              response.statusCode === 200
+            ) {
+              resolve()
+              return
+            }
+
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+
+        request.on(
+          'error',
+          () => {
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+
+        request.setTimeout(
+          1000,
+          () => {
+            request.destroy()
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+      }
+
+      check()
+    },
+  )
+}
+
+function stopFuseki() {
+  if (!fusekiProcess) {
+    return
+  }
+
+  const pid =
+    fusekiProcess.pid
+
+  if (
+    process.platform === 'win32'
+  ) {
+    require('node:child_process').spawn(
+      'taskkill',
+      [
+        '/pid',
+        String(pid),
+        '/t',
+        '/f',
+      ],
+      {
+        windowsHide: true,
+        stdio: 'ignore',
+      },
+    )
+  } else if (pid) {
+    try {
+      process.kill(
+        -pid,
+        'SIGTERM',
+      )
+    } catch {
+      try {
+        fusekiProcess.kill(
+          'SIGTERM',
+        )
+      } catch {
+        // Fuseki is already stopped.
+      }
+    }
+  }
+
+  fusekiProcess = null
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -158,7 +428,6 @@ function getBackendExecutable() {
   )
 }
 
-
 function startBackend() {
   const executablePath = getBackendExecutable()
 
@@ -282,20 +551,25 @@ app.whenReady().then(async () => {
 
   if (app.isPackaged) {
     try {
+      startFuseki()
+      await waitForFuseki()
+
       startBackend()
       await waitForBackend()
     } catch (error) {
       console.error(
-        'Unable to start the Semantta backend:',
+        'Unable to start Semantta services:',
         error,
       )
 
       dialog.showErrorBox(
-        'Semantta Backend Error',
-        'Semantta could not start its backend service.',
+        'Semantta Startup Error',
+        'Semantta could not start its required backend services.',
       )
 
       stopBackend()
+      stopFuseki()
+
       app.quit()
       return
     }
@@ -315,6 +589,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   stopBackend()
+  stopFuseki()
 })
 
 

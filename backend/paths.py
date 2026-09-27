@@ -65,6 +65,8 @@ LOG_DIR = DATA_DIR / "logs"
 INDEX_CACHE_FILE = CACHE_DIR / "_indexes.json"
 LOG_FILE = LOG_DIR / "semantta.log"
 
+FUSEKI_DATA_DIR = DATA_DIR / "database" / "fuseki"
+
 STARS_FILE = DATA_DIR / "stars.json"
 PREFERENCES_FILE = DATA_DIR / "preferences.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
@@ -115,5 +117,6 @@ def ensure_data_dirs() -> None:
         PLUGINS_DIR,
         THEMES_DIR,
         LOG_DIR,
+        FUSEKI_DATA_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)

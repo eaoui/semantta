@@ -14,8 +14,9 @@
     "start": "node .output/server/index.mjs",
     "electron": "electron .",
     "electron:generate": "nuxt generate",
+    "electron:prepare-runtime": "python scripts/prepare_runtime.py",
     "electron:build-backend": "python ../backend/build_backend.py",
-    "electron:package": "npm run electron:build-backend && npm run electron:generate && electron-builder --dir",
+    "electron:package": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder --dir",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
@@ -57,6 +58,14 @@
         "filter": [
           "SemanttaBackend*"
         ]
+      },
+      {
+        "from": "runtime/fuseki",
+        "to": "runtime/fuseki"
+      },
+      {
+        "from": "runtime/java",
+        "to": "runtime/java"
       }
     ]
   }
