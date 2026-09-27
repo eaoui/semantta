@@ -14,7 +14,8 @@
     "start": "node .output/server/index.mjs",
     "electron": "electron .",
     "electron:generate": "nuxt generate",
-    "electron:package": "npm run electron:generate && electron-builder --dir",
+    "electron:build-backend": "python ../backend/build_backend.py",
+    "electron:package": "npm run electron:build-backend && npm run electron:generate && electron-builder --dir",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
@@ -48,6 +49,15 @@
       "electron/**/*",
       ".output/public/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist",
+        "to": "backend",
+        "filter": [
+          "SemanttaBackend*"
+        ]
+      }
     ]
   }
 }
