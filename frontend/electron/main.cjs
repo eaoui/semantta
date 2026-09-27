@@ -2,7 +2,7 @@ const {
   app,
   BrowserWindow,
   dialog,
-  net,
+  net: electronNet,
   protocol,
 } = require('electron')
 
@@ -12,25 +12,71 @@ const os = require('node:os')
 
 const { spawn } = require('node:child_process')
 const http = require('node:http')
+const net = require('node:net')
 
 const DEV_SERVER_URL = 'http://localhost:3000'
 const APP_SCHEME = 'semantta'
 const APP_HOST = 'bundle'
 
 const BACKEND_HOST = '127.0.0.1'
-const BACKEND_PORT = 8000
-const BACKEND_BASE_URL =
-  `http://${BACKEND_HOST}:${BACKEND_PORT}`
+const FUSEKI_HOST = '127.0.0.1'
+const FUSEKI_DATASET_NAME = 'obmms'
 
 const BACKEND_STARTUP_TIMEOUT = 30000
+const FUSEKI_STARTUP_TIMEOUT = 30000
 
-const FUSEKI_HOST = '127.0.0.1'
-const FUSEKI_PORT = 3030
-const FUSEKI_DATASET_NAME = 'obmms'
+const MAX_SERVICE_START_ATTEMPTS = 5
+
+let backendPort = null
+let fusekiPort = null
+
+let backendBaseUrl = null
+let fusekiBaseUrl = null
 
 let mainWindow = null
 let backendProcess = null
 
+function getElectronLogFile() {
+  return path.join(
+    getSemanttaDataDir(),
+    'logs',
+    'electron.log',
+  )
+}
+
+
+function log(message) {
+  const timestamp =
+    new Date().toISOString()
+
+  const line =
+    `${timestamp} | ${message}\n`
+
+  console.log(line.trim())
+
+  try {
+    const logFile =
+      getElectronLogFile()
+
+    fs.mkdirSync(
+      path.dirname(logFile),
+      {
+        recursive: true,
+      },
+    )
+
+    fs.appendFileSync(
+      logFile,
+      line,
+      'utf8',
+    )
+  } catch (error) {
+    console.error(
+      'Failed to write Electron log:',
+      error,
+    )
+  }
+}
 
 function getSemanttaDataDir() {
   const home = os.homedir()
@@ -96,14 +142,24 @@ function getJavaHome() {
 let fusekiProcess = null
 
 function startFuseki() {
-  const fusekiExecutable = getFusekiExecutable()
-  const javaHome = getJavaHome()
+  if (!fusekiPort) {
+    throw new Error(
+      'Fuseki port has not been allocated.',
+    )
+  }
 
-  const databaseDir = path.join(
-    getSemanttaDataDir(),
-    'database',
-    'fuseki',
-  )
+  const fusekiExecutable =
+    getFusekiExecutable()
+
+  const javaHome =
+    getJavaHome()
+
+  const databaseDir =
+    path.join(
+      getSemanttaDataDir(),
+      'database',
+      'fuseki',
+    )
 
   fs.mkdirSync(
     databaseDir,
@@ -117,13 +173,15 @@ function startFuseki() {
     `--loc=${databaseDir}`,
     '--update',
     '--localhost',
-    `--port=${FUSEKI_PORT}`,
+    `--port=${fusekiPort}`,
     `/${FUSEKI_DATASET_NAME}`,
   ]
 
   const env = {
     ...process.env,
+
     JAVA_HOME: javaHome,
+
     PATH: [
       path.join(
         javaHome,
@@ -137,34 +195,28 @@ function startFuseki() {
     ),
   }
 
-  if (process.platform === 'win32') {
-    fusekiProcess = spawn(
+  const options = {
+    cwd: path.dirname(
       fusekiExecutable,
-      args,
-      {
-        cwd: path.dirname(
-          fusekiExecutable,
-        ),
-        env,
-        shell: true,
-        windowsHide: true,
-        stdio: 'ignore',
-      },
-    )
-  } else {
-    fusekiProcess = spawn(
-      fusekiExecutable,
-      args,
-      {
-        cwd: path.dirname(
-          fusekiExecutable,
-        ),
-        env,
-        detached: true,
-        stdio: 'ignore',
-      },
-    )
+    ),
+    env,
+    windowsHide: true,
+    stdio: 'ignore',
   }
+
+  if (
+    process.platform === 'win32'
+  ) {
+    options.shell = true
+  } else {
+    options.detached = true
+  }
+
+  fusekiProcess = spawn(
+    fusekiExecutable,
+    args,
+    options,
+  )
 
   fusekiProcess.on(
     'error',
@@ -190,31 +242,76 @@ function startFuseki() {
 
 function waitForFuseki() {
   const startedAt = Date.now()
+  const process = fusekiProcess
 
   return new Promise(
     (resolve, reject) => {
+      let settled = false
+
+      const cleanup = () => {
+        if (process) {
+          process.off(
+            'exit',
+            onExit,
+          )
+        }
+      }
+
+      const finish = (callback, value) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        cleanup()
+        callback(value)
+      }
+
+      const onExit = (code, signal) => {
+        finish(
+          reject,
+          new Error(
+            `Fuseki exited before becoming ready ` +
+            `(code=${code}, signal=${signal}).`,
+          ),
+        )
+      }
+
+      if (process) {
+        process.once(
+          'exit',
+          onExit,
+        )
+      }
+
       const check = () => {
+        if (settled) {
+          return
+        }
+
         if (
           Date.now() - startedAt >
-          BACKEND_STARTUP_TIMEOUT
+          FUSEKI_STARTUP_TIMEOUT
         ) {
-          reject(
+          finish(
+            reject,
             new Error(
               'Timed out waiting for Fuseki.',
             ),
           )
+
           return
         }
 
         const request = http.get(
-          `http://${FUSEKI_HOST}:${FUSEKI_PORT}/$/ping`,
+          `${fusekiBaseUrl}/$/ping`,
           (response) => {
             response.resume()
 
             if (
               response.statusCode === 200
             ) {
-              resolve()
+              finish(resolve)
               return
             }
 
@@ -239,6 +336,7 @@ function waitForFuseki() {
           1000,
           () => {
             request.destroy()
+
             setTimeout(
               check,
               250,
@@ -257,8 +355,9 @@ function stopFuseki() {
     return
   }
 
-  const pid =
-    fusekiProcess.pid
+  log('Stopping Fuseki.')
+
+  const pid = fusekiProcess.pid
 
   if (
     process.platform === 'win32'
@@ -288,7 +387,7 @@ function stopFuseki() {
           'SIGTERM',
         )
       } catch {
-        // Fuseki is already stopped.
+        // Already stopped.
       }
     }
   }
@@ -331,7 +430,7 @@ function registerFrontendProtocol() {
         requestUrl.pathname.startsWith('/api/')
       ) {
         const backendUrl =
-          `${BACKEND_BASE_URL}${requestUrl.pathname}${requestUrl.search}`
+          `${backendBaseUrl}${requestUrl.pathname}${requestUrl.search}`
 
         const headers = new Headers(request.headers)
 
@@ -351,7 +450,7 @@ function registerFrontendProtocol() {
           )
         }
 
-        return net.fetch(
+        return electronNet.fetch(
           backendUrl,
           {
             method: request.method,
@@ -438,7 +537,7 @@ function registerFrontendProtocol() {
       }
 
       try {
-        return await net.fetch(
+        return await electronNet.fetch(
           require('node:url').pathToFileURL(
             filePath,
           ).toString(),
@@ -466,6 +565,76 @@ function getBackendExecutable() {
   )
 }
 
+function findFreePort(host = '127.0.0.1') {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+
+    server.unref()
+
+    server.on('error', reject)
+
+    server.listen(
+      {
+        host,
+        port: 0,
+      },
+      () => {
+        const address = server.address()
+
+        if (
+          !address ||
+          typeof address === 'string'
+        ) {
+          server.close()
+          reject(
+            new Error(
+              'Could not determine the allocated port.',
+            ),
+          )
+          return
+        }
+
+        const port = address.port
+
+        server.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+
+          resolve(port)
+        })
+      },
+    )
+  })
+}
+
+async function allocateFusekiPort() {
+  fusekiPort = await findFreePort(
+    FUSEKI_HOST,
+  )
+
+  fusekiBaseUrl =
+    `http://${FUSEKI_HOST}:${fusekiPort}`
+
+  log(
+    `Allocated Fuseki port: ${fusekiPort}`,
+  )
+}
+
+
+async function allocateBackendPort() {
+  backendPort = await findFreePort(
+    BACKEND_HOST,
+  )
+
+  backendBaseUrl =
+    `http://${BACKEND_HOST}:${backendPort}`
+
+  log(
+    `Allocated FastAPI port: ${backendPort}`,
+  )
+}
 function startBackend() {
   const executablePath = getBackendExecutable()
 
@@ -477,7 +646,9 @@ function startBackend() {
       env: {
         ...process.env,
         SEMANTTA_HOST: BACKEND_HOST,
-        SEMANTTA_PORT: String(BACKEND_PORT),
+        SEMANTTA_PORT: String(backendPort),
+        FUSEKI_DATASET_URL:
+          `${fusekiBaseUrl}/${FUSEKI_DATASET_NAME}`,
       },
       windowsHide: true,
       stdio: 'ignore',
@@ -503,60 +674,185 @@ function startBackend() {
 
 function waitForBackend() {
   const startedAt = Date.now()
+  const process = backendProcess
 
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      if (
-        Date.now() - startedAt >
-        BACKEND_STARTUP_TIMEOUT
-      ) {
-        reject(
-          new Error(
-            'Timed out waiting for the Semantta backend.',
-          ),
-        )
-        return
+  return new Promise(
+    (resolve, reject) => {
+      let settled = false
+
+      const cleanup = () => {
+        if (process) {
+          process.off(
+            'exit',
+            onExit,
+          )
+        }
       }
 
-      const request = http.get(
-        `http://${BACKEND_HOST}:${BACKEND_PORT}/api/health`,
-        (response) => {
-          response.resume()
+      const finish = (callback, value) => {
+        if (settled) {
+          return
+        }
 
-          if (
-            response.statusCode === 200 ||
-            response.statusCode === 503
-          ) {
-            resolve()
-            return
-          }
+        settled = true
+        cleanup()
+        callback(value)
+      }
 
-          setTimeout(
-            check,
-            250,
+      const onExit = (code, signal) => {
+        finish(
+          reject,
+          new Error(
+            `Semantta backend exited before becoming ready ` +
+            `(code=${code}, signal=${signal}).`,
+          ),
+        )
+      }
+
+      if (process) {
+        process.once(
+          'exit',
+          onExit,
+        )
+      }
+
+      const check = () => {
+        if (settled) {
+          return
+        }
+
+        if (
+          Date.now() - startedAt >
+          BACKEND_STARTUP_TIMEOUT
+        ) {
+          finish(
+            reject,
+            new Error(
+              'Timed out waiting for the Semantta backend.',
+            ),
           )
-        },
-      )
 
-      request.on('error', () => {
-        setTimeout(check, 250)
-      })
+          return
+        }
 
-      request.setTimeout(1000, () => {
-        request.destroy()
-        setTimeout(check, 250)
-      })
-    }
+        const request = http.get(
+          `${backendBaseUrl}/api/health`,
+          (response) => {
+            response.resume()
 
-    check()
-  })
+            if (
+              response.statusCode === 200 ||
+              response.statusCode === 503
+            ) {
+              finish(resolve)
+              return
+            }
+
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+
+        request.on(
+          'error',
+          () => {
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+
+        request.setTimeout(
+          1000,
+          () => {
+            request.destroy()
+
+            setTimeout(
+              check,
+              250,
+            )
+          },
+        )
+      }
+
+      check()
+    },
+  )
 }
 
+async function startServices() {
+  let lastError = null
+
+  for (
+    let attempt = 1;
+    attempt <= MAX_SERVICE_START_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      log(
+        `Starting Semantta services ` +
+        `(attempt ${attempt}/${MAX_SERVICE_START_ATTEMPTS}).`,
+      )
+
+      await allocateFusekiPort()
+      startFuseki()
+      await waitForFuseki()
+
+      log(
+        `Fuseki is ready at ${fusekiBaseUrl}.`,
+      )
+
+      await allocateBackendPort()
+      startBackend()
+      await waitForBackend()
+
+      log(
+        `FastAPI is ready at ${backendBaseUrl}.`,
+      )
+
+      return
+    } catch (error) {
+      lastError =
+        error instanceof Error
+          ? error
+          : new Error(
+            String(error),
+          )
+
+      log(
+        `Service startup attempt ${attempt} failed: ` +
+        `${lastError.message}`,
+      )
+
+      stopBackend()
+      stopFuseki()
+
+      if (
+        attempt <
+        MAX_SERVICE_START_ATTEMPTS
+      ) {
+        log(
+          'Retrying with new service ports.',
+        )
+      }
+    }
+  }
+
+  throw lastError ||
+  new Error(
+    'Semantta services could not be started.',
+  )
+}
 
 function stopBackend() {
   if (!backendProcess) {
     return
   }
+
+  log('Stopping FastAPI backend.')
 
   backendProcess.kill()
   backendProcess = null
@@ -595,17 +891,34 @@ function createMainWindow() {
   })
 }
 
+const gotSingleInstanceLock =
+  app.requestSingleInstanceLock()
+
+if (!gotSingleInstanceLock) {
+  app.quit()
+}
+
+app.on(
+  'second-instance',
+  () => {
+    if (mainWindow) {
+      if (
+        mainWindow.isMinimized()
+      ) {
+        mainWindow.restore()
+      }
+
+      mainWindow.focus()
+    }
+  },
+)
 
 app.whenReady().then(async () => {
   registerFrontendProtocol()
 
   if (app.isPackaged) {
     try {
-      startFuseki()
-      await waitForFuseki()
-
-      startBackend()
-      await waitForBackend()
+      await startServices()
     } catch (error) {
       console.error(
         'Unable to start Semantta services:',
