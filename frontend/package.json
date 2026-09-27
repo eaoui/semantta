@@ -13,7 +13,7 @@
     "preview": "nuxt preview",
     "start": "node .output/server/index.mjs",
     "electron": "electron .",
-    "electron:generate": "nuxt generate",
+    "electron:generate": "node scripts/generate-electron.mjs",
     "electron:prepare-runtime": "python scripts/prepare_runtime.py",
     "electron:build-backend": "python ../backend/build_backend.py",
     "electron:package": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder --dir",

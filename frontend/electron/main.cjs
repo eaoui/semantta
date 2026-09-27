@@ -19,6 +19,9 @@ const APP_HOST = 'bundle'
 
 const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = 8000
+const BACKEND_BASE_URL =
+  `http://${BACKEND_HOST}:${BACKEND_PORT}`
+
 const BACKEND_STARTUP_TIMEOUT = 30000
 
 const FUSEKI_HOST = '127.0.0.1'
@@ -323,6 +326,41 @@ function registerFrontendProtocol() {
     async (request) => {
       const requestUrl = new URL(request.url)
 
+      if (
+        requestUrl.host === APP_HOST &&
+        requestUrl.pathname.startsWith('/api/')
+      ) {
+        const backendUrl =
+          `${BACKEND_BASE_URL}${requestUrl.pathname}${requestUrl.search}`
+
+        const headers = new Headers(request.headers)
+
+        headers.delete('host')
+        headers.delete('content-length')
+        headers.delete('origin')
+        headers.delete('referer')
+
+        let body
+
+        if (
+          request.method !== 'GET' &&
+          request.method !== 'HEAD'
+        ) {
+          body = Buffer.from(
+            await request.arrayBuffer(),
+          )
+        }
+
+        return net.fetch(
+          backendUrl,
+          {
+            method: request.method,
+            headers,
+            body,
+          },
+        )
+      }
+
       if (requestUrl.host !== APP_HOST) {
         return new Response('Not found', {
           status: 404,
@@ -484,7 +522,19 @@ function waitForBackend() {
         `http://${BACKEND_HOST}:${BACKEND_PORT}/api/health`,
         (response) => {
           response.resume()
-          resolve()
+
+          if (
+            response.statusCode === 200 ||
+            response.statusCode === 503
+          ) {
+            resolve()
+            return
+          }
+
+          setTimeout(
+            check,
+            250,
+          )
         },
       )
 
