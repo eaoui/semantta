@@ -32,9 +32,11 @@ function findExecutable(dir, predicate) {
 
 function findPackagedExecutable() {
   if (process.platform === 'win32') {
+    const windowsUnpackedDir = path.join(outDir, 'win-unpacked')
+
     return findExecutable(
-      outDir,
-      (_fullPath, name) => name === 'semantta.exe'
+      windowsUnpackedDir,
+      (_fullPath, name) => name.toLowerCase() === 'semantta.exe'
     )
   }
 
