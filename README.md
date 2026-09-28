@@ -31,81 +31,24 @@ Semantta is domain‑independent and can host data from any domain.
 | Backend | FastAPI, rdflib, owlrl, pyshacl, httpx |
 | Frontend  | Nuxt 4 (Vue 3, TypeScript), Pinia, Tailwind CSS 4, SortableJS, vis‑network, Phosphor Icons, vue‑sonner |
 
-## Prerequisites
+## Installation
 
-- Python **3.10+** with `pip`
-- Node.js **18+** with `npm`
-- [Apache Jena Fuseki](https://jena.apache.org/documentation/fuseki2/) **5+** (requires Java **17+**)
+Download the latest packaged version from the [GitHub Releases](https://github.com/eaoui/semantta/releases) page.
 
-## Getting Started
+Semantta currently provides:
 
-### 1. Get Semantta
+* Linux x64 — AppImage and Debian package
+* Windows x64 — NSIS installer
+* macOS arm64 — DMG and ZIP
+* macOS x64 — DMG and ZIP
 
-clone the repository:
-```bash
-git clone https://github.com/eaoui/semantta.git
-cd semantta
-```
-or just download a [release](https://github.com/eaoui/semantta/releases).
+The packaged application is self-contained and does not require users to separately install Python, Node.js, Java, or Fuseki.
 
-### 2. Start a Fuseki Dataset
+See the detailed [installation guide](docs/INSTALLATION.md) for installation instructions and package verification.
 
-Start an existing (or create a new) Fuseki dataset by running the `fuseki-server` script with a TDB2 location:
+## Development
 
-```bash
-# Linux/Mac
-./fuseki-server --update --tdb2 --loc /path/to/database /dataset_name
-
-# Windows
-.\fuseki-server --update --tdb2 --loc path\to\database /dataset_name
-```
-
-The default port is `3030` and the default dataset name is `obmms`.  
-If you use a different port or name, set `FUSEKI_DATASET_URL` in a `backend/.env` file:
-
-```bash
-cd backend
-cp .env.example .env  # Windows: copy .env.example .evn
-# then edit FUSEKI_DATASET_URL
-```
-
-### 3. Run the Backend
-
-```bash
-# 1. move to the /backend directory
-cd backend
-
-# 2. create a virtual environment named .venv
-python -m venv .venv
-
-# 3. activate the virtual environment
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# 4. install Python dependencies
-pip install -r requirements.txt
-
-# 5. start the API server (default port number is 8000)
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Next time you only need stepts 1, 3, and 5.
-
-### 4. Run the Frontend
-
-```bash
-# 1. move to the /frontend directory
-cd frontend
-
-# 2. install Node.js packages
-npm install
-
-# 3. start the development server
-npm run dev
-```
-
-Next time you only need steps 1 and 3.  
-  
-The app will be available at `http://localhost:3000`.
+See the detailed [development guide](docs/development/DEVELOPMENT.md) for development setup and instructions.
 
 ## Basic Workflow
 
