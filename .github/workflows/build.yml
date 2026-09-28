@@ -133,30 +133,23 @@ jobs:
         working-directory: frontend
         run: npm run electron:generate
 
-      - name: Build unpacked Electron application
+      - name: Build distributables
         working-directory: frontend
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --dir -c.directories.output=out-smoke
+        run: npx electron-builder
 
       - name: Smoke-test packaged application
         working-directory: frontend
         env:
           XDG_DATA_HOME: ${{ runner.temp }}/semantta-data
           APPDATA: ${{ runner.temp }}/semantta-appdata
-          SMOKE_TEST_OUTPUT_DIR: out-smoke
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a node ../scripts/smoke_test.mjs
           else
             node ../scripts/smoke_test.mjs
           fi
-
-      - name: Build distributables
-        working-directory: frontend
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder
 
       - name: Verify generated artifacts
         working-directory: frontend
