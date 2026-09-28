@@ -23,6 +23,7 @@
     "electron:prepare-runtime": "python scripts/prepare_runtime.py",
     "electron:build-backend": "python ../backend/build_backend.py",
     "electron:package": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder --dir",
+    "electron:smoke": "node ../scripts/smoke_test.mjs",
     "electron:dist": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder",
     "electron:dist:linux": "npm run electron:dist -- --linux",
     "electron:dist:linux:appimage": "npm run electron:dist -- --linux AppImage",

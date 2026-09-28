@@ -27,6 +27,10 @@ const FUSEKI_STARTUP_TIMEOUT = 30000
 
 const MAX_SERVICE_START_ATTEMPTS = 5
 
+const IS_SMOKE_TEST = process.argv.includes(
+  '--smoke-test',
+)
+
 let backendPort = null
 let fusekiPort = null
 
@@ -910,8 +914,110 @@ function stopBackend() {
   backendProcess = null
 }
 
+function waitForRendererSmokeTest() {
+  return new Promise((resolve, reject) => {
+    if (!mainWindow) {
+      reject(
+        new Error(
+          'Main window does not exist.',
+        ),
+      )
+      return
+    }
 
-function createMainWindow() {
+    const onFailedLoad = (
+      _event,
+      errorCode,
+      errorDescription,
+      validatedURL,
+    ) => {
+      reject(
+        new Error(
+          `Renderer failed to load: ` +
+          `${errorCode} ${errorDescription} ` +
+          `(${validatedURL})`,
+        ),
+      )
+    }
+
+    const onFinishedLoad = async () => {
+      try {
+        const result =
+          await mainWindow.webContents.executeJavaScript(
+            `
+              (async () => {
+                const response = await fetch(
+                  '/api/health',
+                  {
+                    cache: 'no-store',
+                  },
+                )
+
+                const body =
+                  await response.json()
+
+                return {
+                  status: response.status,
+                  body,
+                  origin: window.location.origin,
+                }
+              })()
+            `,
+            true,
+          )
+
+        if (result.status !== 200) {
+          throw new Error(
+            `Health endpoint returned HTTP ` +
+            `${result.status}.`,
+          )
+        }
+
+        if (
+          !result.body ||
+          result.body.status !== 'ok' ||
+          result.body.backend !== 'ok' ||
+          result.body.fuseki !== 'ok'
+        ) {
+          throw new Error(
+            `Unexpected health response: ` +
+            `${JSON.stringify(result.body)}`,
+          )
+        }
+
+        if (
+          result.origin !==
+          `${APP_SCHEME}://${APP_HOST}`
+        ) {
+          throw new Error(
+            `Unexpected renderer origin: ` +
+            `${result.origin}`,
+          )
+        }
+
+        log(
+          'Renderer smoke test succeeded.',
+        )
+
+        resolve()
+      } catch (error) {
+        reject(error)
+      }
+    }
+
+    mainWindow.webContents.once(
+      'did-fail-load',
+      onFailedLoad,
+    )
+
+    mainWindow.webContents.once(
+      'did-finish-load',
+      onFinishedLoad,
+    )
+  })
+}
+
+async function createMainWindow() {
   const windowIcon = path.join(
     app.getAppPath(),
     '.output',
@@ -925,6 +1031,7 @@ function createMainWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'Semantta',
+    show: !IS_SMOKE_TEST,
     icon: windowIcon,
 
     webPreferences: {
@@ -949,6 +1056,25 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  const rendererUrl = app.isPackaged
+    ? `${APP_SCHEME}://${APP_HOST}/`
+    : DEV_SERVER_URL
+
+  if (IS_SMOKE_TEST) {
+    const smokeTest =
+      waitForRendererSmokeTest()
+
+    await mainWindow.loadURL(
+      rendererUrl,
+    )
+
+    await smokeTest
+  } else {
+    await mainWindow.loadURL(
+      rendererUrl,
+    )
+  }
 }
 
 const gotSingleInstanceLock =
@@ -985,20 +1111,58 @@ app.whenReady().then(async () => {
         error,
       )
 
-      dialog.showErrorBox(
-        'Semantta Startup Error',
-        'Semantta could not start its required backend services.',
+      log(
+        `Startup failed: ${error.message}`,
       )
 
       stopBackend()
       stopFuseki()
+
+      if (IS_SMOKE_TEST) {
+        app.exit(1)
+        return
+      }
+
+      dialog.showErrorBox(
+        'Semantta Startup Error',
+        'Semantta could not start its required services.',
+      )
 
       app.quit()
       return
     }
   }
 
-  createMainWindow()
+  try {
+    await createMainWindow()
+
+    if (IS_SMOKE_TEST) {
+      stopBackend()
+      stopFuseki()
+
+      log(
+        'Semantta packaged smoke test completed successfully.',
+      )
+
+      app.exit(0)
+      return
+    }
+  } catch (error) {
+    console.error(
+      'Semantta renderer failed:',
+      error,
+    )
+
+    log(
+      `Renderer startup failed: ${error.message}`,
+    )
+
+    stopBackend()
+    stopFuseki()
+
+    app.exit(1)
+    return
+  }
 
   app.on('activate', () => {
     if (

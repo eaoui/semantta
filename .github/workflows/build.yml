@@ -104,7 +104,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libopenjp2-tools
+          sudo apt-get install --no-install-recommends -y \
+            libopenjp2-tools \
+            xvfb
 
       - name: Install Python build dependencies
         working-directory: backend
@@ -127,13 +129,34 @@ jobs:
       - name: Verify runtime components
         run: python scripts/verify_runtime.py
 
-      - name: Build frontend and package application
+      - name: Generate frontend
+        working-directory: frontend
+        run: npm run electron:generate
+
+      - name: Build unpacked Electron application
         working-directory: frontend
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --dir
+
+      - name: Smoke-test packaged application
+        working-directory: frontend
+        shell: bash
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/semantta-data
+          APPDATA: ${{ runner.temp }}/semantta-appdata
         run: |
-          npm run electron:generate
-          electron-builder
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a node ../scripts/smoke_test.mjs
+          else
+            node ../scripts/smoke_test.mjs
+          fi
+
+      - name: Build distributables
+        working-directory: frontend
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder
 
       - name: Verify generated artifacts
         working-directory: frontend
