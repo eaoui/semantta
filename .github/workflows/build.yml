@@ -201,3 +201,169 @@ jobs:
           path: frontend/out/*
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: semantta-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Collect distributable files
+        shell: bash
+        run: |
+          mkdir -p release-files
+
+          find release-assets -type f \
+            \( \
+              -name '*.AppImage' -o \
+              -name '*.deb' -o \
+              -name '*.exe' -o \
+              -name '*.dmg' -o \
+              -name '*.zip' \
+            \) \
+            -exec cp {} release-files/ \;
+
+          count=$(find release-files -maxdepth 1 -type f | wc -l)
+
+          if [ "$count" -ne 7 ]; then
+            echo "Expected 7 distributable files, found $count"
+            find release-files -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          echo "Distributable files:"
+          find release-files -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          (
+            cd release-files
+            sha256sum * | sort
+          ) > SHA256SUMS
+
+          echo "SHA256SUMS:"
+          cat SHA256SUMS
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              release-files/* \
+              SHA256SUMS \
+              --clobber
+          else
+            gh release create "$TAG" \
+              release-files/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Semantta $VERSION"
+
+            gh release upload "$TAG" \
+              SHA256SUMS \
+              --clobber
+          fi
+
+      - name: Verify published GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            > release.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("release.json").read_text())
+
+          expected_tag = "${{ github.ref_name }}"
+          tag = data["tag_name"]
+          draft = data["draft"]
+          prerelease = data["prerelease"]
+          assets = data["assets"]
+
+          expected = sorted(
+              [p.name for p in Path("release-files").iterdir() if p.is_file()]
+              + ["SHA256SUMS"]
+          )
+
+          actual = sorted(asset["name"] for asset in assets)
+
+          if tag != expected_tag:
+              raise SystemExit(
+                  f"Release tag mismatch: expected {expected_tag}, got {tag}"
+              )
+
+          if draft:
+              raise SystemExit("Release is unexpectedly still a draft.")
+
+          if prerelease:
+              raise SystemExit("Release is unexpectedly marked as a prerelease.")
+
+          if actual != expected:
+              print("Expected assets:")
+              for name in expected:
+                  print(f"  {name}")
+
+              print("Actual assets:")
+              for name in actual:
+                  print(f"  {name}")
+
+              raise SystemExit(
+                  "Published release assets do not match expected assets."
+              )
+
+          print(f"Verified {len(actual)} release assets.")
+          PY
+
+      - name: Verify published asset digests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq '
+              .assets[]
+              | select(.name != "SHA256SUMS")
+              | "\(.name)\t\(.digest)"
+            ' \
+            | sort > github-digests.txt
+
+          (
+            cd release-files
+            sha256sum * |
+              awk '{print $2 "\tsha256:" $1}' |
+              sort
+          ) > local-digests.txt
+
+          echo "GitHub digests:"
+          cat github-digests.txt
+
+          echo
+          echo "Local digests:"
+          cat local-digests.txt
+
+          diff -u local-digests.txt github-digests.txt
