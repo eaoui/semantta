@@ -176,6 +176,15 @@ jobs:
           else
             node ../scripts/smoke_test.mjs
           fi
+          
+      - name: Verify installers on clean environment
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        working-directory: frontend
+        env:
+          XDG_DATA_HOME: ${{ runner.temp }}/semantta-installer-data
+          APPDATA: ${{ runner.temp }}/semantta-installer-appdata
+          HOME: ${{ runner.temp }}/semantta-installer-home
+        run: python ../scripts/verify_installers.py
 
       - name: Verify generated artifacts
         working-directory: frontend
