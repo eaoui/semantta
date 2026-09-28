@@ -166,6 +166,7 @@ jobs:
 
       - name: Smoke-test packaged application
         working-directory: frontend
+        shell: bash
         env:
           XDG_DATA_HOME: ${{ runner.temp }}/semantta-data
           APPDATA: ${{ runner.temp }}/semantta-appdata
