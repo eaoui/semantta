@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -74,7 +74,7 @@ function getApplicationRoot(executable) {
     return executable.slice(0, markerIndex)
   }
 
-  return executable
+  return path.dirname(executable)
 }
 
 function createSmokeEnvironment() {
@@ -209,35 +209,43 @@ function createReplacementInstallation(
   applicationRoot,
   tempRoot
 ) {
-  if (process.platform === 'linux') {
-    const replacementExecutable = path.join(
-      tempRoot,
-      path.basename(executable)
-    )
-
-    fs.copyFileSync(
-      executable,
-      replacementExecutable
-    )
-
-    const originalMode = fs.statSync(executable).mode
-    fs.chmodSync(replacementExecutable, originalMode)
-
-    return replacementExecutable
-  }
-
   const replacementApplicationRoot = path.join(
     tempRoot,
     path.basename(applicationRoot)
   )
 
-  fs.cpSync(
-    applicationRoot,
-    replacementApplicationRoot,
-    {
-      recursive: true,
+  if (process.platform === 'darwin') {
+    const result = spawnSync(
+      'ditto',
+      [
+        applicationRoot,
+        replacementApplicationRoot,
+      ],
+      {
+        stdio: 'inherit',
+      }
+    )
+
+    if (result.error) {
+      throw new Error(
+        `Failed to copy macOS application bundle: ${result.error.message}`
+      )
     }
-  )
+
+    if (result.status !== 0) {
+      throw new Error(
+        `ditto failed while copying macOS application bundle: ${result.status}`
+      )
+    }
+  } else {
+    fs.cpSync(
+      applicationRoot,
+      replacementApplicationRoot,
+      {
+        recursive: true,
+      }
+    )
+  }
 
   const relativeExecutable = path.relative(
     applicationRoot,
@@ -325,14 +333,20 @@ async function verifyDataPreservation(
       'P3.9 data-preservation test passed.'
     )
   } finally {
-    fs.rmSync(
-      temporaryRoot,
-      {
-        recursive: true,
-        force: true,
-      }
-    )
+    removeTemporaryDirectory(temporaryRoot)
   }
+}
+
+function removeTemporaryDirectory(directory) {
+  fs.rmSync(
+    directory,
+    {
+      recursive: true,
+      force: true,
+      maxRetries: 20,
+      retryDelay: 500,
+    }
+  )
 }
 
 async function main() {
@@ -387,12 +401,8 @@ async function main() {
       smokeEnvironment.env
     )
   } finally {
-    fs.rmSync(
-      smokeEnvironment.root,
-      {
-        recursive: true,
-        force: true,
-      }
+    removeTemporaryDirectory(
+      smokeEnvironment.root
     )
   }
 
