@@ -1,0 +1,32 @@
+{
+  "screenshots": [
+    {
+      "file": "admin-ontologies.png",
+      "title": "Semantta Admin - Ontologies"
+    },
+    {
+      "file": "admin-ap.png",
+      "title": "Semantta Admin - Application Profile"
+    },
+    {
+      "file": "admin-metadata-instances.png",
+      "title": "Semantta Admin - Metadata - Instances"
+    },
+    {
+      "file": "admin-metadata-imports.png",
+      "title": "Semantta Admin - Metadata - Imports"
+    },
+    {
+      "file": "public-home.png",
+      "title": "Semantta Public - Home"
+    },
+    {
+      "file": "public-data-description.png",
+      "title": "Semantta Public - Data - Description"
+    },
+    {
+      "file": "public-data-graph.png",
+      "title": "Semantta Public - Data - Graph"
+    }
+  ]
+}
