@@ -1,87 +1,28 @@
-import {
-  existsSync,
-  readdirSync,
-  statSync,
-} from 'node:fs'
-
+import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
-const projectRoot =
-  path.resolve(
-    new URL(
-      '..',
-      import.meta.url,
-    ).pathname,
-  )
+const projectDir = path.join(__dirname, '..')
+const outDir = path.join(projectDir, 'frontend', 'out')
 
-const outputDir =
-  path.join(
-    projectRoot,
-    'frontend',
-    'out',
-  )
-
-
-function findExecutable(
-  directory,
-) {
-  if (!existsSync(directory)) {
+function findExecutable(dir, predicate) {
+  if (!fs.existsSync(dir)) {
     return null
   }
 
-  for (
-    const entry of readdirSync(
-      directory,
-      {
-        withFileTypes: true,
-      },
-    )
-  ) {
-    const fullPath =
-      path.join(
-        directory,
-        entry.name,
-      )
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name)
 
     if (entry.isDirectory()) {
-      const result =
-        findExecutable(
-          fullPath,
-        )
-
+      const result = findExecutable(fullPath, predicate)
       if (result) {
         return result
       }
-
-      continue
-    }
-
-    if (
-      process.platform === 'win32' &&
-      entry.name.toLowerCase() ===
-      'semantta.exe'
-    ) {
-      return fullPath
-    }
-
-    if (
-      process.platform === 'linux' &&
-      entry.name === 'semantta' &&
-      statSync(fullPath).isFile()
-    ) {
-      return fullPath
-    }
-
-    if (
-      process.platform === 'darwin' &&
-      entry.name === 'Semantta' &&
-      fullPath.includes(
-        `${path.sep}Contents${path.sep}MacOS${path.sep}`,
-      )
-    ) {
+    } else if (predicate(fullPath, entry.name)) {
       return fullPath
     }
   }
@@ -89,71 +30,69 @@ function findExecutable(
   return null
 }
 
+function findPackagedExecutable() {
+  if (process.platform === 'win32') {
+    return findExecutable(
+      outDir,
+      (_fullPath, name) => name === 'semantta.exe'
+    )
+  }
 
-const executable =
-  findExecutable(outputDir)
+  if (process.platform === 'darwin') {
+    return findExecutable(
+      outDir,
+      (fullPath, name) =>
+        name === 'Semantta' &&
+        fullPath.includes('.app/Contents/MacOS/')
+    )
+  }
+
+  return findExecutable(
+    outDir,
+    (_fullPath, name) => name === 'semantta'
+  )
+}
+
+console.log(`Looking for packaged application under: ${outDir}`)
+
+const executable = findPackagedExecutable()
 
 if (!executable) {
   console.error(
-    `Could not find packaged Semantta executable under ${outputDir}`,
+    `Could not find packaged Semantta executable under ${outDir}`
   )
-
   process.exit(1)
 }
 
-console.log(
-  `Launching packaged application: ${executable}`,
-)
+console.log(`Launching packaged application: ${executable}`)
 
-const child =
-  spawn(
-    executable,
-    ['--smoke-test'],
-    {
-      cwd:
-        path.dirname(executable),
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-      },
-    },
-  )
+const smokeArgs = process.platform === 'linux'
+  ? ['--no-sandbox', '--smoke-test']
+  : ['--smoke-test']
 
-child.on(
-  'error',
-  (error) => {
-    console.error(
-      'Failed to launch packaged application:',
-      error,
-    )
+const child = spawn(executable, smokeArgs, {
+  stdio: 'inherit',
+  env: {
+    ...process.env,
+  },
+})
 
+child.on('error', (error) => {
+  console.error('Failed to start packaged application:', error)
+  process.exit(1)
+})
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    console.error(`Packaged application smoke test failed: signal=${signal}`)
     process.exit(1)
-  },
-)
+  }
 
-child.on(
-  'exit',
-  (code, signal) => {
-    if (
-      code === 0 &&
-      !signal
-    ) {
-      console.log(
-        'Packaged application smoke test passed.',
-      )
+  if (code !== 0) {
+    console.error(`Packaged application smoke test failed: code=${code}`)
+    process.exit(code ?? 1)
+  }
 
-      process.exit(0)
-    }
-
-    console.error(
-      `Packaged application smoke test failed: ` +
-      `code=${code}, signal=${signal}`,
-    )
-
-    process.exit(
-      typeof code === 'number'
-        ? code
-        : 1,
-    )
-  },
-)
+  console.log('Packaged application smoke test passed.')
+  process.exit(0)
+})
