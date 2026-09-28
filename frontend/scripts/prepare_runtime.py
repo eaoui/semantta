@@ -280,9 +280,9 @@ def download_java(
                 )
 
         java_candidates = list(
-            extracted.glob("*/bin/java")
+            extracted.rglob("bin/java")
         ) + list(
-            extracted.glob("*/bin/java.exe")
+            extracted.rglob("bin/java.exe")
         )
 
         if len(java_candidates) != 1:

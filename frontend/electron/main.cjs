@@ -31,6 +31,10 @@ const IS_SMOKE_TEST = process.argv.includes(
   '--smoke-test',
 )
 
+if (IS_SMOKE_TEST) {
+  app.commandLine.appendSwitch('no-sandbox')
+}
+
 let backendPort = null
 let fusekiPort = null
 
