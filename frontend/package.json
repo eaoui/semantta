@@ -1,11 +1,17 @@
 {
-  "name": "semantta-frontend",
-  "type": "module",
+  "name": "semantta",
+  "productName": "Semantta",
   "version": "0.1.0",
-  "description": "An Ontology-Based Linked Data Management System",
-  "author": "Ehsan Rouhi",
+  "description": "Ontology-Based Linked Data Management System",
+  "author": {
+    "name": "Ehsan Rouhi",
+    "email": "ehsanrouhi@live.com"
+  },
+  "homepage": "https://github.com/eaoui/semantta",
+  "desktopName": "org.eaoui.semantta",
   "private": true,
   "main": "electron/main.cjs",
+  "type": "module",
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
@@ -17,6 +23,12 @@
     "electron:prepare-runtime": "python scripts/prepare_runtime.py",
     "electron:build-backend": "python ../backend/build_backend.py",
     "electron:package": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder --dir",
+    "electron:dist": "npm run electron:prepare-runtime && npm run electron:build-backend && npm run electron:generate && electron-builder",
+    "electron:dist:linux": "npm run electron:dist -- --linux",
+    "electron:dist:linux:appimage": "npm run electron:dist -- --linux AppImage",
+    "electron:dist:linux:deb": "npm run electron:dist -- --linux deb",
+    "electron:dist:windows": "npm run electron:dist -- --win",
+    "electron:dist:mac": "npm run electron:dist -- --mac",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
@@ -42,7 +54,12 @@
   "build": {
     "appId": "org.eaoui.semantta",
     "productName": "Semantta",
+    "artifactName": "Semantta-${version}-${os}-${arch}.${ext}",
+    "icon": "build/icon.svg",
     "asar": true,
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
     "directories": {
       "output": "out"
     },
@@ -67,6 +84,49 @@
         "from": "runtime/java",
         "to": "runtime/java"
       }
-    ]
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "maintainer": "Ehsan Rouhi <ehsanrouhi@live.com>",
+      "description": "Ontology-Based Linked Data Management System",
+      "executableName": "semantta",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "Name": "Semantta",
+          "Comment": "A web-based, RDF-native platform for managing linked data based on OWL/RDF ontologies.",
+          "Categories": "Utility;",
+          "Terminal": false,
+          "Type": "Application"
+        }
+      }
+    }
   }
 }

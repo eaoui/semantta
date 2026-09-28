@@ -44,6 +44,24 @@ function getElectronLogFile() {
   )
 }
 
+function getFusekiBaseDir() {
+  return path.join(
+    getSemanttaDataDir(),
+    'database',
+    'fuseki',
+    'runtime',
+  )
+}
+
+
+function getFusekiDatabaseDir() {
+  return path.join(
+    getSemanttaDataDir(),
+    'database',
+    'fuseki',
+    'tdb2',
+  )
+}
 
 function log(message) {
   const timestamp =
@@ -154,12 +172,18 @@ function startFuseki() {
   const javaHome =
     getJavaHome()
 
+  const fusekiBaseDir =
+    getFusekiBaseDir()
+
   const databaseDir =
-    path.join(
-      getSemanttaDataDir(),
-      'database',
-      'fuseki',
-    )
+    getFusekiDatabaseDir()
+
+  fs.mkdirSync(
+    fusekiBaseDir,
+    {
+      recursive: true,
+    },
+  )
 
   fs.mkdirSync(
     databaseDir,
@@ -182,6 +206,12 @@ function startFuseki() {
 
     JAVA_HOME: javaHome,
 
+    FUSEKI_HOME:
+      path.dirname(fusekiExecutable),
+
+    FUSEKI_BASE:
+      fusekiBaseDir,
+
     PATH: [
       path.join(
         javaHome,
@@ -201,7 +231,11 @@ function startFuseki() {
     ),
     env,
     windowsHide: true,
-    stdio: 'ignore',
+    stdio: [
+      'ignore',
+      'pipe',
+      'pipe',
+    ],
   }
 
   if (
@@ -216,6 +250,24 @@ function startFuseki() {
     fusekiExecutable,
     args,
     options,
+  )
+
+  fusekiProcess.stdout.on(
+    'data',
+    (data) => {
+      log(
+        `[Fuseki] ${data.toString().trim()}`,
+      )
+    },
+  )
+
+  fusekiProcess.stderr.on(
+    'data',
+    (data) => {
+      log(
+        `[Fuseki] ${data.toString().trim()}`,
+      )
+    },
   )
 
   fusekiProcess.on(
@@ -860,12 +912,20 @@ function stopBackend() {
 
 
 function createMainWindow() {
+  const windowIcon = path.join(
+    app.getAppPath(),
+    '.output',
+    'public',
+    'pwa-512.png',
+  )
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     title: 'Semantta',
+    icon: windowIcon,
 
     webPreferences: {
       preload: path.join(

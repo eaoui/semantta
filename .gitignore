@@ -51,14 +51,10 @@ env/
 # Electron build output
 # ─────────────────────────────────────────────────────────
 frontend/out/
+frontend/runtime/
 
 # ─────────────────────────────────────────────────────────
 # PyInstaller build output
 # ─────────────────────────────────────────────────────────
 backend/build/
 backend/dist/
-
-# ─────────────────────────────────────────────────────────
-# Bundled runtime downloaded during Electron builds
-# ─────────────────────────────────────────────────────────
-frontend/runtime/
