@@ -137,14 +137,14 @@ jobs:
         working-directory: frontend
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --dir
+        run: npx electron-builder --dir -c.directories.output=out-smoke
 
       - name: Smoke-test packaged application
         working-directory: frontend
-        shell: bash
         env:
           XDG_DATA_HOME: ${{ runner.temp }}/semantta-data
           APPDATA: ${{ runner.temp }}/semantta-appdata
+          SMOKE_TEST_OUTPUT_DIR: out-smoke
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a node ../scripts/smoke_test.mjs

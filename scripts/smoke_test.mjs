@@ -7,7 +7,8 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 const projectDir = path.join(__dirname, '..')
-const outDir = path.join(projectDir, 'frontend', 'out')
+const smokeOutputDir = process.env.SMOKE_TEST_OUTPUT_DIR || 'out'
+const outDir = path.join(projectDir, 'frontend', smokeOutputDir)
 
 function findExecutable(dir, predicate) {
   if (!fs.existsSync(dir)) {
