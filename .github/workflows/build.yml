@@ -26,15 +26,30 @@ jobs:
         include:
           - name: linux-x64
             os: ubuntu-24.04
+            electron_target: linux
+            expected:
+              - AppImage
+              - deb
 
           - name: windows-x64
             os: windows-2025
+            electron_target: win
+            expected:
+              - exe
 
           - name: macos-arm64
             os: macos-15
+            electron_target: mac
+            expected:
+              - dmg
+              - zip
 
           - name: macos-x64
             os: macos-15-intel
+            electron_target: mac
+            expected:
+              - dmg
+              - zip
 
     steps:
       - name: Checkout repository
@@ -50,7 +65,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements-build.txt
 
@@ -70,17 +85,39 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Build Semantta
+      - name: Prepare runtime
+        working-directory: frontend
+        run: npm run electron:prepare-runtime
+
+      - name: Build backend
+        working-directory: frontend
+        run: npm run electron:build-backend
+
+      - name: Verify runtime components
+        run: python scripts/verify_runtime.py
+
+      - name: Build frontend and package application
         working-directory: frontend
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run electron:dist
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm run electron:generate
+          electron-builder
+
+      - name: Verify generated artifacts
+        working-directory: frontend
+        shell: bash
+        env:
+          EXPECTED_ARTIFACTS: ${{ toJson(matrix.expected) }}
+          PLATFORM_TARGET: ${{ matrix.electron_target }}
+        run: |
+          python ../scripts/verify_build.py
 
       - name: List generated artifacts
         working-directory: frontend
         shell: bash
         run: |
-          echo "Generated files:"
+          echo "Generated artifacts:"
           find out -maxdepth 2 -type f -print
 
       - name: Upload build artifacts
