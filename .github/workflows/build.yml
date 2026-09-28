@@ -175,9 +175,10 @@ jobs:
           find out -maxdepth 2 -type f -print
 
       - name: Upload build artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v7
         with:
           name: semantta-${{ matrix.name }}-${{ env.SEMANTTA_VERSION || 'dev' }}
-          path: frontend/out/**
+          path: frontend/out/*
           if-no-files-found: error
           retention-days: 14
