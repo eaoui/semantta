@@ -105,6 +105,86 @@ XSD_INTEGER = "http://www.w3.org/2001/XMLSchema#integer"
 XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
 IGNORE_NAMESPACES = ["http://www.w3.org/2002/07/owl#"]
 
+DEFAULT_ONTOLOGY_UPLOAD_LIMIT_MB = 200
+DEFAULT_METADATA_UPLOAD_LIMIT_MB = 2048
+DEFAULT_PLUGIN_UPLOAD_LIMIT_MB = 100
+DEFAULT_THEME_UPLOAD_LIMIT_MB = 100
+
+DEFAULT_ZIP_MEMBER_LIMIT = 10_000
+DEFAULT_ZIP_TOTAL_UNCOMPRESSED_MB = 500
+DEFAULT_ZIP_MEMBER_UNCOMPRESSED_MB = 100
+
+
+def _env_size_limit(name: str, default_mb: int) -> int:
+    raw = os.getenv(name)
+
+    if raw is None:
+        return default_mb * 1024 * 1024
+
+    try:
+        value_mb = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be a positive integer."
+        ) from exc
+
+    if value_mb <= 0:
+        raise RuntimeError(
+            f"{name} must be greater than zero."
+        )
+
+    return value_mb * 1024 * 1024
+
+
+MAX_ONTOLOGY_UPLOAD_BYTES = _env_size_limit(
+    "SEMANTTA_MAX_ONTOLOGY_UPLOAD_MB",
+    DEFAULT_ONTOLOGY_UPLOAD_LIMIT_MB,
+)
+
+MAX_METADATA_UPLOAD_BYTES = _env_size_limit(
+    "SEMANTTA_MAX_METADATA_UPLOAD_MB",
+    DEFAULT_METADATA_UPLOAD_LIMIT_MB,
+)
+
+MAX_PLUGIN_UPLOAD_BYTES = _env_size_limit(
+    "SEMANTTA_MAX_PLUGIN_UPLOAD_MB",
+    DEFAULT_PLUGIN_UPLOAD_LIMIT_MB,
+)
+
+MAX_THEME_UPLOAD_BYTES = _env_size_limit(
+    "SEMANTTA_MAX_THEME_UPLOAD_MB",
+    DEFAULT_THEME_UPLOAD_LIMIT_MB,
+)
+
+MAX_ZIP_MEMBER_COUNT = int(
+    os.getenv(
+        "SEMANTTA_MAX_ZIP_MEMBER_COUNT",
+        DEFAULT_ZIP_MEMBER_LIMIT,
+    )
+)
+
+MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = (
+    int(
+        os.getenv(
+            "SEMANTTA_MAX_ZIP_TOTAL_UNCOMPRESSED_MB",
+            DEFAULT_ZIP_TOTAL_UNCOMPRESSED_MB,
+        )
+    )
+    * 1024
+    * 1024
+)
+
+MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES = (
+    int(
+        os.getenv(
+            "SEMANTTA_MAX_ZIP_MEMBER_UNCOMPRESSED_MB",
+            DEFAULT_ZIP_MEMBER_UNCOMPRESSED_MB,
+        )
+    )
+    * 1024
+    * 1024
+)
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -237,6 +317,33 @@ def _require_safe_path_component(name: str | None, label: str = "name") -> str:
         raise HTTPException(400, f"{label} contains illegal characters")
     return name.strip()
 
+async def _read_upload_with_limit(
+    file: UploadFile,
+    max_bytes: int,
+) -> bytes:
+    chunks = []
+    total = 0
+
+    while True:
+        chunk = await file.read(1024 * 1024)
+
+        if not chunk:
+            break
+
+        total += len(chunk)
+
+        if total > max_bytes:
+            max_mb = max_bytes // (1024 * 1024)
+
+            raise HTTPException(
+                413,
+                f"Uploaded file exceeds the {max_mb} MB limit.",
+            )
+
+        chunks.append(chunk)
+
+    return b"".join(chunks)
+
 def _safe_extract_zip(
     zf: zipfile.ZipFile,
     target_dir: Path,
@@ -246,10 +353,44 @@ def _safe_extract_zip(
 
     Archive members must remain strictly inside target_dir.
     """
+    infos = zf.infolist()
+
+    if len(infos) > MAX_ZIP_MEMBER_COUNT:
+        raise HTTPException(
+            400,
+            (
+                "Archive contains too many files "
+                f"(maximum: {MAX_ZIP_MEMBER_COUNT})."
+            ),
+        )
+
+    total_uncompressed = 0
+
+    for info in infos:
+        if info.file_size > MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES:
+            raise HTTPException(
+                400,
+                (
+                    f"Archive member '{info.filename}' exceeds the "
+                    "maximum uncompressed file size."
+                ),
+            )
+
+        total_uncompressed += info.file_size
+
+        if (
+            total_uncompressed
+            > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES
+        ):
+            raise HTTPException(
+                400,
+                "Archive exceeds the maximum total uncompressed size.",
+            )
+        
     target_dir = target_dir.resolve()
     seen_paths: set[Path] = set()
 
-    for info in zf.infolist():
+    for info in infos:
         raw_name = info.filename
 
         if not raw_name or "\x00" in raw_name:
@@ -2235,7 +2376,10 @@ async def upload_ontology(file: UploadFile = File(...)):
     if any(o["filename"] == filename for o in state["ontologies"]):
         raise HTTPException(400, f"Ontology '{filename}' is already imported.")
 
-    contents = await file.read()
+    contents = await _read_upload_with_limit(
+        file,
+        MAX_ONTOLOGY_UPLOAD_BYTES,
+    )
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     fmt = RDF_FORMAT_MAP.get(ext)
     if not fmt:
@@ -2354,7 +2498,10 @@ async def upload_metadata(
     if not state["metadata_files"] and not state["created_instances"]:
         merge_instances = True
 
-    contents = await file.read()
+    contents = await _read_upload_with_limit(
+        file,
+        MAX_METADATA_UPLOAD_BYTES,
+    )
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     fmt = RDF_FORMAT_MAP.get(ext)
     if not fmt:
@@ -3072,7 +3219,10 @@ async def upload_plugin(file: UploadFile = File(...)):
         raise HTTPException(400, "Only .zip files are accepted.")
     tmp_dir = tempfile.mkdtemp()
     try:
-        contents = await file.read()
+        contents = await _read_upload_with_limit(
+            file,
+            MAX_PLUGIN_UPLOAD_BYTES,
+        )
         with zipfile.ZipFile(io.BytesIO(contents)) as zf:
             _safe_extract_zip(
                 zf,
@@ -3129,7 +3279,10 @@ async def upload_theme(file: UploadFile = File(...)):
         raise HTTPException(400, "Only .zip files are accepted.")
     tmp_dir = tempfile.mkdtemp()
     try:
-        contents = await file.read()
+        contents = await _read_upload_with_limit(
+            file,
+            MAX_THEME_UPLOAD_BYTES,
+        )
         with zipfile.ZipFile(io.BytesIO(contents)) as zf:
             _safe_extract_zip(
                 zf,
