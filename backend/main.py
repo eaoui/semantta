@@ -104,6 +104,11 @@ XSD_INTEGER = "http://www.w3.org/2001/XMLSchema#integer"
 XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
 IGNORE_NAMESPACES = ["http://www.w3.org/2002/07/owl#"]
 
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 # ---------------------------------------------------------------------------
 #  System Datatypes & Annotation Properties
 # ---------------------------------------------------------------------------
@@ -2047,7 +2052,12 @@ async def lifespan(app: FastAPI):
         progress["phase"] = ""
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/api/health")
 async def health_check():
