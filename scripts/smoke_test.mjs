@@ -333,20 +333,55 @@ async function verifyDataPreservation(
       'P3.9 data-preservation test passed.'
     )
   } finally {
-    removeTemporaryDirectory(temporaryRoot)
+    await removeTemporaryDirectory(temporaryRoot)
   }
 }
 
-function removeTemporaryDirectory(directory) {
-  fs.rmSync(
-    directory,
-    {
-      recursive: true,
-      force: true,
-      maxRetries: 20,
-      retryDelay: 500,
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function removeTemporaryDirectory(directory) {
+  const maxAttempts = process.platform === 'win32'
+    ? 20
+    : 3
+
+  const retryDelay = process.platform === 'win32'
+    ? 1000
+    : 250
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      fs.rmSync(directory, {
+        recursive: true,
+        force: true,
+      })
+
+      return true
+    } catch (error) {
+      const retryable =
+        process.platform === 'win32' &&
+        (
+          error?.code === 'EPERM' ||
+          error?.code === 'EBUSY' ||
+          error?.code === 'ENOTEMPTY'
+        )
+
+      if (!retryable || attempt === maxAttempts) {
+        console.warn(
+          `Could not completely remove temporary directory: ${directory}`
+        )
+        console.warn(error?.message ?? error)
+        return false
+      }
+
+      await sleep(retryDelay)
     }
-  )
+  }
+
+  return false
 }
 
 async function main() {
@@ -401,7 +436,7 @@ async function main() {
       smokeEnvironment.env
     )
   } finally {
-    removeTemporaryDirectory(
+    await removeTemporaryDirectory(
       smokeEnvironment.root
     )
   }
