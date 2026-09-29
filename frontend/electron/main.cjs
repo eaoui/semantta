@@ -4,6 +4,7 @@ const {
   dialog,
   net: electronNet,
   protocol,
+  shell,
 } = require('electron')
 
 const path = require('node:path')
@@ -607,6 +608,103 @@ function registerFrontendProtocol() {
   )
 }
 
+function isAllowedRendererUrl(rawUrl) {
+  let url
+
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return false
+  }
+
+  if (!app.isPackaged) {
+    return (
+      url.protocol === 'http:' &&
+      url.hostname === 'localhost' &&
+      url.port === '3000'
+    )
+  }
+
+  return (
+    url.protocol === `${APP_SCHEME}:` &&
+    url.host === APP_HOST
+  )
+}
+
+function openSafeExternalUrl(rawUrl) {
+  let url
+
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return
+  }
+
+  if (
+    url.protocol !== 'http:' &&
+    url.protocol !== 'https:'
+  ) {
+    return
+  }
+
+  shell.openExternal(url).catch((error) => {
+    console.error(
+      'Failed to open external URL:',
+      error,
+    )
+  })
+}
+
+function installNavigationSecurity(contents) {
+  contents.on(
+    'will-navigate',
+    (event, navigationUrl) => {
+      if (
+        isAllowedRendererUrl(navigationUrl)
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      openSafeExternalUrl(navigationUrl)
+    },
+  )
+
+  contents.on(
+    'will-frame-navigate',
+    (event, details) => {
+      if (
+        details.isMainFrame ||
+        isAllowedRendererUrl(details.url)
+      ) {
+        return
+      }
+
+      event.preventDefault()
+    },
+  )
+
+  contents.setWindowOpenHandler(
+    ({ url }) => {
+      if (
+        url.startsWith(
+          `${APP_SCHEME}://${APP_HOST}/`,
+        )
+      ) {
+        return {
+          action: 'deny',
+        }
+      }
+
+      openSafeExternalUrl(url)
+
+      return {
+        action: 'deny',
+      }
+    },
+  )
+}
+
 
 function getBackendExecutable() {
   const executableName =
@@ -691,6 +789,7 @@ async function allocateBackendPort() {
     `Allocated FastAPI port: ${backendPort}`,
   )
 }
+
 function startBackend() {
   const executablePath = getBackendExecutable()
 
@@ -1044,6 +1143,10 @@ async function createMainWindow() {
       sandbox: true,
     },
   })
+
+  installNavigationSecurity(
+    mainWindow.webContents,
+  )
 
   if (!app.isPackaged) {
     mainWindow.loadURL(DEV_SERVER_URL)
