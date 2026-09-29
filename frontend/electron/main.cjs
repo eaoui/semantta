@@ -4,6 +4,7 @@ const {
   dialog,
   net: electronNet,
   protocol,
+  session,
   shell,
 } = require('electron')
 
@@ -18,6 +19,37 @@ const net = require('node:net')
 const DEV_SERVER_URL = 'http://localhost:3000'
 const APP_SCHEME = 'semantta'
 const APP_HOST = 'bundle'
+
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+  "media-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ')
+
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': [
+    CONTENT_SECURITY_POLICY,
+  ],
+  'X-Content-Type-Options': [
+    'nosniff',
+  ],
+  'Referrer-Policy': [
+    'no-referrer',
+  ],
+  'Permissions-Policy': [
+    'camera=(), microphone=(), geolocation=(), notifications=()',
+  ],
+}
 
 const BACKEND_HOST = '127.0.0.1'
 const FUSEKI_HOST = '127.0.0.1'
@@ -541,7 +573,6 @@ protocol.registerSchemesAsPrivileged([
   },
 ])
 
-
 function getFrontendDist() {
   return path.join(
     app.getAppPath(),
@@ -550,6 +581,44 @@ function getFrontendDist() {
   )
 }
 
+function configureRendererSecurity() {
+  const defaultSession =
+    session.defaultSession
+
+  defaultSession.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => {
+      callback(false)
+    },
+  )
+
+  defaultSession.setPermissionCheckHandler(
+    () => false,
+  )
+
+  defaultSession.webRequest.onHeadersReceived(
+    (details, callback) => {
+      if (
+        details.url.startsWith(
+          `${APP_SCHEME}://${APP_HOST}/`,
+        )
+      ) {
+        callback({
+          responseHeaders: {
+            ...details.responseHeaders,
+            ...SECURITY_HEADERS,
+          },
+        })
+
+        return
+      }
+
+      callback({
+        responseHeaders:
+          details.responseHeaders,
+      })
+    },
+  )
+}
 
 function registerFrontendProtocol() {
   protocol.handle(
@@ -1295,6 +1364,7 @@ app.on(
 )
 
 app.whenReady().then(async () => {
+  configureRendererSecurity()
   registerFrontendProtocol()
 
   if (app.isPackaged) {
