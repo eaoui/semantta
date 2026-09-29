@@ -163,6 +163,100 @@ function getJavaHome() {
 }
 
 let fusekiProcess = null
+let backendStopPromise = null
+let fusekiStopPromise = null
+
+function waitForProcessExit(child, timeoutMs = 10000) {
+  if (
+    !child ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  ) {
+    return Promise.resolve()
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+
+    const finish = () => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timer)
+      child.off('exit', finish)
+      resolve()
+    }
+
+    const timer = setTimeout(
+      finish,
+      timeoutMs,
+    )
+
+    child.once(
+      'exit',
+      finish,
+    )
+  })
+}
+
+async function terminateProcessTree(
+  child,
+) {
+  if (!child) {
+    return
+  }
+
+  const pid = child.pid
+
+  if (
+    child.exitCode === null &&
+    child.signalCode === null &&
+    pid
+  ) {
+    if (process.platform === 'win32') {
+      const taskkill = spawn(
+        'taskkill',
+        [
+          '/pid',
+          String(pid),
+          '/t',
+          '/f',
+        ],
+        {
+          windowsHide: true,
+          stdio: 'ignore',
+        },
+      )
+
+      await waitForProcessExit(
+        taskkill,
+        5000,
+      )
+    } else {
+      try {
+        process.kill(
+          -pid,
+          'SIGTERM',
+        )
+      } catch {
+        try {
+          child.kill(
+            'SIGTERM',
+          )
+        } catch {
+          // Already stopped.
+        }
+      }
+    }
+  }
+
+  await waitForProcessExit(
+    child,
+    10000,
+  )
+}
 
 function startFuseki() {
   if (!fusekiPort) {
@@ -408,48 +502,29 @@ function waitForFuseki() {
 }
 
 function stopFuseki() {
-  if (!fusekiProcess) {
-    return
+  if (fusekiStopPromise) {
+    return fusekiStopPromise
   }
 
-  log('Stopping Fuseki.')
+  const child = fusekiProcess
 
-  const pid = fusekiProcess.pid
-
-  if (
-    process.platform === 'win32'
-  ) {
-    require('node:child_process').spawn(
-      'taskkill',
-      [
-        '/pid',
-        String(pid),
-        '/t',
-        '/f',
-      ],
-      {
-        windowsHide: true,
-        stdio: 'ignore',
-      },
-    )
-  } else if (pid) {
-    try {
-      process.kill(
-        -pid,
-        'SIGTERM',
-      )
-    } catch {
-      try {
-        fusekiProcess.kill(
-          'SIGTERM',
-        )
-      } catch {
-        // Already stopped.
-      }
-    }
+  if (!child) {
+    return Promise.resolve()
   }
 
   fusekiProcess = null
+
+  fusekiStopPromise = (async () => {
+    log('Stopping Fuseki.')
+
+    await terminateProcessTree(
+      child,
+    )
+  })().finally(() => {
+    fusekiStopPromise = null
+  })
+
+  return fusekiStopPromise
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -982,8 +1057,10 @@ async function startServices() {
         `${lastError.message}`,
       )
 
-      stopBackend()
-      stopFuseki()
+      await Promise.all([
+        stopBackend(),
+        stopFuseki(),
+      ])
 
       if (
         attempt <
@@ -1003,14 +1080,29 @@ async function startServices() {
 }
 
 function stopBackend() {
-  if (!backendProcess) {
-    return
+  if (backendStopPromise) {
+    return backendStopPromise
   }
 
-  log('Stopping FastAPI backend.')
+  const child = backendProcess
 
-  backendProcess.kill()
+  if (!child) {
+    return Promise.resolve()
+  }
+
   backendProcess = null
+
+  backendStopPromise = (async () => {
+    log('Stopping FastAPI backend.')
+
+    await terminateProcessTree(
+      child,
+    )
+  })().finally(() => {
+    backendStopPromise = null
+  })
+
+  return backendStopPromise
 }
 
 function waitForRendererSmokeTest() {
@@ -1240,8 +1332,10 @@ app.whenReady().then(async () => {
     await createMainWindow()
 
     if (IS_SMOKE_TEST) {
-      stopBackend()
-      stopFuseki()
+      await Promise.all([
+        stopBackend(),
+        stopFuseki(),
+      ])
 
       log(
         'Semantta packaged smoke test completed successfully.',
@@ -1277,10 +1371,29 @@ app.whenReady().then(async () => {
 })
 
 
-app.on('before-quit', () => {
-  stopBackend()
-  stopFuseki()
-})
+let applicationShutdownPromise = null
+let applicationShutdownStarted = false
+
+app.on(
+  'before-quit',
+  (event) => {
+    if (applicationShutdownStarted) {
+      return
+    }
+
+    event.preventDefault()
+    applicationShutdownStarted = true
+
+    applicationShutdownPromise = Promise.all([
+      stopBackend(),
+      stopFuseki(),
+    ]).finally(() => {
+      app.quit()
+    })
+
+    return applicationShutdownPromise
+  },
+)
 
 
 app.on('window-all-closed', () => {
