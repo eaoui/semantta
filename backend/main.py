@@ -31,7 +31,7 @@ load_dotenv()
 
 import owlrl
 import pyshacl
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -2293,6 +2293,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(Exception)
+async def internal_error_handler(
+    request: Request,
+    exc: Exception,
+):
+    logger.exception(
+        "Unhandled API error: %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error.",
+        },
+    )
+
 @app.get("/api/health")
 async def health_check():
     """
@@ -2425,7 +2444,17 @@ async def upload_ontology(file: UploadFile = File(...)):
     try:
         unreasoned_g, g, entities, meta = await asyncio.to_thread(do_import)
     except Exception as e:
-        raise HTTPException(400, detail=f"Import failed: {str(e)}")
+        logger.exception(
+            "Ontology import failed for %s",
+            filename,
+        )
+        raise HTTPException(
+            400,
+            detail=(
+                "Ontology import failed. "
+                "Verify that the file is valid and matches its extension."
+            ),
+        ) from e
     finally:
         progress["phase"] = ""
 
@@ -2530,7 +2559,17 @@ async def upload_metadata(
     try:
         new_g = await asyncio.to_thread(do_import)
     except Exception as e:
-        raise HTTPException(400, detail=f"Import failed: {str(e)}")
+        logger.exception(
+            "Metadata import failed for %s",
+            filename,
+        )
+        raise HTTPException(
+            400,
+            detail=(
+                "Metadata import failed. "
+                "Verify that the file is valid and matches its extension."
+            ),
+        ) from e
     finally:
         progress["phase"] = ""
 
@@ -3056,7 +3095,13 @@ async def generate_profile_from_metadata():
     except HTTPException as e:
         raise e
     except Exception as e:
-        raise HTTPException(500, f"Profile generation failed: {str(e)}")
+        logger.exception(
+            "Profile generation failed",
+        )
+        raise HTTPException(
+            500,
+            detail="Profile generation failed.",
+        ) from e
 
 @app.post("/api/profile/update-order")
 async def update_profile_order(data: dict):
