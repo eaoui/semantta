@@ -16,11 +16,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -235,6 +236,98 @@ def _require_safe_path_component(name: str | None, label: str = "name") -> str:
     if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or '..' in name:
         raise HTTPException(400, f"{label} contains illegal characters")
     return name.strip()
+
+def _safe_extract_zip(
+    zf: zipfile.ZipFile,
+    target_dir: Path,
+) -> None:
+    """
+    Extract ZIP members while preventing path traversal and symlink entries.
+
+    Archive members must remain strictly inside target_dir.
+    """
+    target_dir = target_dir.resolve()
+    seen_paths: set[Path] = set()
+
+    for info in zf.infolist():
+        raw_name = info.filename
+
+        if not raw_name or "\x00" in raw_name:
+            raise HTTPException(
+                400,
+                "Archive contains an invalid member name.",
+            )
+
+        normalized_name = raw_name.replace("\\", "/")
+
+        posix_name = PurePosixPath(normalized_name)
+        windows_name = PureWindowsPath(normalized_name)
+
+        if (
+            posix_name.is_absolute()
+            or windows_name.is_absolute()
+            or windows_name.drive
+            or any(
+                part == ".."
+                for part in posix_name.parts
+            )
+        ):
+            raise HTTPException(
+                400,
+                "Archive contains an unsafe path.",
+            )
+
+        relative_path = Path(*posix_name.parts)
+        destination = (
+            target_dir / relative_path
+        ).resolve()
+
+        try:
+            destination.relative_to(target_dir)
+        except ValueError as exc:
+            raise HTTPException(
+                400,
+                "Archive contains a path outside the extraction directory.",
+            ) from exc
+
+        if destination in seen_paths:
+            raise HTTPException(
+                400,
+                f"Archive contains duplicate member: {normalized_name}",
+            )
+
+        seen_paths.add(destination)
+
+        mode = (
+            info.external_attr >> 16
+        ) & 0xFFFF
+
+        if stat.S_ISLNK(mode):
+            raise HTTPException(
+                400,
+                "Archive contains a symbolic link.",
+            )
+
+        if normalized_name.endswith("/"):
+            destination.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            continue
+
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with (
+            zf.open(info, "r") as source,
+            destination.open("wb") as target,
+        ):
+            shutil.copyfileobj(
+                source,
+                target,
+            )
 
 def _is_specific_range(range_uri: str) -> bool:
     return range_uri not in GENERIC_RANGES
@@ -2981,7 +3074,10 @@ async def upload_plugin(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         with zipfile.ZipFile(io.BytesIO(contents)) as zf:
-            zf.extractall(tmp_dir)
+            _safe_extract_zip(
+                zf,
+                Path(tmp_dir),
+            )
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid plugin structure: must contain a single folder with plugin.json")
@@ -3035,7 +3131,10 @@ async def upload_theme(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         with zipfile.ZipFile(io.BytesIO(contents)) as zf:
-            zf.extractall(tmp_dir)
+            _safe_extract_zip(
+                zf,
+                Path(tmp_dir),
+            )
         entries = os.listdir(tmp_dir)
         if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
             raise HTTPException(400, "Invalid theme structure: must contain a single folder with theme.json")
