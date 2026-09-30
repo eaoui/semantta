@@ -5,7 +5,11 @@ human-readable SHACL shape URIs.
 """
 
 import hashlib
+import json
+import os
 import re
+import tempfile
+from pathlib import Path
 
 
 def prefix_for_uri(entity_uri: str, prefix_map: dict) -> str:
@@ -44,3 +48,44 @@ def property_shape_uri(prop_uri: str, prefix_map: dict) -> str:
     Convenience wrapper that builds a SHACL shape URI for a property.
     """
     return shape_uri_for_entity(prop_uri, "property", prefix_map)
+
+def atomic_write_json(
+    path: str | Path,
+    data,
+    *,
+    indent: int = 2,
+) -> None:
+    target = Path(path)
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+        text=True,
+    )
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                indent=indent,
+            )
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(
+            temp_name,
+            target,
+        )
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+        raise

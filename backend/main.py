@@ -54,7 +54,11 @@ from rdflib.namespace import OWL, RDF, RDFS, split_uri
 from config import FUSEKI_CONFIG
 from fuseki_store import FusekiStore, SHAPES_GRAPH
 from rdf_store import RDFStore
-from utils import shape_uri_for_entity, property_shape_uri
+from utils import (
+    atomic_write_json,
+    shape_uri_for_entity,
+    property_shape_uri,
+)
 from logging_config import logger
 
 
@@ -1135,9 +1139,10 @@ def load_preferences():
     return {"display_format": "prefix", "excluded_label_properties": []}
 
 def save_preferences(prefs):
-    os.makedirs(os.path.dirname(PREFERENCES_FILE), exist_ok=True)
-    with open(PREFERENCES_FILE, 'w') as f:
-        json.dump(prefs, f, indent=2)
+    atomic_write_json(
+        PREFERENCES_FILE,
+        prefs,
+    )
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -1146,9 +1151,10 @@ def load_settings():
     return {"site_title": "Semantta", "base_iri": ""}
 
 def save_settings(settings):
-    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-    with open(SETTINGS_FILE, 'w') as f:
-        json.dump(settings, f, indent=2)
+    atomic_write_json(
+        SETTINGS_FILE,
+        settings,
+    )
 
 # ---------------------------------------------------------------------------
 #  Constraint Helpers
@@ -1943,9 +1949,10 @@ def load_plugins_config():
         return json.load(f)
 
 def save_plugins_config(config):
-    os.makedirs(os.path.dirname(PLUGINS_CONFIG_FILE), exist_ok=True)
-    with open(PLUGINS_CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    atomic_write_json(
+        PLUGINS_CONFIG_FILE,
+        config,
+    )
 
 def list_plugins():
     if not os.path.isdir(PLUGINS_DIR):
@@ -2006,9 +2013,10 @@ def load_themes_config():
         return json.load(f)
 
 def save_themes_config(config):
-    os.makedirs(os.path.dirname(THEMES_CONFIG_FILE), exist_ok=True)
-    with open(THEMES_CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    atomic_write_json(
+        THEMES_CONFIG_FILE,
+        config,
+    )
 
 def list_themes():
     themes = [{
@@ -2045,9 +2053,10 @@ def list_themes():
     return themes
 
 def set_active_theme(theme_folder: str):
-    os.makedirs(os.path.dirname(ACTIVE_THEME_FILE), exist_ok=True)
-    with open(ACTIVE_THEME_FILE, "w") as f:
-        json.dump({"active_theme": theme_folder}, f)
+    atomic_write_json(
+        ACTIVE_THEME_FILE,
+        {"active_theme": theme_folder},
+    )
 
 # ---------------------------------------------------------------------------
 #  Startup Helpers
@@ -2719,9 +2728,10 @@ async def toggle_star(uri: str):
         starred.add(uri)
 
     # Persist to disk
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STARS_FILE, "w") as f:
-        json.dump(list(starred), f)
+    atomic_write_json(
+        STARS_FILE,
+        list(starred),
+    )
 
     # Update the in‑memory instance list
     for inst in state.get("instances", []):
