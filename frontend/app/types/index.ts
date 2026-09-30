@@ -58,3 +58,20 @@ export interface StateResponse {
   site_title?: string
   base_iri?: string
 }
+
+export interface InstanceListResponse {
+  instances: Instance[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface InstanceListOptions {
+  limit?: number
+  offset?: number
+  search?: string
+  typeUri?: string
+  source?: 'all' | 'imported' | 'created'
+  starred?: boolean
+  includeBlankNodes?: boolean
+}

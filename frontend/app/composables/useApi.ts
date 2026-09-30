@@ -1,4 +1,8 @@
-import type { StateResponse } from '@/types'
+import type {
+  StateResponse,
+  InstanceListOptions,
+  InstanceListResponse,
+} from '@/types'
 
 /**
  * Thin wrapper around the backend REST API.
@@ -32,6 +36,76 @@ export const useApi = () => {
   const fetchState = (): Promise<StateResponse> =>
     request('/api/state')
 
+  const fetchInstances = (
+    options: InstanceListOptions = {},
+  ) => {
+    const params = new URLSearchParams()
+
+    if (options.limit != null) {
+      params.set(
+        'limit',
+        String(options.limit),
+      )
+    }
+
+    if (options.offset != null) {
+      params.set(
+        'offset',
+        String(options.offset),
+      )
+    }
+
+    if (options.search?.trim()) {
+      params.set(
+        'search',
+        options.search.trim(),
+      )
+    }
+
+    if (options.typeUri) {
+      params.set(
+        'type_uri',
+        options.typeUri,
+      )
+    }
+
+    if (
+      options.source &&
+      options.source !== 'all'
+    ) {
+      params.set(
+        'source',
+        options.source,
+      )
+    }
+
+    if (options.starred) {
+      params.set(
+        'starred',
+        'true',
+      )
+    }
+
+    if (options.includeBlankNodes) {
+      params.set(
+        'include_blank_nodes',
+        'true',
+      )
+    }
+
+    const query = params.toString()
+
+    return request<InstanceListResponse>(
+      `/api/instances${query ? `?${query}` : ''
+      }`,
+    )
+  }
+
+  const fetchInstanceTypes = () =>
+    request<{ types: string[] }>(
+      '/api/instances/types',
+    )
+
   const uploadOntology = (file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -50,5 +124,12 @@ export const useApi = () => {
     })
   }
 
-  return { fetchState, uploadOntology, setDisplayFormat, request }
+  return {
+    fetchState,
+    fetchInstances,
+    fetchInstanceTypes,
+    uploadOntology,
+    setDisplayFormat,
+    request,
+  }
 }

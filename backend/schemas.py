@@ -67,6 +67,13 @@ class ToggleRequest(BaseModel):
     active: bool
 
 
+class InstanceListResponse(BaseModel):
+    instances: List[Instance]
+    total: int
+    limit: int
+    offset: int
+
+
 class StateResponse(BaseModel):
     ontologies: List[OntologyInfo]
     instances: List[Instance]

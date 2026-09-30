@@ -7,7 +7,7 @@ application.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 from rdflib import Graph
 
@@ -41,6 +41,36 @@ class RDFStore(Protocol):
         ...
 
     async def get_all_instances(self) -> List[Dict[str, Any]]:
+        ...
+
+    async def count_instances(
+        self,
+        *,
+        search: str = "",
+        type_uri: Optional[str] = None,
+        include_blank_nodes: bool = False,
+        include_uris: Optional[List[str]] = None,
+        exclude_uris: Optional[List[str]] = None,
+    ) -> int:
+        ...
+
+    async def list_instances(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        search: str = "",
+        type_uri: Optional[str] = None,
+        include_blank_nodes: bool = False,
+        include_uris: Optional[List[str]] = None,
+        exclude_uris: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        ...
+
+    async def get_instance_types(
+        self,
+        limit: int = 10000,
+    ) -> List[str]:
         ...
 
     async def load_shapes_graph(self) -> Graph:

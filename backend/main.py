@@ -31,7 +31,15 @@ load_dotenv()
 
 import owlrl
 import pyshacl
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -39,6 +47,7 @@ from fastapi.responses import FileResponse, Response
 
 from schemas import (
     Instance,
+    InstanceListResponse,
     MetadataFileInfo,
     OntologyInfo,
     ProfileEntityItem,
@@ -2711,6 +2720,137 @@ async def create_instance(data: dict):
     await refresh_instances_from_store()
     invalidate_profile()
     return {"status": "created", "uri": instance_uri}
+
+@app.get(
+    "/api/instances",
+    response_model=InstanceListResponse,
+)
+async def list_instances(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query(""),
+    type_uri: Optional[str] = Query(None),
+    source: str = Query("all"),
+    starred: bool = Query(False),
+    include_blank_nodes: bool = Query(False),
+):
+    if source not in {
+        "all",
+        "imported",
+        "created",
+    }:
+        raise HTTPException(
+            400,
+            "Invalid source filter.",
+        )
+
+    if type_uri and not is_valid_uri(type_uri):
+        raise HTTPException(
+            400,
+            "Invalid type URI.",
+        )
+
+    created_uris = [
+        uri
+        for uri in state.get(
+            "created_instances",
+            set(),
+        )
+        if is_valid_uri(uri)
+    ]
+
+    starred_uris = [
+        uri
+        for uri in state.get(
+            "starred_instance_uris",
+            set(),
+        )
+        if is_valid_uri(uri)
+    ]
+
+    if (
+        source == "created"
+        and not created_uris
+    ):
+        return InstanceListResponse(
+            instances=[],
+            total=0,
+            limit=limit,
+            offset=offset,
+        )
+
+    if starred and not starred_uris:
+        return InstanceListResponse(
+            instances=[],
+            total=0,
+            limit=limit,
+            offset=offset,
+        )
+
+    include_uris = (
+        starred_uris
+        if starred
+        else None
+    )
+
+    exclude_uris = (
+        created_uris
+        if source == "imported"
+        else None
+    )
+
+    total = await store.count_instances(
+        search=search,
+        type_uri=type_uri,
+        include_blank_nodes=include_blank_nodes,
+        include_uris=include_uris,
+        exclude_uris=exclude_uris,
+    )
+
+    instances = await store.list_instances(
+        limit=limit,
+        offset=offset,
+        search=search,
+        type_uri=type_uri,
+        include_blank_nodes=include_blank_nodes,
+        include_uris=include_uris,
+        exclude_uris=exclude_uris,
+    )
+
+    starred_set = set(starred_uris)
+    created_set = set(created_uris)
+
+    for instance in instances:
+        uri = instance["uri"]
+        in_metadata = uri in _metadata_uris
+        created = uri in created_set
+
+        if created and in_metadata:
+            instance["source"] = "both"
+        elif created:
+            instance["source"] = "created"
+        else:
+            instance["source"] = "imported"
+
+        instance["starred"] = (
+            uri in starred_set
+        )
+
+    return InstanceListResponse(
+        instances=[
+            Instance(**instance)
+            for instance in instances
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+@app.get("/api/instances/types")
+async def list_instance_types():
+    return {
+        "types": await store.get_instance_types()
+    }
 
 @app.get("/api/instances/{uri:path}/syntax")
 async def get_instance_syntax(uri: str, format: str = "turtle"):

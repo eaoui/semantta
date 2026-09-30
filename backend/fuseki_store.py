@@ -207,6 +207,218 @@ class FusekiStore:
 
         return list(instances.values())
 
+    @staticmethod
+    def _sparql_string_literal(value: str) -> str:
+        """Return a safely escaped SPARQL double-quoted string literal."""
+        escaped = (
+            value
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _iri_values(uris: List[str]) -> str:
+        return " ".join(f"<{uri}>" for uri in uris)
+
+    def _instance_constraints(
+        self,
+        *,
+        search: str = "",
+        type_uri: Optional[str] = None,
+        include_blank_nodes: bool = False,
+        include_uris: Optional[List[str]] = None,
+        exclude_uris: Optional[List[str]] = None,
+    ) -> List[str]:
+        clauses = [
+            "?instance a ?instanceType .",
+        ]
+
+        if not include_blank_nodes:
+            clauses.append(
+                'FILTER(!STRSTARTS(STR(?instance), "urn:bnid:"))'
+            )
+
+        if type_uri:
+            clauses.append(
+                f"?instance a <{type_uri}> ."
+            )
+
+        if search:
+            literal = self._sparql_string_literal(
+                search.strip().lower()
+            )
+
+            conditions = [
+                "CONTAINS("
+                "LCASE(STR(?instance)), "
+                f"{literal})"
+            ]
+
+            for prop in self.label_properties:
+                conditions.append(
+                    "EXISTS { "
+                    f"?instance <{prop}> ?searchLabel . "
+                    "FILTER("
+                    "CONTAINS("
+                    "LCASE(STR(?searchLabel)), "
+                    f"{literal}"
+                    ")"
+                    ") }"
+                )
+
+            clauses.append(
+                "FILTER("
+                + " || ".join(conditions)
+                + ")"
+            )
+
+        if include_uris is not None:
+            if not include_uris:
+                clauses.append("FILTER(false)")
+            else:
+                clauses.append(
+                    "VALUES ?instance { "
+                    f"{self._iri_values(include_uris)} }}"
+                )
+
+        if exclude_uris:
+            clauses.append(
+                "FILTER NOT EXISTS { "
+                "VALUES ?excludedInstance { "
+                f"{self._iri_values(exclude_uris)} "
+                "} "
+                "FILTER(?instance = ?excludedInstance) "
+                "}"
+            )
+
+        return clauses
+
+    async def count_instances(
+        self,
+        *,
+        search: str = "",
+        type_uri: Optional[str] = None,
+        include_blank_nodes: bool = False,
+        include_uris: Optional[List[str]] = None,
+        exclude_uris: Optional[List[str]] = None,
+    ) -> int:
+        constraints = self._instance_constraints(
+            search=search,
+            type_uri=type_uri,
+            include_blank_nodes=include_blank_nodes,
+            include_uris=include_uris,
+            exclude_uris=exclude_uris,
+        )
+
+        rows = await self.query(
+            "SELECT (COUNT(DISTINCT ?instance) AS ?count) "
+            "WHERE { "
+            + " ".join(constraints)
+            + " }"
+        )
+
+        return int(rows[0]["count"]) if rows else 0
+
+    async def list_instances(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        search: str = "",
+        type_uri: Optional[str] = None,
+        include_blank_nodes: bool = False,
+        include_uris: Optional[List[str]] = None,
+        exclude_uris: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve a bounded page of instance summaries.
+
+        Only URI, types, blank-node status, and label are returned.
+        Full properties remain available through the individual-instance API.
+        """
+        constraints = self._instance_constraints(
+            search=search,
+            type_uri=type_uri,
+            include_blank_nodes=include_blank_nodes,
+            include_uris=include_uris,
+            exclude_uris=exclude_uris,
+        )
+
+        uri_rows = await self.query(
+            "SELECT DISTINCT ?instance WHERE { "
+            + " ".join(constraints)
+            + " } "
+            "ORDER BY STR(?instance) "
+            f"LIMIT {limit} OFFSET {offset}"
+        )
+
+        uris = [row["instance"] for row in uri_rows]
+
+        if not uris:
+            return []
+
+        values = self._iri_values(uris)
+
+        type_rows = await self.query(
+            "PREFIX rdf: "
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
+            "SELECT ?instance ?type WHERE { "
+            f"VALUES ?instance {{ {values} }} "
+            "?instance rdf:type ?type . "
+            "}"
+        )
+
+        types: Dict[str, List[str]] = {
+            uri: []
+            for uri in uris
+        }
+
+        for row in type_rows:
+            uri = row["instance"]
+            type_uri_value = row.get("type")
+
+            if (
+                type_uri_value
+                and type_uri_value
+                not in types.setdefault(uri, [])
+            ):
+                types[uri].append(type_uri_value)
+
+        labels = await self._fetch_best_labels(uris)
+
+        return [
+            {
+                "uri": uri,
+                "types": types.get(uri, []),
+                "properties": {},
+                "is_blank": uri.startswith("urn:bnid:"),
+                "label": labels.get(uri),
+            }
+            for uri in uris
+        ]
+
+    async def get_instance_types(
+        self,
+        limit: int = 10000,
+    ) -> List[str]:
+        rows = await self.query(
+            "SELECT DISTINCT ?type WHERE { "
+            "?instance a ?type . "
+            "FILTER(ISIRI(?type)) "
+            "} "
+            "ORDER BY STR(?type) "
+            f"LIMIT {limit}"
+        )
+
+        return [
+            row["type"]
+            for row in rows
+        ]
+
     # ── SHACL shape management ─────────────────────────────────────────
 
     async def load_shapes_graph(self) -> Graph:
