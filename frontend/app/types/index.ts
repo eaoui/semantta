@@ -49,6 +49,7 @@ export interface ProfileEntityItem {
 export interface StateResponse {
   ontologies: OntologyInfo[]
   instances: Instance[]
+  instance_count: number
   display_format: string
   public_display_blank_nodes: boolean
   prefix_map: Record<string, string>

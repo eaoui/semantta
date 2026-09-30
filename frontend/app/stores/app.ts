@@ -5,12 +5,16 @@ import type {
   Instance,
   MetadataFileInfo,
   ProfileEntityItem,
+  InstanceListOptions
 } from '@/types'
 
 export const useAppStore = defineStore('app', () => {
   // ── Data ──────────────────────────────────────────────
   const ontologies = ref<OntologyInfo[]>([])
   const instances = ref<Instance[]>([])
+  const instanceTotal = ref(0)
+  const instancesLoading = ref(false)
+  const instancesError = ref<string | null>(null)
   const prefixMap = ref<Record<string, string>>({})
   const metadataFiles = ref<MetadataFileInfo[]>([])
   const profileEntities = ref<ProfileEntityItem[]>([])
@@ -38,12 +42,8 @@ export const useAppStore = defineStore('app', () => {
       if (!data) throw new Error('Backend returned empty response')
 
       ontologies.value = data.ontologies
-      instances.value = data.instances.filter(
-        (inst) =>
-          inst.uri &&
-          inst.uri !== 'undefined' &&
-          (inst.uri.startsWith('http') || inst.uri.startsWith('urn:'))
-      )
+      instanceTotal.value = data.instance_count
+      instances.value = []
       metadataFiles.value = data.metadata_files
       prefixMap.value = data.prefix_map
       displayFormat.value = data.display_format
@@ -60,6 +60,26 @@ export const useAppStore = defineStore('app', () => {
       console.error('fetchState error:', e)
     } finally {
       loading.value = false
+    }
+  }
+
+  async function fetchInstances(
+    options: InstanceListOptions = {},
+  ) {
+    instancesLoading.value = true
+    instancesError.value = null
+
+    try {
+      const data = await api.fetchInstances(options)
+
+      instances.value = data.instances
+      instanceTotal.value = data.total
+    } catch (e: any) {
+      instancesError.value =
+        e?.message || 'Failed to load instances'
+      throw e
+    } finally {
+      instancesLoading.value = false
     }
   }
 
@@ -353,6 +373,9 @@ export const useAppStore = defineStore('app', () => {
     // state
     ontologies,
     instances,
+    instanceTotal,
+    instancesLoading,
+    instancesError,
     prefixMap,
     displayFormat,
     metadataFilter,
@@ -372,6 +395,7 @@ export const useAppStore = defineStore('app', () => {
 
     // actions
     fetchState,
+    fetchInstances,
     uploadOntology,
     setDisplayFormat,
     setMetadataFilter,

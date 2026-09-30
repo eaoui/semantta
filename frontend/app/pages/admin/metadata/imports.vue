@@ -94,8 +94,17 @@ const loadingMsg = ref('')
 const selectedFile = ref('')
 const confirmDelete = ref(false)
 
-const hasExistingMetadata = computed(() => store.instances.length > 0 || store.metadataFiles.length > 0)
-const hasMultipleSources = computed(() => store.instances.length > 0 || store.metadataFiles.length > 1)
+const hasExistingMetadata = computed(
+  () =>
+    store.instanceTotal > 0 ||
+    store.metadataFiles.length > 0
+)
+
+const hasMultipleSources = computed(
+  () =>
+    store.instanceTotal > 0 ||
+    store.metadataFiles.length > 1
+)
 
 // Ontology base namespaces (derived from each ontology's IRI)
 const ontologyBaseNamespaces = computed(() =>

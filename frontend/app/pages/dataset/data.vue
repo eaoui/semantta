@@ -157,6 +157,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePublicDisplay } from '@/composables/usePublicDisplay'
 import { useAppStore } from '@/stores/app'
+import type { Instance } from '@/types'
 import GraphView from '@/components/shared/GraphView.vue'
 
 const route = useRoute()
@@ -182,9 +183,19 @@ const loadingDesc = ref(true)
 const descError = ref('')
 const bnodeData = ref<Record<string, any>>({})
 
-const storeInstance = computed(() => store.instances.find((i: any) => i.uri === instanceUri.value))
-const instanceTypes = computed(() => storeInstance.value?.types || [])
-const instanceProperties = computed(() => storeInstance.value?.properties || {})
+const instanceData =
+  ref<Instance | null>(null)
+
+const storeInstance =
+  computed(() => instanceData.value)
+
+const instanceTypes = computed(
+  () => storeInstance.value?.types || [],
+)
+
+const instanceProperties = computed(
+  () => storeInstance.value?.properties || {},
+)
 
 const syntaxLoaded = ref(false)
 const graphLoaded = ref(false)
@@ -311,31 +322,32 @@ function getValueDisplayLabel(uri: string): string {
 async function refreshView() {
   loadingDesc.value = true
   descError.value = ''
+
   try {
-    // If the instance is already in the store, use its data
-    if (storeInstance.value) {
-      // Blank‑node data might not be in the store – fetch it once
-      const res = await $fetch<any>(`${apiBase}/api/instances/${encodeURIComponent(instanceUri.value)}`)
-      bnodeData.value = res.bnodes || {}
-    } else {
-      // Not in store – fetch instance and blank‑node data in one call
-      await store.fetchState()
-      if (!storeInstance.value) {
-        const res = await $fetch<any>(`${apiBase}/api/instances/${encodeURIComponent(instanceUri.value)}`)
-        if (!res || !res.types || res.types.length === 0) {
-          descError.value = 'Instance not found.'
-          loadingDesc.value = false
-          return
-        }
-        bnodeData.value = res.bnodes || {}
-      } else {
-        // Instance appeared after fetchState, still need bnodeData
-        const res = await $fetch<any>(`${apiBase}/api/instances/${encodeURIComponent(instanceUri.value)}`)
-        bnodeData.value = res.bnodes || {}
-      }
+    const res = await $fetch<Instance & {
+      bnodes?: Record<string, any>
+    }>(
+      `${apiBase}/api/instances/${encodeURIComponent(
+        instanceUri.value,
+      )}`,
+    )
+
+    if (
+      !res ||
+      !res.types ||
+      res.types.length === 0
+    ) {
+      descError.value = 'Instance not found.'
+      return
     }
+
+    instanceData.value = res
+    bnodeData.value =
+      res.bnodes || {}
   } catch (e: any) {
-    descError.value = e.message || 'Failed to load instance'
+    descError.value =
+      e.message ||
+      'Failed to load instance'
   } finally {
     loadingDesc.value = false
   }

@@ -54,6 +54,12 @@ class RDFStore(Protocol):
     ) -> int:
         ...
 
+    async def get_instance_labels(
+        self,
+        uris: List[str],
+    ) -> Dict[str, str]:
+        ...
+
     async def list_instances(
         self,
         *,

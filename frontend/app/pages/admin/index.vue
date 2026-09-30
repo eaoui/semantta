@@ -17,7 +17,10 @@
       class="p-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded space-y-1 max-w-xs text-gray-900 dark:text-gray-100">
       <p><strong>Ontologies imported:</strong> {{ store.loading ? '...' : store.ontologies.length }}</p>
       <p><strong>Active profile entities:</strong> {{ store.loading ? '...' : activeEntityCount }}</p>
-      <p><strong>Instances:</strong> {{ store.loading ? '...' : store.instances.length }}</p>
+      <p>
+        <strong>Instances:</strong>
+        {{ store.loading ? '...' : store.instanceTotal }}
+      </p>
     </div>
 
     <!-- Link to public site -->

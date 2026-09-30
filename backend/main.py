@@ -1031,22 +1031,6 @@ async def rebuild_used_uris():
     except Exception:
         _used_uris_set = set()
 
-async def refresh_instances_from_store():
-    instances = await store.get_all_instances()
-    starred = state.get("starred_instance_uris", set())
-    for inst in instances:
-        uri = inst["uri"]
-        in_metadata = uri in _metadata_uris
-        created = uri in state.get("created_instances", set())
-        if created and in_metadata:
-            inst["source"] = "both"
-        elif created:
-            inst["source"] = "created"
-        else:
-            inst["source"] = "imported"
-        inst["starred"] = uri in starred
-    state["instances"] = instances
-
 async def get_instance_suggestions(range_uris: list) -> list:
     if not store:
         return []
@@ -2419,18 +2403,34 @@ async def get_state():
             instances_count=inst_count, triples_count=len(g),
             vocab_integrated=mf.get("vocab_integrated", True), instances_merged=mf.get("instances_merged", True)
         ))
-    await refresh_instances_from_store()
+
+    instance_count = await store.count_instances(
+        include_blank_nodes=True,
+    )
+
     return StateResponse(
         ontologies=ontos,
         metadata_files=meta_files,
         profile_entities=profile_entities,
-        instances=state["instances"],
+        instances=[],
+        instance_count=instance_count,
         display_format=state["display_format"],
         prefix_map=state["prefix_map"],
-        public_display_blank_nodes=load_preferences().get("public_display_blank_nodes", False),
-        ontology_namespaces=sorted(state["all_ontology_namespaces"]),
-        site_title=state.get("site_title", "Semantta"),
-        base_iri=state.get("base_iri", "")
+        public_display_blank_nodes=load_preferences().get(
+            "public_display_blank_nodes",
+            False,
+        ),
+        ontology_namespaces=sorted(
+            state["all_ontology_namespaces"]
+        ),
+        site_title=state.get(
+            "site_title",
+            "Semantta",
+        ),
+        base_iri=state.get(
+            "base_iri",
+            "",
+        ),
     )
 
 @app.post("/api/ontology/upload")
@@ -2666,7 +2666,6 @@ async def upload_metadata(
     progress["phase"] = "Rebuilding caches…"
     invalidate_caches()
     ap.invalidate()
-    await refresh_instances_from_store()
     await rebuild_used_uris()
 
     progress["phase"] = ""
@@ -2717,7 +2716,6 @@ async def create_instance(data: dict):
     g.parse(data=triples, format="turtle")
     for t in g: state["created_instances_graph"].add(t)
     state["created_instances"].add(instance_uri)
-    await refresh_instances_from_store()
     invalidate_profile()
     return {"status": "created", "uri": instance_uri}
 
@@ -2768,24 +2766,35 @@ async def list_instances(
         if is_valid_uri(uri)
     ]
 
-    if (
-        source == "created"
-        and not created_uris
-    ):
-        return InstanceListResponse(
-            instances=[],
-            total=0,
-            limit=limit,
-            offset=offset,
-        )
+    created_set = set(created_uris)
+    starred_set = set(starred_uris)
 
-    if starred and not starred_uris:
-        return InstanceListResponse(
-            instances=[],
-            total=0,
-            limit=limit,
-            offset=offset,
-        )
+    include_uris = None
+    exclude_uris = None
+
+    if source == "created":
+        include_uris = created_uris
+
+    elif source == "imported":
+        exclude_uris = created_uris
+
+    if starred:
+        if not starred_uris:
+            return InstanceListResponse(
+                instances=[],
+                total=0,
+                limit=limit,
+                offset=offset,
+            )
+
+        if include_uris is None:
+            include_uris = starred_uris
+        else:
+            include_uris = [
+                uri
+                for uri in include_uris
+                if uri in starred_set
+            ]
 
     include_uris = (
         starred_uris
@@ -2892,13 +2901,10 @@ async def toggle_star(uri: str):
         list(starred),
     )
 
-    # Update the in‑memory instance list
-    for inst in state.get("instances", []):
-        if inst["uri"] == uri:
-            inst["starred"] = uri in starred
-            break
-
-    return {"status": "ok", "starred": uri in starred}
+    return {
+        "status": "ok",
+        "starred": uri in starred,
+    }
 
 @app.get("/api/instances/{uri:path}")
 async def get_instance(uri: str):
@@ -2960,7 +2966,17 @@ async def get_instance(uri: str):
             for pred in bnodes[bnode]["properties"]:
                 bnodes[bnode]["properties"][pred] = list(set(bnodes[bnode]["properties"][pred]))
 
-    return {"uri": uri, "types": types, "properties": props, "bnodes": bnodes}
+    label_map = await store.get_instance_labels(
+        [uri],
+    )
+
+    return {
+        "uri": uri,
+        "types": types,
+        "properties": props,
+        "bnodes": bnodes,
+        "label": label_map.get(uri),
+    }
 
 @app.put("/api/instances/{uri:path}")
 async def update_instance(uri: str, data: dict):
@@ -2982,7 +2998,6 @@ async def update_instance(uri: str, data: dict):
                 safe_val = val.replace("\\","\\\\").replace('"','\\"').replace("\n","\\n")
                 triples += f'\n<{uri}> <{pred}> "{safe_val}" .'
     if triples: await store.update(f"INSERT DATA {{ {triples} }}")
-    await refresh_instances_from_store()
     invalidate_profile()
     return {"status": "ok"}
 
@@ -2993,7 +3008,6 @@ async def delete_instance(uri: str):
     state["created_instances"].discard(uri)
     for t in list(state["created_instances_graph"].triples((URIRef(uri), None, None))):
         state["created_instances_graph"].remove(t)
-    await refresh_instances_from_store()
     invalidate_profile()
     return {"status": "ok"}
 
@@ -3028,7 +3042,6 @@ async def merge_file_metadata(filename: str):
     await store.update("CLEAR DEFAULT")
     await store.bulk_load_nt(nt_data)
     mf["instances_merged"] = True
-    await refresh_instances_from_store()
     await rebuild_used_uris()
     invalidate_profile()
     return {"status": "ok"}
@@ -3075,7 +3088,6 @@ async def delete_metadata(filename: str):
     if state["metadata_files"] or state["created_instances_graph"]:
         nt_data = state["merged_metadata_graph"].serialize(format="nt")
         await store.bulk_load_nt(nt_data)
-    await refresh_instances_from_store()
     await rebuild_used_uris()
     invalidate_everything()
     return {"status": "ok"}
@@ -3397,7 +3409,6 @@ async def apply_base_iri():
     nt_data = state["merged_metadata_graph"].serialize(format="nt")
     await store.update("CLEAR DEFAULT")
     await store.bulk_load_nt(nt_data)
-    await refresh_instances_from_store()
     await rebuild_used_uris()
     return {"status": "ok", "updated": len(mapping)}
 

@@ -77,6 +77,7 @@ class InstanceListResponse(BaseModel):
 class StateResponse(BaseModel):
     ontologies: List[OntologyInfo]
     instances: List[Instance]
+    instance_count: int = 0
     display_format: str
     prefix_map: Dict[str, str]
     metadata_files: List[MetadataFileInfo]

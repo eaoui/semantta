@@ -3,7 +3,7 @@
     <!-- Left: main area -->
     <div class="flex-1 min-w-0">
       <div class="mb-4">
-        <button v-if="store.instances.length > 0" @click="generateProfile"
+        <button v-if="store.instanceTotal > 0" @click="generateProfile"
           class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
           Generate profile from metadata
         </button>

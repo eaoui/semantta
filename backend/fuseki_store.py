@@ -419,6 +419,14 @@ class FusekiStore:
             for row in rows
         ]
 
+    async def get_instance_labels(
+        self,
+        uris: List[str],
+    ) -> Dict[str, str]:
+        return await self._fetch_best_labels(
+            uris,
+        )
+
     # ── SHACL shape management ─────────────────────────────────────────
 
     async def load_shapes_graph(self) -> Graph:
