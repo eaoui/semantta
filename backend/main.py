@@ -322,6 +322,25 @@ def _require_safe_path_component(name: str | None, label: str = "name") -> str:
         raise HTTPException(400, f"{label} contains illegal characters")
     return name.strip()
 
+def _path_within_directory(
+    base_dir: Path,
+    name: str,
+) -> Path:
+    base = base_dir.resolve()
+    candidate = (
+        base / name
+    ).resolve()
+
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(
+            400,
+            "Requested path is outside the managed data directory.",
+        ) from exc
+
+    return candidate
+
 async def _read_upload_with_limit(
     file: UploadFile,
     max_bytes: int,
@@ -2876,9 +2895,22 @@ async def merge_file_metadata(filename: str):
 
 @app.get("/api/metadata/raw/{filename:path}")
 async def get_raw_metadata(filename: str):
-    filename = _require_safe_path_component(filename, "filename")
-    filepath = os.path.join(METADATA_DIR, filename)
-    if not os.path.exists(filepath): raise HTTPException(404, "Metadata file not found")
+    filename = _require_safe_path_component(
+        filename,
+        "filename",
+    )
+
+    filepath = _path_within_directory(
+        METADATA_DIR,
+        filename,
+    )
+
+    if not filepath.is_file():
+        raise HTTPException(
+            404,
+            "Metadata file not found",
+        )
+
     return FileResponse(filepath)
 
 @app.delete("/api/metadata/{filename}")
@@ -3231,9 +3263,22 @@ async def apply_base_iri():
 
 @app.get("/api/ontology/raw/{filename:path}")
 async def get_raw_ontology(filename: str):
-    filename = _require_safe_path_component(filename, "filename")
-    filepath = os.path.join(ONTOLOGY_DIR, filename)
-    if not os.path.exists(filepath): raise HTTPException(404, "Ontology file not found")
+    filename = _require_safe_path_component(
+        filename,
+        "filename",
+    )
+
+    filepath = _path_within_directory(
+        ONTOLOGY_DIR,
+        filename,
+    )
+
+    if not filepath.is_file():
+        raise HTTPException(
+            404,
+            "Ontology file not found",
+        )
+
     return FileResponse(filepath)
 
 @app.post("/api/admin/purge")
