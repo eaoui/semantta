@@ -22,7 +22,6 @@ Semantta is built around a three‑layer architecture:
 
 Semantta is domain‑independent and can host data from any domain.
 
-
 ## Used Technologies
 
 | Layer | Technology |
@@ -42,13 +41,8 @@ Semantta currently provides:
 * macOS arm64 — DMG and ZIP
 * macOS x64 — DMG and ZIP
 
-The packaged application is self-contained and does not require users to separately install Python, Node.js, Java, or Fuseki.
-
+The packaged application is self-contained and does not require users to separately install Python, Node.js, Java, or Fuseki.  
 See the detailed [installation guide](docs/INSTALLATION.md) for installation instructions and package verification.
-
-## Development
-
-See the detailed [development guide](docs/development/DEVELOPMENT.md) for development setup and instructions.
 
 ## Basic Workflow
 
@@ -61,6 +55,8 @@ description, syntax, and interactive graph.
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
+
+See the detailed [development guide](docs/development/DEVELOPMENT.md) for development setup and instructions.
 
 ## License
 
