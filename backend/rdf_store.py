@@ -40,9 +40,6 @@ class RDFStore(Protocol):
     async def bulk_load_nt(self, nt_data: str) -> None:
         ...
 
-    async def get_all_instances(self) -> List[Dict[str, Any]]:
-        ...
-
     async def count_instances(
         self,
         *,

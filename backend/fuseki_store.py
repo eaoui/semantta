@@ -152,61 +152,6 @@ class FusekiStore:
                 label_map[r["instance"]] = lbl
         return label_map
 
-    async def get_all_instances(self) -> List[Dict[str, Any]]:
-        """
-        Retrieve every instance (subject with rdf:type) from the default graph,
-        including their properties and a best‑effort label.
-        """
-        rows = await self.query("""
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?instance ?type ?prop ?value WHERE {
-                ?instance a ?type .
-                OPTIONAL { ?instance ?prop ?value . FILTER(?prop != rdf:type) }
-            }
-        """)
-
-        instances: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            uri = row["instance"]
-            if uri not in instances:
-                instances[uri] = {
-                    "uri": uri,
-                    "types": [],
-                    "properties": {},
-                    "is_blank": uri.startswith("urn:bnid:"),
-                    "label": None,
-                }
-
-            t = row.get("type")
-            if t and t not in instances[uri]["types"]:
-                instances[uri]["types"].append(t)
-
-            p = row.get("prop")
-            v = row.get("value")
-            if p and v:
-                instances[uri]["properties"].setdefault(p, []).append(v)
-
-        # Deduplicate property values
-        for inst in instances.values():
-            for prop in inst["properties"]:
-                seen = set()
-                uniq = []
-                for val in inst["properties"][prop]:
-                    if val not in seen:
-                        seen.add(val)
-                        uniq.append(val)
-                inst["properties"][prop] = uniq
-
-        # Attach labels
-        all_uris = list(instances.keys())
-        if all_uris:
-            label_map = await self._fetch_best_labels(all_uris)
-            for uri, lbl in label_map.items():
-                if lbl:
-                    instances[uri]["label"] = lbl
-
-        return list(instances.values())
-
     @staticmethod
     def _sparql_string_literal(value: str) -> str:
         """Return a safely escaped SPARQL double-quoted string literal."""
