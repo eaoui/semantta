@@ -80,3 +80,26 @@ npm run dev
 Next time you only need steps 1 and 3.
 
 The app will be available at `http://localhost:3000`.
+
+## Project Structure
+
+```
+semantta/
+├── backend/
+│   ├── main.py              # FastAPI app, endpoints, core logic
+│   ├── fuseki_store.py      # Async Fuseki client
+│   ├── utils.py             # URI helpers
+│   ├── vocab/               # OWL vocabulary for reasoning
+│   └── plugins/             # User‑installed plugins
+├── data/                    # User data (development only; ignored by Git)
+├── docs/                    # Documentation
+└── frontend/
+    └── app/
+        ├── components/      # Vue components
+        ├── composables/     # Reusable logic
+        ├── layouts/         # Admin and public layouts
+        ├── pages/           # Nuxt pages (admin & public)
+        ├── stores/          # Pinia store
+        ├── types/           # TypeScript interfaces
+        └── ...
+```

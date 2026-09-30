@@ -58,29 +58,6 @@ See the detailed [development guide](docs/development/DEVELOPMENT.md) for develo
 4. **Explore publicly**: You can search or browser the existing dataset. The `/dataset` page indexes all instances. Click any instance to see its
 description, syntax, and interactive graph.
 
-## Project Structure
-
-```
-semantta/
-├── backend/
-│   ├── main.py              # FastAPI app, endpoints, core logic
-│   ├── fuseki_store.py      # Async Fuseki client
-│   ├── utils.py             # URI helpers
-│   ├── vocab/               # OWL vocabulary for reasoning
-│   └── plugins/             # User‑installed plugins
-├── data/                    # User data (development only; ignored by Git)
-├── docs/                    # Documentation
-└── frontend/
-    └── app/
-        ├── components/      # Vue components
-        ├── composables/     # Reusable logic
-        ├── layouts/         # Admin and public layouts
-        ├── pages/           # Nuxt pages (admin & public)
-        ├── stores/          # Pinia store
-        ├── types/           # TypeScript interfaces
-        └── ...
-```
-
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
