@@ -126,12 +126,12 @@ class FusekiStore:
     async def bulk_load_nt_file(
         self,
         file_path: str | Path,
+        graph_uri: str,
     ) -> None:
         """
-        Stream an N-Triples file directly to Fuseki.
+        Stream an N-Triples file directly into a Fuseki named graph.
 
-        The file itself remains on disk; its complete contents are never
-        materialized as one Python bytes/string object.
+        The complete file is not materialized in Python memory.
         """
         file_path = Path(file_path)
 
@@ -143,9 +143,7 @@ class FusekiStore:
         async def file_chunks():
             with file_path.open("rb") as source:
                 while True:
-                    chunk = source.read(
-                        1024 * 1024
-                    )
+                    chunk = source.read(1024 * 1024)
 
                     if not chunk:
                         break
@@ -153,17 +151,18 @@ class FusekiStore:
                     yield chunk
 
         try:
-            resp = await self.client.post(
-                self.data_url + "?default",
+            response = await self.client.post(
+                self.data_url,
+                params={
+                    "graph": graph_uri,
+                },
                 content=file_chunks(),
                 headers={
                     "Content-Type": "application/n-triples",
-                    "Content-Length": str(
-                        file_path.stat().st_size
-                    ),
                 },
             )
-            resp.raise_for_status()
+
+            response.raise_for_status()
 
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:500]
@@ -175,6 +174,104 @@ class FusekiStore:
                     f"{detail}"
                 ),
             ) from exc
+
+    async def graph_exists(
+        self,
+        graph_uri: str,
+    ) -> bool:
+        rows = await self.query(
+            f"""
+            SELECT (1 AS ?exists)
+            WHERE {{
+                GRAPH <{graph_uri}> {{
+                    ?s ?p ?o
+                }}
+            }}
+            LIMIT 1
+            """
+        )
+
+        return bool(rows)
+
+    async def get_graph_stats(
+        self,
+        graph_uri: str,
+    ) -> Dict[str, Any]:
+        count_rows = await self.query(
+            f"""
+            SELECT
+                (COUNT(*) AS ?triples)
+                (COUNT(DISTINCT ?s) AS ?subjects)
+            WHERE {{
+                GRAPH <{graph_uri}> {{
+                    ?s ?p ?o .
+                }}
+            }}
+            """
+        )
+
+        namespace_rows = await self.query(
+            f"""
+            SELECT DISTINCT ?term
+            WHERE {{
+                GRAPH <{graph_uri}> {{
+                    {{
+                        ?s ?p ?o .
+                        FILTER(isIRI(?p))
+                        BIND(?p AS ?term)
+                    }}
+                    UNION
+                    {{
+                        ?s a ?type .
+                        FILTER(isIRI(?type))
+                        BIND(?type AS ?term)
+                    }}
+                }}
+            }}
+            """
+        )
+
+        primary_rows = await self.query(
+            f"""
+            SELECT ?subject
+            WHERE {{
+                GRAPH <{graph_uri}> {{
+                    ?subject ?p ?o .
+                    FILTER(
+                        isIRI(?subject)
+                        &&
+                        !STRSTARTS(
+                            STR(?subject),
+                            "urn:bnid:"
+                        )
+                    )
+                }}
+            }}
+            LIMIT 1
+            """
+        )
+
+        return {
+            "triples_count": (
+                int(count_rows[0]["triples"])
+                if count_rows
+                else 0
+            ),
+            "instances_count": (
+                int(count_rows[0]["subjects"])
+                if count_rows
+                else 0
+            ),
+            "primary_iri": (
+                primary_rows[0]["subject"]
+                if primary_rows
+                else None
+            ),
+            "terms": [
+                row["term"]
+                for row in namespace_rows
+            ],
+        }
 
     async def _fetch_best_labels(self, uris: List[str]) -> Dict[str, str]:
         """

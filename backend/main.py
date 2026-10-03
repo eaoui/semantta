@@ -22,6 +22,7 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote, unquote
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -63,6 +64,7 @@ from rdflib.namespace import OWL, RDF, RDFS, split_uri
 from config import FUSEKI_CONFIG
 from fuseki_store import FusekiStore, SHAPES_GRAPH
 from rdf_store import RDFStore
+from streaming_rdf import stream_rdf_to_ntriples
 from utils import (
     atomic_write_json,
     shape_uri_for_entity,
@@ -104,6 +106,8 @@ RDF_FORMAT_MAP = {
     "jsonld": "json-ld", "json": "json-ld",
     "trix": "trix", "trig": "trig",
 }
+
+METADATA_GRAPH_PREFIX = "urn:semantta:metadata:"
 
 # User-installed plugins are importable as a namespace package from the
 # user-data directory. This keeps plugin code outside the application tree.
@@ -1138,6 +1142,30 @@ def list_saved_metadata_files():
         if f.endswith(('.nt','.ttl','.rdf','.xml','.jsonld','.json','.trig','.trix','.nq'))
         and not f.endswith('.meta.json')
     ]
+
+def metadata_graph_uri(filename: str) -> str:
+    return (
+        METADATA_GRAPH_PREFIX
+        + quote(
+            filename,
+            safe="",
+        )
+    )
+
+def metadata_filename_from_graph(
+    graph_uri: str,
+) -> str:
+    if not graph_uri.startswith(
+        METADATA_GRAPH_PREFIX
+    ):
+        raise ValueError(
+            f"Not a Semantta metadata graph URI: {graph_uri}"
+        )
+
+    return unquote(
+        graph_uri[len(METADATA_GRAPH_PREFIX):]
+    )
+
 
 # ---------------------------------------------------------------------------
 #  Preferences & Settings
@@ -2185,6 +2213,87 @@ def load_saved_ontologies():
         except Exception as e:
             logger.warning("Could not load ontology %s: %s", f, e, exc_info=True)
 
+async def ensure_metadata_named_graphs():
+    """
+    Ensure every persisted metadata file has a corresponding Fuseki
+    named graph.
+
+    Existing files from pre-P5.2 installations are migrated using the
+    streaming RDF ingestion foundation.
+    """
+    for filename in list_saved_metadata_files():
+        source_path = Path(
+            METADATA_DIR,
+            filename,
+        )
+
+        graph_uri = metadata_graph_uri(
+            filename
+        )
+
+        if await store.graph_exists(
+            graph_uri
+        ):
+            continue
+
+        ext = (
+            filename
+            .rsplit(".", 1)[-1]
+            .lower()
+            if "." in filename
+            else ""
+        )
+
+        fmt = RDF_FORMAT_MAP.get(ext)
+
+        if not fmt:
+            logger.warning(
+                "Skipping metadata migration for unsupported file: %s",
+                filename,
+            )
+            continue
+
+        progress["phase"] = (
+            f"Migrating metadata: {filename}…"
+        )
+
+        temporary_nt = Path(
+            tempfile.mkdtemp(
+                prefix="semantta-metadata-migration-"
+            )
+        ) / f"{filename}.nt"
+
+        try:
+            await asyncio.to_thread(
+                stream_rdf_to_ntriples,
+                source_path,
+                fmt,
+                temporary_nt,
+            )
+
+            await store.bulk_load_nt_file(
+                file_path=temporary_nt,
+                graph_uri=graph_uri,
+            )
+
+            logger.info(
+                "Migrated metadata file %s into named graph %s",
+                filename,
+                graph_uri,
+            )
+
+        finally:
+            temporary_nt.unlink(
+                missing_ok=True
+            )
+
+            try:
+                temporary_nt.parent.rmdir()
+            except OSError:
+                pass
+
+    progress["phase"] = ""
+
 def load_saved_metadata():
     if not os.path.isdir(METADATA_DIR):
         return
@@ -2249,9 +2358,20 @@ async def lifespan(app: FastAPI):
         progress["phase"] = "Building indexes…"
         rebuild_precomputed()
 
-        store.set_label_properties(LABEL_PROPERTIES)
+        store.set_label_properties(
+            LABEL_PROPERTIES
+        )
 
-        progress["phase"] = "Loading metadata…"
+        progress["phase"] = (
+            "Migrating metadata storage…"
+        )
+
+        await ensure_metadata_named_graphs()
+
+        progress["phase"] = (
+            "Loading metadata…"
+        )
+
         load_saved_metadata()
 
         # Load starred instances

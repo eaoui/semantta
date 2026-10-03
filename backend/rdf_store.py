@@ -46,7 +46,20 @@ class RDFStore(Protocol):
     async def bulk_load_nt_file(
         self,
         file_path: str | Path,
+        graph_uri: str,
     ) -> None:
+        ...
+
+    async def graph_exists(
+        self,
+        graph_uri: str,
+    ) -> bool:
+        ...
+
+    async def get_graph_stats(
+        self,
+        graph_uri: str,
+    ) -> Dict[str, Any]:
         ...
 
     async def count_instances(
