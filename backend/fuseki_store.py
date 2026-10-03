@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 import httpx
 from rdflib import Graph
+from pathlib import Path
 
 from config import FUSEKI_CONFIG, FusekiConfig
 from utils import shape_uri_for_entity
@@ -121,6 +122,59 @@ class FusekiStore:
             headers={"Content-Type": "application/n-triples"},
         )
         resp.raise_for_status()
+
+    async def bulk_load_nt_file(
+        self,
+        file_path: str | Path,
+    ) -> None:
+        """
+        Stream an N-Triples file directly to Fuseki.
+
+        The file itself remains on disk; its complete contents are never
+        materialized as one Python bytes/string object.
+        """
+        file_path = Path(file_path)
+
+        if not file_path.is_file():
+            raise FileNotFoundError(
+                f"N-Triples file not found: {file_path}"
+            )
+
+        async def file_chunks():
+            with file_path.open("rb") as source:
+                while True:
+                    chunk = source.read(
+                        1024 * 1024
+                    )
+
+                    if not chunk:
+                        break
+
+                    yield chunk
+
+        try:
+            resp = await self.client.post(
+                self.data_url + "?default",
+                content=file_chunks(),
+                headers={
+                    "Content-Type": "application/n-triples",
+                    "Content-Length": str(
+                        file_path.stat().st_size
+                    ),
+                },
+            )
+            resp.raise_for_status()
+
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:500]
+
+            raise HTTPException(
+                status_code=exc.response.status_code,
+                detail=(
+                    "Fuseki bulk file load failed: "
+                    f"{detail}"
+                ),
+            ) from exc
 
     async def _fetch_best_labels(self, uris: List[str]) -> Dict[str, str]:
         """

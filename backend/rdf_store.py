@@ -8,7 +8,7 @@ application.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Protocol
-
+from pathlib import Path
 from rdflib import Graph
 
 
@@ -37,7 +37,16 @@ class RDFStore(Protocol):
     ) -> str:
         ...
 
-    async def bulk_load_nt(self, nt_data: str) -> None:
+    async def bulk_load_nt(
+        self,
+        nt_data: str,
+    ) -> None:
+        ...
+
+    async def bulk_load_nt_file(
+        self,
+        file_path: str | Path,
+    ) -> None:
         ...
 
     async def count_instances(
