@@ -7,7 +7,7 @@ application.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Set
 from pathlib import Path
 from rdflib import Graph
 
@@ -96,6 +96,12 @@ class RDFStore(Protocol):
         self,
         limit: int = 10000,
     ) -> List[str]:
+        ...
+
+    async def get_metadata_membership(
+        self,
+        uris: List[str],
+    ) -> Set[str]:
         ...
 
     async def load_shapes_graph(self) -> Graph:

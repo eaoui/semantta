@@ -4,7 +4,7 @@ Handles all communication with the triplestore, including bulk loads,
 instance retrieval, and SHACL shape management.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import HTTPException
 import httpx
@@ -15,6 +15,7 @@ from config import FUSEKI_CONFIG, FusekiConfig
 from utils import shape_uri_for_entity
 
 SHAPES_GRAPH = "urn:profile:shapes"
+METADATA_GRAPH_PREFIX = "urn:semantta:metadata:"
 
 
 class FusekiStore:
@@ -271,6 +272,43 @@ class FusekiStore:
                 row["term"]
                 for row in namespace_rows
             ],
+        }
+
+    async def get_metadata_membership(
+        self,
+        uris: List[str],
+    ) -> Set[str]:
+        if not uris:
+            return set()
+
+        values = " ".join(
+            f"<{uri}>"
+            for uri in uris
+        )
+
+        rows = await self.query(
+            f"""
+            SELECT DISTINCT ?uri
+            WHERE {{
+                VALUES ?uri {{ {values} }}
+
+                GRAPH ?graph {{
+                    ?uri ?p ?o .
+                }}
+
+                FILTER(
+                    STRSTARTS(
+                        STR(?graph),
+                        "{METADATA_GRAPH_PREFIX}"
+                    )
+                )
+            }}
+            """
+        )
+
+        return {
+            row["uri"]
+            for row in rows
         }
 
     async def _fetch_best_labels(self, uris: List[str]) -> Dict[str, str]:

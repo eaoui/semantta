@@ -293,7 +293,6 @@ state = {
     "metadata_files": [],
     "metadata_only_sources": {},
     "non_integrated_uris": set(),
-    "merged_metadata_graph": Graph(),
     "created_instances": set(),
     "created_instances_graph": Graph(),
     "all_ontology_namespaces": set(),
@@ -309,7 +308,6 @@ _property_cardinalities: Dict[tuple, tuple] = {}
 _disjoint_pairs: Set[tuple] = set()
 
 _used_uris_set: Set[str] = set()
-_metadata_uris: Set[str] = set()
 
 progress = {"phase": "", "percent": 0}
 validation_ontology_graph = Graph()
@@ -596,56 +594,6 @@ def _flatten_class_expression(g: Graph, node) -> List[str]:
             except Exception:
                 pass
     return []
-
-def collapse_identical_blank_nodes(graph: Graph):
-    """
-    Merge blank nodes (both real BNodes and ``urn:bnid:...`` URIs)
-    that have **exactly** identical outgoing triples.
-    All references to a duplicate are redirected to its canonical node.
-    """
-    # ── 1. Identify blank‑node subjects ────────────────────────
-    bnodes = [
-        s for s in graph.subjects()
-        if isinstance(s, BNode) or
-           (isinstance(s, URIRef) and str(s).startswith("urn:bnid:"))
-    ]
-    if len(bnodes) <= 1:
-        return
-
-    # ── 2. Group by outgoing‑triple fingerprint ─────────────────
-    fingerprints = defaultdict(list)
-    for bn in bnodes:
-        triples = sorted(
-            (p.n3(), o.n3()) for _, p, o in graph.triples((bn, None, None))
-        )
-        fp = hashlib.sha256(str(triples).encode()).hexdigest()
-        fingerprints[fp].append(bn)
-
-    # ── 3. Build a mapping: duplicate → canonical ──────────────
-    mapping = {}
-    for nodes in fingerprints.values():
-        if len(nodes) <= 1:
-            continue
-        canonical = nodes[0]
-        for dup in nodes[1:]:
-            mapping[dup] = canonical
-
-    if not mapping:
-        return
-
-    # ── 4. Build a new graph with all references resolved ──────
-    new_graph = Graph()
-    for s, p, o in graph:
-        ns = mapping.get(s, s)
-        no = mapping.get(o, o) if isinstance(o, (BNode, URIRef)) else o
-        # Avoid creating a triple with a blank‑node subject that is now canonical but identical?
-        # No, we just add the triple.
-        new_graph.add((ns, p, no))
-
-    # ── 5. Replace the original graph’s content ────────────────
-    graph.remove((None, None, None))
-    for triple in new_graph:
-        graph.add(triple)
 
 def rewrite_uris_in_graph(g: Graph, mapping: dict):
     for s, p, o in list(g.triples((None, None, None))):
@@ -1083,46 +1031,6 @@ async def check_disjoint_classes(class_uris: List[str]):
 # ---------------------------------------------------------------------------
 #  Metadata Parsing
 # ---------------------------------------------------------------------------
-def parse_metadata(file_bytes: bytes, fmt: str = "nt") -> Graph:
-    """
-    Parse a metadata file. Blank nodes are always rewritten to
-    ``urn:bnid:...`` URIs, regardless of the original format.
-    """
-    content = file_bytes.decode("utf-8", errors="replace")
-    content = content.replace("\r\n", "\n").replace("\r", "\n")
-    if content.startswith('\ufeff'):
-        content = content[1:]
-
-    # Regex‑based rewrite for line‑based formats (NT, NQuads)
-    if fmt in ("nt", "nquads"):
-        content = re.sub(r"_:([A-Za-z0-9\-\._~]+)", r"<urn:bnid:\1>", content)
-
-    g = Graph()
-    try:
-        g.parse(data=content, format=fmt)
-    except Exception:
-        # Fallback: try N‑Triples for N‑Quads
-        if fmt == "nquads":
-            try:
-                g = Graph()
-                g.parse(data=content, format="nt")
-            except Exception:
-                pass
-        # else: keep the empty graph
-
-    # ── Universal blank‑node rewriting ────────────────────
-    # After parsing, replace any remaining BNode objects
-    # (from Turtle, RDF/XML, JSON‑LD, etc.) with urn:bnid: URIs.
-    bnode_map = {}
-    for s, p, o in list(g.triples((None, None, None))):
-        new_s = _replace_bnode(s, bnode_map)
-        new_o = _replace_bnode(o, bnode_map) if isinstance(o, BNode) else o
-        if new_s != s or new_o != o:
-            g.remove((s, p, o))
-            g.add((new_s, p, new_o))
-
-    return g
-
 
 def _replace_bnode(term, bnode_map: dict) -> URIRef:
     """Return a urn:bnid: URI for the given BNode, creating one if needed."""
@@ -1165,6 +1073,102 @@ def metadata_filename_from_graph(
     return unquote(
         graph_uri[len(METADATA_GRAPH_PREFIX):]
     )
+
+async def rebuild_default_data_graph() -> None:
+    """
+    Rebuild the Fuseki default graph from currently merged metadata
+    named graphs plus application-created instances.
+
+    Metadata named graphs remain the authoritative source.
+    """
+    await store.update("CLEAR DEFAULT")
+
+    for metadata_file in state["metadata_files"]:
+        if not metadata_file.get(
+            "instances_merged",
+            True,
+        ):
+            continue
+
+        graph_uri = metadata_file["graph_uri"]
+
+        await store.update(
+            f"ADD GRAPH <{graph_uri}> TO DEFAULT"
+        )
+
+    created_nt = (
+        state["created_instances_graph"]
+        .serialize(format="nt")
+    )
+
+    if created_nt.strip():
+        await store.bulk_load_nt(
+            created_nt
+        )
+
+async def _save_upload_to_file(
+    file: UploadFile,
+    destination: Path,
+    max_bytes: int,
+) -> int:
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".upload",
+        dir=destination.parent,
+    )
+
+    total = 0
+
+    try:
+        with os.fdopen(
+            temp_fd,
+            "wb",
+        ) as output:
+            while True:
+                chunk = await file.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                total += len(chunk)
+
+                if total > max_bytes:
+                    max_mb = (
+                        max_bytes
+                        // (1024 * 1024)
+                    )
+
+                    raise HTTPException(
+                        413,
+                        f"Uploaded file exceeds the {max_mb} MB limit.",
+                    )
+
+                output.write(chunk)
+
+            output.flush()
+            os.fsync(output.fileno())
+
+        os.replace(
+            temp_name,
+            destination,
+        )
+
+        return total
+
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -2295,45 +2299,65 @@ async def ensure_metadata_named_graphs():
     progress["phase"] = ""
 
 def load_saved_metadata():
+    """
+    Load metadata manifests without parsing RDF into Python graphs.
+
+    RDF content is stored in Fuseki named graphs.
+    """
+    state["metadata_files"].clear()
+
     if not os.path.isdir(METADATA_DIR):
         return
-    for f in list_saved_metadata_files():
-        path = os.path.join(METADATA_DIR, f)
-        try:
-            with open(path, 'rb') as fh:
-                data = fh.read()
-            g = parse_metadata(data, RDF_FORMAT_MAP.get(f.rsplit('.',1)[-1].lower(), "nt"))
-            meta_path = path + ".meta.json"
-            vocab_int = True
-            inst_merge = True
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path) as mf:
-                        meta_info = json.load(mf)
-                    vocab_int = meta_info.get("vocab_integrated", True)
-                    inst_merge = meta_info.get("instances_merged", True)
-                except Exception:
-                    pass
-            state["metadata_files"].append({
-                "filename": f,
-                "graph": g,
-                "vocab_integrated": vocab_int,
-                "instances_merged": inst_merge
-            })
-            for s in g.subjects():
-                if not str(s).startswith("urn:bnid:"):
-                    _metadata_uris.add(str(s))
-            for t in g:
-                state["merged_metadata_graph"].add(t)
-            if not vocab_int:
-                for s, p, o in g:
-                    for term in (s, p, o):
-                        if isinstance(term, URIRef):
-                            uri = str(term)
-                            if not uri.startswith("urn:bnid:"):
-                                state["non_integrated_uris"].add(uri)
-        except Exception as e:
-            logger.warning("Could not load metadata %s: %s", f, e, exc_info=True)
+
+    for filename in list_saved_metadata_files():
+        metadata_path = os.path.join(
+            METADATA_DIR,
+            filename,
+        )
+
+        graph_uri = metadata_graph_uri(
+            filename
+        )
+
+        vocab_integrated = True
+        instances_merged = True
+
+        meta_path = (
+            metadata_path
+            + ".meta.json"
+        )
+
+        if os.path.exists(meta_path):
+            try:
+                with open(
+                    meta_path,
+                    encoding="utf-8",
+                ) as mf:
+                    meta_info = json.load(mf)
+
+                vocab_integrated = meta_info.get(
+                    "vocab_integrated",
+                    True,
+                )
+                instances_merged = meta_info.get(
+                    "instances_merged",
+                    True,
+                )
+            except Exception:
+                logger.warning(
+                    "Could not read metadata sidecar: %s",
+                    meta_path,
+                    exc_info=True,
+                )
+
+        state["metadata_files"].append(
+            {
+                "filename": filename,
+                "graph_uri": graph_uri,
+                "vocab_integrated": vocab_integrated,
+                "instances_merged": instances_merged,
+            }
+        )
 
 # Create global service instances (after all class definitions)
 store: RDFStore = FusekiStore(
@@ -2391,6 +2415,7 @@ async def lifespan(app: FastAPI):
                 format="turtle",
             )
 
+        await rebuild_default_data_graph()
         await rebuild_used_uris()
 
         load_plugins()
@@ -2504,25 +2529,47 @@ async def get_state():
         iri=o["meta"]["iri"],
         namespaces=o.get("namespaces", []),
     ) for o in state["ontologies"]]
+    
     meta_files = []
+
     for mf in state["metadata_files"]:
-        g = mf["graph"]
-        primary = next((str(s) for s in g.subjects() if not str(s).startswith("urn:bnid:")), None)
+        stats = await store.get_graph_stats(
+            mf["graph_uri"]
+        )
+
         vocab_ns = set()
-        for p in g.predicates():
-            if isinstance(p, URIRef):
-                ns = safe_namespace(str(p))
-                if ns: vocab_ns.add(ns)
-        for t in g.objects(None, RDF.type):
-            if isinstance(t, URIRef):
-                ns = safe_namespace(str(t))
-                if ns: vocab_ns.add(ns)
-        inst_count = len({s for s in g.subjects() if not str(s).startswith("urn:bnid:")})
-        meta_files.append(MetadataFileInfo(
-            filename=mf["filename"], primary_iri=primary, namespaces=sorted(vocab_ns),
-            instances_count=inst_count, triples_count=len(g),
-            vocab_integrated=mf.get("vocab_integrated", True), instances_merged=mf.get("instances_merged", True)
-        ))
+
+        for term in stats.get("terms", []):
+            ns = safe_namespace(term)
+
+            if ns:
+                vocab_ns.add(ns)
+
+        meta_files.append(
+            MetadataFileInfo(
+                filename=mf["filename"],
+                primary_iri=stats.get(
+                    "primary_iri"
+                ),
+                namespaces=sorted(vocab_ns),
+                instances_count=stats.get(
+                    "instances_count",
+                    0,
+                ),
+                triples_count=stats.get(
+                    "triples_count",
+                    0,
+                ),
+                vocab_integrated=mf.get(
+                    "vocab_integrated",
+                    True,
+                ),
+                instances_merged=mf.get(
+                    "instances_merged",
+                    True,
+                ),
+            )
+        )
 
     instance_count = await store.count_instances(
         include_blank_nodes=True,
@@ -2681,115 +2728,224 @@ async def delete_ontology(filename: str):
 async def upload_metadata(
     file: UploadFile = File(...),
     integrate_vocab: bool = Form(True),
-    merge_instances: bool = Form(True)
+    merge_instances: bool = Form(True),
 ):
     if not state["ontologies"]:
-        raise HTTPException(400, "Upload an ontology first.")
+        raise HTTPException(
+            400,
+            "Upload an ontology first.",
+        )
+
     if not file.filename:
-        raise HTTPException(400, "No file selected.")
+        raise HTTPException(
+            400,
+            "No file selected.",
+        )
 
-    # Safely capture the filename as a plain string
-    filename = _require_safe_path_component(file.filename, "filename")
+    filename = _require_safe_path_component(
+        file.filename,
+        "filename",
+    )
 
-    if not state["metadata_files"] and not state["created_instances"]:
+    if (
+        not state["metadata_files"]
+        and not state["created_instances"]
+    ):
         merge_instances = True
 
-    contents = await _read_upload_with_limit(
+    ext = (
+        filename.rsplit(".", 1)[-1].lower()
+        if "." in filename
+        else ""
+    )
+
+    fmt = RDF_FORMAT_MAP.get(ext)
+
+    if not fmt:
+        raise HTTPException(
+            400,
+            f"Unsupported extension: .{ext}",
+        )
+
+    destination = Path(
+        METADATA_DIR,
+        filename,
+    )
+
+    graph_uri = metadata_graph_uri(
+        filename
+    )
+
+    progress["phase"] = "Saving metadata…"
+
+    await _save_upload_to_file(
         file,
+        destination,
         MAX_METADATA_UPLOAD_BYTES,
     )
-    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-    fmt = RDF_FORMAT_MAP.get(ext)
-    if not fmt:
-        raise HTTPException(400, f"Unsupported extension: .{ext}")
 
-    def do_import():
-        progress["phase"] = "Parsing metadata…"
-        new_g = parse_metadata(contents, fmt)
+    nt_dir = Path(
+        tempfile.mkdtemp(
+            prefix="semantta-metadata-",
+        )
+    )
 
-        progress["phase"] = "Merging metadata…"
-        if merge_instances:
-            for t in new_g:
-                state["merged_metadata_graph"].add(t)
-            collapse_identical_blank_nodes(state["merged_metadata_graph"])
-        else:
-            state["merged_metadata_graph"] = new_g
-            for t in state["created_instances_graph"]:
-                state["merged_metadata_graph"].add(t)
-            collapse_identical_blank_nodes(state["merged_metadata_graph"])
-            state["metadata_files"] = []
-            state["non_integrated_uris"].clear()
-            state["metadata_only_sources"].clear()
-
-        return new_g
+    nt_path = (
+        nt_dir / f"{filename}.nt"
+    )
 
     try:
-        new_g = await asyncio.to_thread(do_import)
-    except Exception as e:
+        progress["phase"] = (
+            "Parsing metadata…"
+        )
+
+        await asyncio.to_thread(
+            stream_rdf_to_ntriples,
+            destination,
+            fmt,
+            nt_path,
+        )
+
+        progress["phase"] = (
+            "Importing metadata into Fuseki…"
+        )
+
+        await store.bulk_load_nt_file(
+            file_path=nt_path,
+            graph_uri=graph_uri,
+        )
+
+        # A standalone upload replaces existing metadata sources,
+        # matching the pre-existing application semantics.
+        if (
+            not merge_instances
+            and state["metadata_files"]
+        ):
+            existing_files = list(
+                state["metadata_files"]
+            )
+
+            for existing in existing_files:
+                await store.update(
+                    "DROP GRAPH "
+                    f"<{existing['graph_uri']}>"
+                )
+
+            state["metadata_files"].clear()
+            state["metadata_only_sources"].clear()
+
+        if merge_instances:
+            await store.update(
+                f"ADD GRAPH <{graph_uri}> TO DEFAULT"
+            )
+
+        meta_path = (
+            str(destination)
+            + ".meta.json"
+        )
+
+        atomic_write_json(
+            meta_path,
+            {
+                "vocab_integrated":
+                    integrate_vocab,
+                "instances_merged":
+                    merge_instances,
+            },
+        )
+
+        state["metadata_files"].append(
+            {
+                "filename": filename,
+                "graph_uri": graph_uri,
+                "vocab_integrated":
+                    integrate_vocab,
+                "instances_merged":
+                    merge_instances,
+            }
+        )
+
+        if integrate_vocab:
+            progress["phase"] = (
+                "Integrating vocabulary…"
+            )
+
+            rows = await store.query(
+                f"""
+                SELECT DISTINCT ?term
+                WHERE {{
+                    GRAPH <{graph_uri}> {{
+                        {{
+                            ?term ?p ?o .
+                        }}
+                        UNION
+                        {{
+                            ?s ?term ?o .
+                        }}
+                        UNION
+                        {{
+                            ?s ?p ?term .
+                        }}
+
+                        FILTER(
+                            isIRI(?term)
+                            &&
+                            !STRSTARTS(
+                                STR(?term),
+                                "urn:bnid:"
+                            )
+                        )
+                    }}
+                }}
+                """
+            )
+
+            for row in rows:
+                await ap.merge_metadata_only_entity(
+                    row["term"],
+                    filename,
+                )
+
+        await rebuild_used_uris()
+
+        invalidate_caches()
+        ap.invalidate()
+
+        progress["phase"] = ""
+
+        return {
+            "status": "ok",
+            "filename": filename,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
         logger.exception(
             "Metadata import failed for %s",
             filename,
         )
+
         raise HTTPException(
             400,
             detail=(
                 "Metadata import failed. "
-                "Verify that the file is valid and matches its extension."
+                "Verify that the file is valid "
+                "and matches its extension."
             ),
-        ) from e
+        ) from exc
+
     finally:
         progress["phase"] = ""
 
-    # ── Save to disk ──
-    progress["phase"] = "Saving metadata to disk…"
-    os.makedirs(METADATA_DIR, exist_ok=True)
-    with open(os.path.join(METADATA_DIR, filename), 'wb') as f:
-        f.write(contents)
-
-    # Save integration flags as a .meta.json sidecar
-    meta_path = os.path.join(METADATA_DIR, filename + ".meta.json")
-    meta_info = {
-        "vocab_integrated": integrate_vocab,
-        "instances_merged": merge_instances,
-    }
-    with open(meta_path, 'w') as mf:
-        json.dump(meta_info, mf)
-
-    # ── Update in‑memory state ──
-    state["metadata_files"].append({
-        "filename": filename,
-        "graph": new_g,
-        "vocab_integrated": integrate_vocab,
-        "instances_merged": merge_instances
-    })
-
-    for s in new_g.subjects():
-        if not str(s).startswith("urn:bnid:"):
-            _metadata_uris.add(str(s))
-
-    progress["phase"] = "Importing into Fuseki…"
-    nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store.update("CLEAR DEFAULT")
-    await store.bulk_load_nt(nt_data)
-
-    if integrate_vocab:
-        progress["phase"] = "Integrating vocabulary…"
-        for s in new_g.subjects():
-            if not str(s).startswith("urn:bnid:"):
-                await ap.merge_metadata_only_entity(str(s), filename)
-    else:
-        for s, p, o in new_g:
-            for term in (s, p, o):
-                if isinstance(term, URIRef) and not str(term).startswith("urn:bnid:"):
-                    state["non_integrated_uris"].add(str(term))
-
-    progress["phase"] = "Rebuilding caches…"
-    invalidate_caches()
-    ap.invalidate()
-    await rebuild_used_uris()
-
-    progress["phase"] = ""
-    return {"status": "ok", "filename": filename}
+        try:
+            nt_path.unlink(
+                missing_ok=True
+            )
+            nt_path.parent.rmdir()
+        except OSError:
+            pass
 
 @app.post("/api/metadata/create")
 async def create_instance(data: dict):
@@ -2946,12 +3102,23 @@ async def list_instances(
         exclude_uris=exclude_uris,
     )
 
+    page_uris = [
+        instance["uri"]
+        for instance in instances
+    ]
+
+    metadata_uris = (
+        await store.get_metadata_membership(
+            page_uris
+        )
+    )
+
     starred_set = set(starred_uris)
     created_set = set(created_uris)
 
     for instance in instances:
         uri = instance["uri"]
-        in_metadata = uri in _metadata_uris
+        in_metadata = uri in metadata_uris
         created = uri in created_set
 
         if created and in_metadata:
@@ -3132,38 +3299,146 @@ async def delete_instance(uri: str):
     return {"status": "ok"}
 
 @app.post("/api/metadata/file/{filename:path}/integrate-vocab")
-async def integrate_file_vocab(filename: str):
-    mf = next((f for f in state["metadata_files"] if f["filename"] == filename), None)
-    if not mf: raise HTTPException(404, "Metadata file not found")
-    if mf.get("vocab_integrated", True): return {"status": "already integrated"}
-    for s, p, o in mf["graph"]:
-        for term in (s, p, o):
-            if isinstance(term, URIRef) and not str(term).startswith("urn:bnid:"):
-                state["non_integrated_uris"].discard(str(term))
-                await ap.merge_metadata_only_entity(str(term), filename)
+async def integrate_file_vocab(
+    filename: str,
+):
+    mf = next(
+        (
+            f
+            for f in state["metadata_files"]
+            if f["filename"] == filename
+        ),
+        None,
+    )
+
+    if not mf:
+        raise HTTPException(
+            404,
+            "Metadata file not found",
+        )
+
+    if mf.get(
+        "vocab_integrated",
+        True,
+    ):
+        return {
+            "status": "already integrated"
+        }
+
+    graph_uri = mf["graph_uri"]
+
+    rows = await store.query(
+        f"""
+        SELECT DISTINCT ?term
+        WHERE {{
+            GRAPH <{graph_uri}> {{
+                {{
+                    ?term ?p ?o .
+                }}
+                UNION
+                {{
+                    ?s ?term ?o .
+                }}
+                UNION
+                {{
+                    ?s ?p ?term .
+                }}
+
+                FILTER(
+                    isIRI(?term)
+                    &&
+                    !STRSTARTS(
+                        STR(?term),
+                        "urn:bnid:"
+                    )
+                )
+            }}
+        }}
+        """
+    )
+
+    for row in rows:
+        uri = row["term"]
+
+        state["non_integrated_uris"].discard(
+            uri
+        )
+
+        await ap.merge_metadata_only_entity(
+            uri,
+            filename,
+        )
+
     mf["vocab_integrated"] = True
-    meta_path = os.path.join(METADATA_DIR, filename + ".meta.json")
-    try:
-        with open(meta_path) as mf_meta: meta = json.load(mf_meta)
-    except Exception: meta = {}
-    meta["vocab_integrated"] = True
-    with open(meta_path, 'w') as mf_meta: json.dump(meta, mf_meta)
+
+    atomic_write_json(
+        os.path.join(
+            METADATA_DIR,
+            filename + ".meta.json",
+        ),
+        {
+            "vocab_integrated": True,
+            "instances_merged": mf.get(
+                "instances_merged",
+                True,
+            ),
+        },
+    )
+
     invalidate_profile()
+
     return {"status": "ok"}
 
 @app.post("/api/metadata/file/{filename:path}/merge-metadata")
-async def merge_file_metadata(filename: str):
-    mf = next((f for f in state["metadata_files"] if f["filename"] == filename), None)
-    if not mf: raise HTTPException(404, "Metadata file not found")
-    if mf.get("instances_merged", True): return {"status": "already merged"}
-    for t in mf["graph"]: state["merged_metadata_graph"].add(t)
-    collapse_identical_blank_nodes(state["merged_metadata_graph"])
-    nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store.update("CLEAR DEFAULT")
-    await store.bulk_load_nt(nt_data)
+async def merge_file_metadata(
+    filename: str,
+):
+    mf = next(
+        (
+            f
+            for f in state["metadata_files"]
+            if f["filename"] == filename
+        ),
+        None,
+    )
+
+    if not mf:
+        raise HTTPException(
+            404,
+            "Metadata file not found",
+        )
+
+    if mf.get(
+        "instances_merged",
+        True,
+    ):
+        return {
+            "status": "already merged"
+        }
+
+    await store.update(
+        f"ADD GRAPH <{mf['graph_uri']}> TO DEFAULT"
+    )
+
     mf["instances_merged"] = True
+
+    atomic_write_json(
+        os.path.join(
+            METADATA_DIR,
+            filename + ".meta.json",
+        ),
+        {
+            "vocab_integrated": mf.get(
+                "vocab_integrated",
+                True,
+            ),
+            "instances_merged": True,
+        },
+    )
+
     await rebuild_used_uris()
     invalidate_profile()
+
     return {"status": "ok"}
 
 @app.get("/api/metadata/raw/{filename:path}")
@@ -3187,29 +3462,53 @@ async def get_raw_metadata(filename: str):
     return FileResponse(filepath)
 
 @app.delete("/api/metadata/{filename}")
-async def delete_metadata(filename: str):
-    filename = _require_safe_path_component(filename, "filename")
-    before = len(state["metadata_files"])
-    state["metadata_files"] = [mf for mf in state["metadata_files"] if mf["filename"] != filename]
-    if len(state["metadata_files"]) == before: raise HTTPException(404, "Metadata file not found")
-    _metadata_uris.clear()
-    for mf in state["metadata_files"]:
-        for s in mf["graph"].subjects():
-            if not str(s).startswith("urn:bnid:"): _metadata_uris.add(str(s))
-    filepath = os.path.join(METADATA_DIR, filename)
-    if os.path.exists(filepath): os.remove(filepath)
+async def delete_metadata(
+    filename: str,
+):
+    filename = _require_safe_path_component(
+        filename,
+        "filename",
+    )
+
+    mf = next(
+        (
+            f
+            for f in state["metadata_files"]
+            if f["filename"] == filename
+        ),
+        None,
+    )
+
+    if not mf:
+        raise HTTPException(
+            404,
+            "Metadata file not found",
+        )
+
+    state["metadata_files"].remove(mf)
+
+    await store.update(
+        f"DROP GRAPH <{mf['graph_uri']}>"
+    )
+
+    filepath = os.path.join(
+        METADATA_DIR,
+        filename,
+    )
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
     meta_path = filepath + ".meta.json"
-    if os.path.exists(meta_path): os.remove(meta_path)
-    state["merged_metadata_graph"] = Graph()
-    for mf in state["metadata_files"]:
-        for t in mf["graph"]: state["merged_metadata_graph"].add(t)
-    for t in state["created_instances_graph"]: state["merged_metadata_graph"].add(t)
-    await store.update("CLEAR DEFAULT")
-    if state["metadata_files"] or state["created_instances_graph"]:
-        nt_data = state["merged_metadata_graph"].serialize(format="nt")
-        await store.bulk_load_nt(nt_data)
+
+    if os.path.exists(meta_path):
+        os.remove(meta_path)
+
+    await rebuild_default_data_graph()
     await rebuild_used_uris()
+
     invalidate_everything()
+
     return {"status": "ok"}
 
 @app.post("/api/profile/toggle")
@@ -3524,13 +3823,18 @@ async def apply_base_iri():
             state["created_instances"].discard(old_uri)
             state["created_instances"].add(new_uri)
     if not mapping: return {"status": "ok", "updated": 0}
-    rewrite_uris_in_graph(state["merged_metadata_graph"], mapping)
-    rewrite_uris_in_graph(state["created_instances_graph"], mapping)
-    nt_data = state["merged_metadata_graph"].serialize(format="nt")
-    await store.update("CLEAR DEFAULT")
-    await store.bulk_load_nt(nt_data)
+    rewrite_uris_in_graph(
+        state["created_instances_graph"],
+        mapping,
+    )
+
+    await rebuild_default_data_graph()
     await rebuild_used_uris()
-    return {"status": "ok", "updated": len(mapping)}
+
+    return {
+        "status": "ok",
+        "updated": len(mapping),
+    }
 
 @app.get("/api/ontology/raw/{filename:path}")
 async def get_raw_ontology(filename: str):
@@ -3572,7 +3876,6 @@ async def purge_all_data():
     state["prefix_map"].clear()
     state["metadata_files"].clear()
     state["instances"].clear()
-    state["merged_metadata_graph"] = Graph()
     state["created_instances"].clear()
     state["created_instances_graph"] = Graph()
     state["non_integrated_uris"].clear()
