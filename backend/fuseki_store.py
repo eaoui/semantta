@@ -503,11 +503,6 @@ class FusekiStore:
             for row in uri_rows[:limit]
         ]
 
-        has_more = len(uris) > limit
-
-        if has_more:
-            uris = uris[:limit]
-
         if not uris:
             return [], False
 

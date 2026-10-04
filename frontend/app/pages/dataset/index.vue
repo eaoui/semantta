@@ -67,8 +67,8 @@
         </tbody>
       </table>
 
-      <Pagination v-model:current-page="currentPage" :has-next="store.instancesHasMore"
-        :loading="store.instancesLoading" />
+      <Pagination :current-page="currentPage" :has-next="store.instancesHasMore" :loading="store.instancesLoading"
+        @page-change="goToPage" />
     </div>
 
     <p v-else class="text-gray-500 dark:text-gray-400">
@@ -140,12 +140,18 @@ async function loadInstances() {
   }
 }
 
-watch(
-  currentPage,
-  async () => {
-    await loadInstances()
-  },
-)
+async function goToPage(page: number) {
+  if (
+    page < 1 ||
+    page === currentPage.value ||
+    store.instancesLoading
+  ) {
+    return
+  }
+
+  currentPage.value = page
+  await loadInstances()
+}
 
 watch(searchQuery, async () => {
   pageCursors.value = [null]

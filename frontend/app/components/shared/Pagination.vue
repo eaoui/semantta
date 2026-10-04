@@ -34,7 +34,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  'update:currentPage': [page: number]
+  'page-change': [page: number]
 }>()
 
 function goPrevious() {
@@ -45,10 +45,7 @@ function goPrevious() {
     return
   }
 
-  emit(
-    'update:currentPage',
-    props.currentPage - 1,
-  )
+  emit('page-change', props.currentPage - 1)
 }
 
 function goNext() {
@@ -59,9 +56,6 @@ function goNext() {
     return
   }
 
-  emit(
-    'update:currentPage',
-    props.currentPage + 1,
-  )
+  emit('page-change', props.currentPage + 1)
 }
 </script>
