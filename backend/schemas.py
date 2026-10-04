@@ -69,7 +69,7 @@ class ToggleRequest(BaseModel):
 
 class InstanceListResponse(BaseModel):
     instances: List[Instance]
-    total: int
+    has_more: bool
     limit: int
     offset: int
 

@@ -13,6 +13,7 @@ export const useAppStore = defineStore('app', () => {
   const ontologies = ref<OntologyInfo[]>([])
   const instances = ref<Instance[]>([])
   const instanceTotal = ref(0)
+  const instancesHasMore = ref(false)
   const instancesLoading = ref(false)
   const instancesError = ref<string | null>(null)
   const prefixMap = ref<Record<string, string>>({})
@@ -73,10 +74,13 @@ export const useAppStore = defineStore('app', () => {
       const data = await api.fetchInstances(options)
 
       instances.value = data.instances
-      instanceTotal.value = data.total
+      instancesHasMore.value = data.has_more
+
+      return data
     } catch (e: any) {
       instancesError.value =
         e?.message || 'Failed to load instances'
+
       throw e
     } finally {
       instancesLoading.value = false
@@ -374,6 +378,7 @@ export const useAppStore = defineStore('app', () => {
     ontologies,
     instances,
     instanceTotal,
+    instancesHasMore,
     instancesLoading,
     instancesError,
     prefixMap,

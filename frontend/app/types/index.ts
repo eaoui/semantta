@@ -62,7 +62,7 @@ export interface StateResponse {
 
 export interface InstanceListResponse {
   instances: Instance[]
-  total: number
+  has_more: boolean
   limit: number
   offset: number
 }

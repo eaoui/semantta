@@ -7,53 +7,29 @@
       </h2>
 
       <div class="mt-6 max-w-md mx-auto">
-        <SearchBox
-          v-model="homeSearch"
-          placeholder="Search…"
-        />
+        <SearchBox v-model="homeSearch" placeholder="Search…" />
       </div>
     </div>
 
     <!-- Search results -->
     <div v-if="searching">
-      <h3
-        class="text-lg font-semibold mb-4 mt-8 text-gray-900 dark:text-gray-100"
-      >
+      <h3 class="text-lg font-semibold mb-4 mt-8 text-gray-900 dark:text-gray-100">
         Search results
-        <span v-if="searchResultsTotal > 0">
-          ({{ searchResultsTotal }})
-        </span>
       </h3>
 
-      <div
-        v-if="searchResultsLoading"
-        class="text-gray-500 dark:text-gray-400"
-      >
+      <div v-if="searchResultsLoading" class="text-gray-500 dark:text-gray-400">
         Searching…
       </div>
 
-      <p
-        v-else-if="searchResultsError"
-        class="text-red-600 dark:text-red-400"
-      >
+      <p v-else-if="searchResultsError" class="text-red-600 dark:text-red-400">
         {{ searchResultsError }}
       </p>
 
-      <div
-        v-else-if="searchResults.length"
-        class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
-      >
-        <InstanceCard
-          v-for="inst in searchResults"
-          :key="inst.uri"
-          :instance="inst"
-        />
+      <div v-else-if="searchResults.length" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <InstanceCard v-for="inst in searchResults" :key="inst.uri" :instance="inst" />
       </div>
 
-      <p
-        v-else
-        class="text-gray-500 dark:text-gray-400"
-      >
+      <p v-else class="text-gray-500 dark:text-gray-400">
         No matching instances found.
       </p>
     </div>
@@ -61,45 +37,25 @@
     <!-- Default content -->
     <template v-else>
       <!-- Featured instances -->
-      <div
-        v-if="featuredLoading"
-        class="mt-8 text-gray-500 dark:text-gray-400"
-      >
+      <div v-if="featuredLoading" class="mt-8 text-gray-500 dark:text-gray-400">
         Loading featured instances…
       </div>
 
-      <p
-        v-else-if="featuredError"
-        class="mt-8 text-red-600 dark:text-red-400"
-      >
+      <p v-else-if="featuredError" class="mt-8 text-red-600 dark:text-red-400">
         {{ featuredError }}
       </p>
 
-      <div
-        v-else-if="starredInstances.length"
-        class="mt-8"
-      >
-        <h3
-          class="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100"
-        >
+      <div v-else-if="starredInstances.length" class="mt-8">
+        <h3 class="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
           Featured
         </h3>
 
-        <div
-          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"
-        >
-          <InstanceCard
-            v-for="inst in starredInstances"
-            :key="inst.uri"
-            :instance="inst"
-          />
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <InstanceCard v-for="inst in starredInstances" :key="inst.uri" :instance="inst" />
         </div>
       </div>
 
-      <NuxtLink
-        to="/dataset"
-        class="text-blue-600 dark:text-blue-400 hover:underline mt-4 block"
-      >
+      <NuxtLink to="/dataset" class="text-blue-600 dark:text-blue-400 hover:underline mt-4 block">
         Browse full dataset →
       </NuxtLink>
     </template>
@@ -178,7 +134,6 @@ async function searchInstances() {
     })
 
     searchResults.value = data.instances
-    searchResultsTotal.value = data.total
   } catch (error: any) {
     searchResults.value = []
     searchResultsTotal.value = 0

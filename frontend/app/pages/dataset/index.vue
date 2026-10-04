@@ -67,8 +67,8 @@
         </tbody>
       </table>
 
-      <Pagination :current-page="currentPage" :total-pages="totalPages" :loading="store.instancesLoading"
-        @previous="previousPage" @next="nextPage" />
+      <Pagination v-model:current-page="currentPage" :has-next="store.instancesHasMore"
+        :loading="store.instancesLoading" />
     </div>
 
     <p v-else class="text-gray-500 dark:text-gray-400">
@@ -104,15 +104,6 @@ function instanceDisplayName(inst: {
   return inst.label || formatUri(inst.uri)
 }
 
-const totalPages = computed(() =>
-  Math.max(
-    1,
-    Math.ceil(
-      store.instanceTotal / pageSize,
-    ),
-  ),
-)
-
 const pageStart = computed(() =>
   store.instanceTotal === 0
     ? 0
@@ -120,10 +111,11 @@ const pageStart = computed(() =>
 )
 
 const pageEnd = computed(() =>
-  Math.min(
-    currentPage.value * pageSize,
-    store.instanceTotal,
-  ),
+  store.instances.length === 0
+    ? pageStart.value
+    : pageStart.value +
+    store.instances.length -
+    1,
 )
 
 async function loadInstances() {
@@ -137,35 +129,17 @@ async function loadInstances() {
   })
 }
 
-async function previousPage() {
-  if (
-    currentPage.value <= 1 ||
-    store.instancesLoading
-  ) {
-    return
-  }
-
-  currentPage.value -= 1
-  await loadInstances()
-}
-
-async function nextPage() {
-  if (
-    currentPage.value >= totalPages.value ||
-    store.instancesLoading
-  ) {
-    return
-  }
-
-  currentPage.value += 1
-  await loadInstances()
-}
+watch(
+  currentPage,
+  async () => {
+    await loadInstances()
+  },
+)
 
 watch(
   searchQuery,
   async () => {
     currentPage.value = 1
-    await loadInstances()
   },
 )
 

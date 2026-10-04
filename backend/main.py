@@ -3058,7 +3058,7 @@ async def list_instances(
         if not starred_uris:
             return InstanceListResponse(
                 instances=[],
-                total=0,
+                has_more=False,
                 limit=limit,
                 offset=offset,
             )
@@ -3084,15 +3084,7 @@ async def list_instances(
         else None
     )
 
-    total = await store.count_instances(
-        search=search,
-        type_uri=type_uri,
-        include_blank_nodes=include_blank_nodes,
-        include_uris=include_uris,
-        exclude_uris=exclude_uris,
-    )
-
-    instances = await store.list_instances(
+    instances, has_more = await store.list_instances(
         limit=limit,
         offset=offset,
         search=search,
@@ -3137,7 +3129,7 @@ async def list_instances(
             Instance(**instance)
             for instance in instances
         ],
-        total=total,
+        has_more=has_more,
         limit=limit,
         offset=offset,
     )

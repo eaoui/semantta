@@ -4,7 +4,7 @@ Handles all communication with the triplestore, including bulk loads,
 instance retrieval, and SHACL shape management.
 """
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 import httpx
@@ -467,7 +467,7 @@ class FusekiStore:
         include_blank_nodes: bool = False,
         include_uris: Optional[List[str]] = None,
         exclude_uris: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], bool]:
         """
         Retrieve a bounded page of instance summaries.
 
@@ -487,13 +487,18 @@ class FusekiStore:
             + " ".join(constraints)
             + " } "
             "ORDER BY STR(?instance) "
-            f"LIMIT {limit} OFFSET {offset}"
+            f"LIMIT {limit + 1} OFFSET {offset}"
         )
 
-        uris = [row["instance"] for row in uri_rows]
+        has_more = len(uri_rows) > limit
+
+        uris = [
+            row["instance"]
+            for row in uri_rows[:limit]
+        ]
 
         if not uris:
-            return []
+            return [], False
 
         values = self._iri_values(uris)
 
@@ -524,16 +529,19 @@ class FusekiStore:
 
         labels = await self._fetch_best_labels(uris)
 
-        return [
-            {
-                "uri": uri,
-                "types": types.get(uri, []),
-                "properties": {},
-                "is_blank": uri.startswith("urn:bnid:"),
-                "label": labels.get(uri),
-            }
-            for uri in uris
-        ]
+        return (
+            [
+                {
+                    "uri": uri,
+                    "types": types.get(uri, []),
+                    "properties": {},
+                    "is_blank": uri.startswith("urn:bnid:"),
+                    "label": labels.get(uri),
+                }
+                for uri in uris
+            ],
+            has_more,
+        )
 
     async def get_instance_types(
         self,
