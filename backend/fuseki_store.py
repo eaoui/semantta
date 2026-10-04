@@ -461,7 +461,7 @@ class FusekiStore:
         self,
         *,
         limit: int = 50,
-        offset: int = 0,
+        cursor: Optional[str] = None,
         search: str = "",
         type_uri: Optional[str] = None,
         include_blank_nodes: bool = False,
@@ -482,12 +482,18 @@ class FusekiStore:
             exclude_uris=exclude_uris,
         )
 
+        if cursor:
+            cursor_literal = self._sparql_string_literal(cursor)
+            constraints.append(
+                f'FILTER(STR(?instance) > {cursor_literal})'
+            )
+
         uri_rows = await self.query(
             "SELECT DISTINCT ?instance WHERE { "
             + " ".join(constraints)
             + " } "
             "ORDER BY STR(?instance) "
-            f"LIMIT {limit + 1} OFFSET {offset}"
+            f"LIMIT {limit + 1}"
         )
 
         has_more = len(uri_rows) > limit
@@ -496,6 +502,11 @@ class FusekiStore:
             row["instance"]
             for row in uri_rows[:limit]
         ]
+
+        has_more = len(uris) > limit
+
+        if has_more:
+            uris = uris[:limit]
 
         if not uris:
             return [], False

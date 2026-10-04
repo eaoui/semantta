@@ -95,6 +95,7 @@ const { formatUri } = usePublicDisplay()
 
 const pageSize = 50
 const currentPage = ref(1)
+const pageCursors = ref<(string | null)[]>([null])
 const searchQuery = ref('')
 
 function instanceDisplayName(inst: {
@@ -119,14 +120,24 @@ const pageEnd = computed(() =>
 )
 
 async function loadInstances() {
+  const cursor =
+    pageCursors.value[currentPage.value - 1] ?? null
+
   await store.fetchInstances({
     limit: pageSize,
-    offset:
-      (currentPage.value - 1) * pageSize,
+    cursor: cursor || undefined,
     search: searchQuery.value,
     includeBlankNodes:
       store.publicShowBlankNodes,
   })
+
+  if (
+    store.instancesHasMore &&
+    store.instancesNextCursor
+  ) {
+    pageCursors.value[currentPage.value] =
+      store.instancesNextCursor
+  }
 }
 
 watch(
@@ -136,12 +147,15 @@ watch(
   },
 )
 
-watch(
-  searchQuery,
-  async () => {
+watch(searchQuery, async () => {
+  pageCursors.value = [null]
+
+  if (currentPage.value !== 1) {
     currentPage.value = 1
-  },
-)
+  } else {
+    await loadInstances()
+  }
+})
 
 onMounted(async () => {
   if (!store.isReady) {

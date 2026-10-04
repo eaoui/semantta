@@ -83,13 +83,13 @@ class RDFStore(Protocol):
         self,
         *,
         limit: int = 50,
-        offset: int = 0,
+        cursor: Optional[str] = None,
         search: str = "",
         type_uri: Optional[str] = None,
         include_blank_nodes: bool = False,
         include_uris: Optional[List[str]] = None,
         exclude_uris: Optional[List[str]] = None,
-    ) -> Tuple[List[Dict[str, Any]], bool]:
+    ) -> tuple[List[Dict[str, Any]], bool]:
         ...
 
     async def get_instance_types(

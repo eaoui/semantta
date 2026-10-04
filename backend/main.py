@@ -3001,7 +3001,7 @@ async def create_instance(data: dict):
 )
 async def list_instances(
     limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None),
     search: str = Query(""),
     type_uri: Optional[str] = Query(None),
     source: str = Query("all"),
@@ -3060,7 +3060,6 @@ async def list_instances(
                 instances=[],
                 has_more=False,
                 limit=limit,
-                offset=offset,
             )
 
         if include_uris is None:
@@ -3086,12 +3085,18 @@ async def list_instances(
 
     instances, has_more = await store.list_instances(
         limit=limit,
-        offset=offset,
+        cursor=cursor,
         search=search,
         type_uri=type_uri,
         include_blank_nodes=include_blank_nodes,
         include_uris=include_uris,
         exclude_uris=exclude_uris,
+    )
+
+    next_cursor = (
+        instances[-1]["uri"]
+        if has_more and instances
+        else None
     )
 
     page_uris = [
@@ -3125,13 +3130,11 @@ async def list_instances(
         )
 
     return InstanceListResponse(
-        instances=[
-            Instance(**instance)
-            for instance in instances
-        ],
+        instances=[Instance(**instance) for instance in instances],
         has_more=has_more,
+        next_cursor=next_cursor,
         limit=limit,
-        offset=offset,
+        cursor=cursor,
     )
 
 @app.get("/api/instances/types")

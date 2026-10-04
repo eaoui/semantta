@@ -63,13 +63,14 @@ export interface StateResponse {
 export interface InstanceListResponse {
   instances: Instance[]
   has_more: boolean
+  next_cursor: string | null
   limit: number
-  offset: number
+  cursor: string | null
 }
 
 export interface InstanceListOptions {
   limit?: number
-  offset?: number
+  cursor?: string
   search?: string
   typeUri?: string
   source?: 'all' | 'imported' | 'created'

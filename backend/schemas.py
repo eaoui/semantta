@@ -70,8 +70,9 @@ class ToggleRequest(BaseModel):
 class InstanceListResponse(BaseModel):
     instances: List[Instance]
     has_more: bool
+    next_cursor: Optional[str] = None
     limit: int
-    offset: int
+    cursor: Optional[str] = None
 
 
 class StateResponse(BaseModel):

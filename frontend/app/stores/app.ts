@@ -15,6 +15,7 @@ export const useAppStore = defineStore('app', () => {
   const instanceTotal = ref(0)
   const instancesHasMore = ref(false)
   const instancesLoading = ref(false)
+  const instancesNextCursor = ref<string | null>(null)
   const instancesError = ref<string | null>(null)
   const prefixMap = ref<Record<string, string>>({})
   const metadataFiles = ref<MetadataFileInfo[]>([])
@@ -75,6 +76,7 @@ export const useAppStore = defineStore('app', () => {
 
       instances.value = data.instances
       instancesHasMore.value = data.has_more
+      instancesNextCursor.value = data.next_cursor
 
       return data
     } catch (e: any) {
@@ -379,6 +381,7 @@ export const useAppStore = defineStore('app', () => {
     instances,
     instanceTotal,
     instancesHasMore,
+    instancesNextCursor,
     instancesLoading,
     instancesError,
     prefixMap,

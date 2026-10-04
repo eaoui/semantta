@@ -48,11 +48,8 @@ export const useApi = () => {
       )
     }
 
-    if (options.offset != null) {
-      params.set(
-        'offset',
-        String(options.offset),
-      )
+    if (options.cursor) {
+      params.set('cursor', options.cursor)
     }
 
     if (options.search?.trim()) {

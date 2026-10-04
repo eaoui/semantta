@@ -164,6 +164,7 @@ const { fetchInstanceTypes } = useApi()
 
 const pageSize = 50
 const currentPage = ref(1)
+const pageCursors = ref<(string | null)[]>([null])
 
 const searchQuery = ref('')
 const selectedType = ref('')
@@ -204,10 +205,12 @@ const pageEnd = computed(() =>
 )
 
 async function loadInstances() {
+  const cursor =
+    pageCursors.value[currentPage.value - 1] ?? null
+
   await store.fetchInstances({
     limit: pageSize,
-    offset:
-      (currentPage.value - 1) * pageSize,
+    cursor: cursor || undefined,
     search: searchQuery.value,
     typeUri:
       selectedType.value || undefined,
@@ -215,6 +218,14 @@ async function loadInstances() {
     includeBlankNodes:
       showBlankNodes.value,
   })
+
+  if (
+    store.instancesHasMore &&
+    store.instancesNextCursor
+  ) {
+    pageCursors.value[currentPage.value] =
+      store.instancesNextCursor
+  }
 }
 
 async function loadTypes() {
@@ -238,8 +249,14 @@ watch(
     sourceFilter,
     showBlankNodes,
   ],
-  () => {
-    currentPage.value = 1
+  async () => {
+    pageCursors.value = [null]
+
+    if (currentPage.value !== 1) {
+      currentPage.value = 1
+    } else {
+      await loadInstances()
+    }
   },
 )
 
