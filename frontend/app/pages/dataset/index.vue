@@ -158,9 +158,9 @@ watch(searchQuery, async () => {
 
   if (currentPage.value !== 1) {
     currentPage.value = 1
-  } else {
-    await loadInstances()
   }
+
+  await loadInstances()
 })
 
 onMounted(async () => {
