@@ -533,52 +533,98 @@ class FusekiStore:
                 f'FILTER(STR(?instance) > {cursor_literal})'
             )
 
-        uri_rows = await self.query(
-            "SELECT DISTINCT ?instance WHERE { "
+        label_select = ""
+        label_patterns = ""
+
+        if self.label_properties:
+            label_variables = [
+                f"?lbl{i}"
+                for i in range(
+                    len(self.label_properties)
+                )
+            ]
+
+            label_select = (
+                "(SAMPLE(COALESCE("
+                + ", ".join(label_variables)
+                + ")) AS ?label)"
+            )
+
+            label_patterns = "\n".join(
+                f"OPTIONAL {{ ?instance <{prop}> ?lbl{i} }}"
+                for i, prop in enumerate(
+                    self.label_properties
+                )
+            )
+
+        select_fields = "?instance ?type"
+
+        if label_select:
+            select_fields += f" {label_select}"
+
+        rows = await self.query(
+            "SELECT "
+            + select_fields
+            + " WHERE { "
+            + "  { "
+            + "    SELECT DISTINCT ?instance WHERE { "
+            + "      "
             + " ".join(constraints)
+            + "    } "
+            + "    ORDER BY STR(?instance) "
+            + f"    LIMIT {limit + 1}"
+            + "  } "
+            + "  ?instance a ?type . "
+            + "  "
+            + label_patterns
             + " } "
-            "ORDER BY STR(?instance) "
-            f"LIMIT {limit + 1}"
+            + "GROUP BY ?instance ?type "
+            + "ORDER BY STR(?instance)"
         )
 
-        has_more = len(uri_rows) > limit
+        ordered_uris: List[str] = []
 
-        uris = [
-            row["instance"]
-            for row in uri_rows[:limit]
-        ]
+        for row in rows:
+            uri = row["instance"]
+
+            if uri not in ordered_uris:
+                ordered_uris.append(uri)
+
+        has_more = len(ordered_uris) > limit
+
+        uris = ordered_uris[:limit]
 
         if not uris:
             return [], False
 
-        values = self._iri_values(uris)
-
-        type_rows = await self.query(
-            "PREFIX rdf: "
-            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
-            "SELECT ?instance ?type WHERE { "
-            f"VALUES ?instance {{ {values} }} "
-            "?instance rdf:type ?type . "
-            "}"
-        )
+        selected_uris = set(uris)
 
         types: Dict[str, List[str]] = {
             uri: []
             for uri in uris
         }
 
-        for row in type_rows:
+        labels: Dict[str, str] = {}
+
+        for row in rows:
             uri = row["instance"]
+
+            if uri not in selected_uris:
+                continue
+
             type_uri_value = row.get("type")
 
             if (
                 type_uri_value
                 and type_uri_value
-                not in types.setdefault(uri, [])
+                not in types[uri]
             ):
                 types[uri].append(type_uri_value)
 
-        labels = await self._fetch_best_labels(uris)
+            label = row.get("label")
+
+            if label and uri not in labels:
+                labels[uri] = label
 
         return (
             [
