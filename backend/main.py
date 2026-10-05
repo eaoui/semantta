@@ -102,7 +102,7 @@ from paths import (
 # ---------------------------------------------------------------------------
 RDF_FORMAT_MAP = {
     "rdf": "xml", "owl": "xml", "xml": "xml",
-    "ttl": "turtle", "n3": "n3", "nt": "nt", "nq": "nquads",
+    "ttl": "turtle", "n3": "n3", "nt": "nt",
     "jsonld": "json-ld", "json": "json-ld",
     "trix": "trix", "trig": "trig",
 }
@@ -1091,6 +1091,13 @@ async def rebuild_default_data_graph() -> None:
             continue
 
         graph_uri = metadata_file["graph_uri"]
+
+        if not await store.graph_exists(graph_uri):
+            logger.warning(
+                "Skipping metadata graph that does not exist: %s",
+                graph_uri,
+            )
+            continue
 
         await store.update(
             f"ADD GRAPH <{graph_uri}> TO DEFAULT"
@@ -2268,6 +2275,7 @@ async def ensure_metadata_named_graphs():
         ) / f"{filename}.nt"
 
         try:
+
             await asyncio.to_thread(
                 stream_rdf_to_ntriples,
                 source_path,
@@ -2326,6 +2334,19 @@ def load_saved_metadata():
             metadata_path
             + ".meta.json"
         )
+
+        ext = (
+            filename.rsplit(".", 1)[-1].lower()
+            if "." in filename
+            else ""
+        )
+
+        if ext not in RDF_FORMAT_MAP:
+            logger.warning(
+                "Skipping saved metadata for unsupported file format: %s",
+                filename,
+            )
+            continue
 
         if os.path.exists(meta_path):
             try:
@@ -3152,7 +3173,6 @@ async def get_instance_syntax(uri: str, format: str = "turtle"):
         "jsonld": "application/ld+json",
         "json-ld": "application/ld+json",
         "trig": "application/trig",
-        "nquads": "application/n-quads",
     }
     accept = mime_map.get(format, "text/turtle")
     query = f"""

@@ -7,9 +7,10 @@ instance retrieval, and SHACL shape management.
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
-import httpx
 from rdflib import Graph
+import asyncio
 from pathlib import Path
+import httpx
 
 from config import FUSEKI_CONFIG, FusekiConfig
 from utils import shape_uri_for_entity
@@ -129,52 +130,96 @@ class FusekiStore:
         file_path: str | Path,
         graph_uri: str,
     ) -> None:
-        """
-        Stream an N-Triples file directly into a Fuseki named graph.
-
-        The complete file is not materialized in Python memory.
-        """
         file_path = Path(file_path)
 
         if not file_path.is_file():
-            raise FileNotFoundError(
-                f"N-Triples file not found: {file_path}"
+            raise FileNotFoundError(file_path)
+
+        file_size = file_path.stat().st_size
+
+        if file_size <= 0:
+            raise ValueError(
+                f"Cannot bulk-load empty N-Triples file: {file_path}"
             )
 
-        async def file_chunks():
-            with file_path.open("rb") as source:
-                while True:
-                    chunk = source.read(1024 * 1024)
+        chunk_size = 256 * 1024
 
-                    if not chunk:
-                        break
+        response = await self.client.delete(
+            self.data_url,
+            params={"graph": graph_uri},
+            timeout=None,
+        )
 
-                    yield chunk
-
-        try:
-            response = await self.client.post(
-                self.data_url,
-                params={
-                    "graph": graph_uri,
-                },
-                content=file_chunks(),
-                headers={
-                    "Content-Type": "application/n-triples",
-                },
+        if response.status_code not in (200, 202, 204, 404):
+            raise RuntimeError(
+                "Failed to clear Fuseki metadata graph: "
+                f"HTTP {response.status_code}: {response.text}"
             )
 
-            response.raise_for_status()
+        with file_path.open("rb") as file:
+            chunk_number = 0
+            pending = b""
 
-        except httpx.HTTPStatusError as exc:
-            detail = exc.response.text[:500]
+            while True:
+                data = await asyncio.to_thread(file.read, chunk_size)
 
-            raise HTTPException(
-                status_code=exc.response.status_code,
-                detail=(
-                    "Fuseki bulk file load failed: "
-                    f"{detail}"
-                ),
-            ) from exc
+                if not data:
+                    if pending:
+                        chunk = pending
+
+                        chunk_number += 1
+
+                        response = await self.client.post(
+                            self.data_url,
+                            params={"graph": graph_uri},
+                            content=chunk,
+                            headers={
+                                "Content-Type": "application/n-triples",
+                                "Content-Length": str(len(chunk)),
+                            },
+                            timeout=None,
+                        )
+
+                        if response.status_code >= 400:
+                            raise RuntimeError(
+                                "Fuseki bulk file load failed: "
+                                f"HTTP {response.status_code} "
+                                f"on chunk {chunk_number}: "
+                                f"{response.text}"
+                            )
+
+                    break
+
+                pending += data
+
+                last_newline = pending.rfind(b"\n")
+
+                if last_newline < 0:
+                    continue
+
+                chunk = pending[: last_newline + 1]
+                pending = pending[last_newline + 1 :]
+
+                chunk_number += 1
+
+                response = await self.client.post(
+                    self.data_url,
+                    params={"graph": graph_uri},
+                    content=chunk,
+                    headers={
+                        "Content-Type": "application/n-triples",
+                        "Content-Length": str(len(chunk)),
+                    },
+                    timeout=None,
+                )
+
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        "Fuseki bulk file load failed: "
+                        f"HTTP {response.status_code} "
+                        f"on chunk {chunk_number}: "
+                        f"{response.text}"
+                    )
 
     async def graph_exists(
         self,
