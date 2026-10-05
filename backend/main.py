@@ -3092,18 +3092,6 @@ async def list_instances(
                 if uri in starred_set
             ]
 
-    include_uris = (
-        starred_uris
-        if starred
-        else None
-    )
-
-    exclude_uris = (
-        created_uris
-        if source == "imported"
-        else None
-    )
-
     instances, has_more = await store.list_instances(
         limit=limit,
         cursor=cursor,
