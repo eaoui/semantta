@@ -3578,6 +3578,8 @@ async def merge_file_metadata(
         f"ADD GRAPH <{mf['graph_uri']}> TO DEFAULT"
     )
 
+    invalidate_instance_count()
+
     mf["instances_merged"] = True
 
     atomic_write_json(
