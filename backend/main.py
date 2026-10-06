@@ -290,6 +290,7 @@ state = {
     "combined_onto_graph": Graph(),
     "prefix_map": {},
     "instances": [],
+    "instance_count_cache": None,
     "display_format": "iri",
     "metadata_files": [],
     "metadata_graph_stats": {},
@@ -911,6 +912,24 @@ def update_label_hierarchy():
     LABEL_PROPERTIES = [uri for uri in sorted_labels if uri not in excluded]
     store.set_label_properties(LABEL_PROPERTIES)
 
+async def get_cached_instance_count() -> int:
+    cached = state.get("instance_count_cache")
+
+    if cached is not None:
+        return cached
+
+    count = await store.count_instances(
+        include_blank_nodes=True,
+    )
+
+    state["instance_count_cache"] = count
+
+    return count
+
+
+def invalidate_instance_count() -> None:
+    state["instance_count_cache"] = None
+
 # ---------------------------------------------------------------------------
 #  Validation Ontology
 # ---------------------------------------------------------------------------
@@ -1123,6 +1142,7 @@ async def rebuild_default_data_graph() -> None:
 
     Metadata named graphs remain the authoritative source.
     """
+    invalidate_instance_count()
     await store.update("CLEAR DEFAULT")
 
     for metadata_file in state["metadata_files"]:
@@ -2658,9 +2678,7 @@ async def get_state():
             )
         )
 
-    instance_count = await store.count_instances(
-        include_blank_nodes=True,
-    )
+    instance_count = await get_cached_instance_count()
 
     return StateResponse(
         ontologies=ontos,
@@ -2997,6 +3015,8 @@ async def upload_metadata(
                     filename,
                 )
 
+        invalidate_instance_count()
+
         await rebuild_used_uris()
 
         invalidate_caches()
@@ -3079,6 +3099,7 @@ async def create_instance(data: dict):
                 lines.append(f'<{instance_uri}> <{pred}> "{safe}" .')
     triples = "\n".join(lines)
     await store.update(f"INSERT DATA {{ {triples} }}")
+    invalidate_instance_count()
     g = Graph()
     g.parse(data=triples, format="turtle")
     for t in g: state["created_instances_graph"].add(t)
@@ -3360,6 +3381,8 @@ async def update_instance(uri: str, data: dict):
 async def delete_instance(uri: str):
     await store.update(f"DELETE WHERE {{ <{uri}> ?p ?o }}")
     await store.update(f"DELETE WHERE {{ ?s ?p <{uri}> }}")
+
+    invalidate_instance_count()
 
     was_created = (
         uri in state["created_instances"]
@@ -3969,6 +3992,7 @@ async def purge_all_data():
     state["non_integrated_uris"].clear()
     state["metadata_only_sources"].clear()
     state["all_ontology_namespaces"].clear()
+    invalidate_instance_count()
     invalidate_everything()
     if os.path.exists(PREFERENCES_FILE): os.remove(PREFERENCES_FILE)
     if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
