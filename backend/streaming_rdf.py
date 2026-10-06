@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from rdflib import BNode, Graph, URIRef
+from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.plugins.stores.memory import Memory
 
 
@@ -39,6 +39,31 @@ class StreamingStore(Memory):
     ) -> None:
         self._callback(triple)
 
+def _literal_to_ntriples(
+    term: Literal,
+) -> str:
+    """
+    Serialize an RDF literal using N-Triples lexical escaping.
+
+    Unlike Literal.n3(), this never uses triple-quoted strings.
+    """
+    lexical = (
+        str(term)
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+    )
+
+    encoded = f'"{lexical}"'
+
+    if term.language:
+        return f"{encoded}@{term.language}"
+
+    if term.datatype:
+        return f"{encoded}^^<{term.datatype}>"
+
+    return encoded
 
 def _term_to_ntriples(
     term,
@@ -56,6 +81,9 @@ def _term_to_ntriples(
             )
 
         return bnode_map[term].n3()
+
+    if isinstance(term, Literal):
+        return _literal_to_ntriples(term)
 
     return term.n3()
 
