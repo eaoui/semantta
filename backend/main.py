@@ -26,7 +26,7 @@ from urllib.parse import quote, unquote
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional, Set, cast
+from typing import Callable, Dict, List, Optional, Set, cast, Any
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -292,6 +292,7 @@ state = {
     "instances": [],
     "display_format": "iri",
     "metadata_files": [],
+    "metadata_graph_stats": {},
     "metadata_only_sources": {},
     "non_integrated_uris": set(),
     "created_instances": set(),
@@ -1038,7 +1039,7 @@ async def check_disjoint_classes(class_uris: List[str]):
                 raise HTTPException(400, f"Classes {a} and {b} are disjoint")
 
 # ---------------------------------------------------------------------------
-#  Metadata Parsing
+#  Metadata Helpers
 # ---------------------------------------------------------------------------
 
 def _replace_bnode(term, bnode_map: dict) -> URIRef:
@@ -1082,6 +1083,38 @@ def metadata_filename_from_graph(
     return unquote(
         graph_uri[len(METADATA_GRAPH_PREFIX):]
     )
+
+async def get_cached_metadata_graph_stats(
+    graph_uri: str,
+) -> Dict[str, Any]:
+    cached = state["metadata_graph_stats"].get(
+        graph_uri
+    )
+
+    if cached is not None:
+        return cached
+
+    stats = await store.get_graph_stats(
+        graph_uri
+    )
+
+    state["metadata_graph_stats"][
+        graph_uri
+    ] = stats
+
+    return stats
+
+
+def invalidate_metadata_graph_stats(
+    graph_uri: str,
+) -> None:
+    state["metadata_graph_stats"].pop(
+        graph_uri,
+        None,
+    )
+
+def clear_metadata_graph_stats() -> None:
+    state["metadata_graph_stats"].clear()
 
 async def rebuild_default_data_graph() -> None:
     """
@@ -2587,7 +2620,7 @@ async def get_state():
     meta_files = []
 
     for mf in state["metadata_files"]:
-        stats = await store.get_graph_stats(
+        stats = await get_cached_metadata_graph_stats(
             mf["graph_uri"]
         )
 
@@ -2867,6 +2900,10 @@ async def upload_metadata(
         await store.bulk_load_nt_file(
             file_path=nt_path,
             graph_uri=graph_uri,
+        )
+
+        invalidate_metadata_graph_stats(
+            graph_uri
         )
 
         # A standalone upload replaces existing metadata sources,
@@ -3536,6 +3573,10 @@ async def delete_metadata(
         f"DROP GRAPH <{mf['graph_uri']}>"
     )
 
+    invalidate_metadata_graph_stats(
+        mf["graph_uri"]
+    )
+
     filepath = os.path.join(
         METADATA_DIR,
         filename,
@@ -3921,6 +3962,7 @@ async def purge_all_data():
     state["combined_onto_graph"] = Graph()
     state["prefix_map"].clear()
     state["metadata_files"].clear()
+    clear_metadata_graph_stats()
     state["instances"].clear()
     state["created_instances"].clear()
     state["created_instances_graph"] = Graph()
