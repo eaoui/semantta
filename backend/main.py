@@ -2925,7 +2925,7 @@ async def upload_metadata(
         )
 
         # A standalone upload replaces existing metadata sources,
-        # matching the pre-existing application semantics.
+        # but the graph just imported must be preserved.
         if (
             not merge_instances
             and state["metadata_files"]
@@ -2935,9 +2935,20 @@ async def upload_metadata(
             )
 
             for existing in existing_files:
+                existing_graph_uri = (
+                    existing["graph_uri"]
+                )
+
+                if existing_graph_uri == graph_uri:
+                    continue
+
                 await store.update(
                     "DROP GRAPH "
-                    f"<{existing['graph_uri']}>"
+                    f"<{existing_graph_uri}>"
+                )
+
+                invalidate_metadata_graph_stats(
+                    existing_graph_uri
                 )
 
             state["metadata_files"].clear()
