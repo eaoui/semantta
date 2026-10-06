@@ -1293,7 +1293,7 @@ def _require_keys(data: dict, *keys: str):
 #  Application Profile Service
 # ---------------------------------------------------------------------------
 class ApplicationProfile:
-    def __init__(self, store: FusekiStore):
+    def __init__(self, store: RDFStore):
         self.store = store
         self._cache: List[ProfileEntityItem] = []
         self._dirty = True
@@ -1611,7 +1611,7 @@ class ApplicationProfile:
 #  SHACL Profile Manager
 # ---------------------------------------------------------------------------
 class SHACLProfile:
-    def __init__(self, store: FusekiStore, on_change: Optional[Callable[[], None]] = None):
+    def __init__(self, store: RDFStore, on_change: Optional[Callable[[], None]] = None):
         self.store = store
         self._shapes_cache = None
         self._on_change = on_change
@@ -3131,7 +3131,7 @@ async def list_instances(
                 if uri in starred_set
             ]
 
-    instances, has_more = await store.list_instances(
+    instances, has_more, metadata_uris = await store.list_instances(
         limit=limit,
         cursor=cursor,
         search=search,
@@ -3145,17 +3145,6 @@ async def list_instances(
         instances[-1]["uri"]
         if has_more and instances
         else None
-    )
-
-    page_uris = [
-        instance["uri"]
-        for instance in instances
-    ]
-
-    metadata_uris = (
-        await store.get_metadata_membership(
-            page_uris
-        )
     )
 
     starred_set = set(starred_uris)

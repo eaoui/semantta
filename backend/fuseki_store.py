@@ -319,43 +319,6 @@ class FusekiStore:
             ],
         }
 
-    async def get_metadata_membership(
-        self,
-        uris: List[str],
-    ) -> Set[str]:
-        if not uris:
-            return set()
-
-        values = " ".join(
-            f"<{uri}>"
-            for uri in uris
-        )
-
-        rows = await self.query(
-            f"""
-            SELECT DISTINCT ?uri
-            WHERE {{
-                VALUES ?uri {{ {values} }}
-
-                GRAPH ?graph {{
-                    ?uri ?p ?o .
-                }}
-
-                FILTER(
-                    STRSTARTS(
-                        STR(?graph),
-                        "{METADATA_GRAPH_PREFIX}"
-                    )
-                )
-            }}
-            """
-        )
-
-        return {
-            row["uri"]
-            for row in rows
-        }
-
     async def _fetch_best_labels(self, uris: List[str]) -> Dict[str, str]:
         """
         Return the best available label for each URI,
@@ -512,12 +475,14 @@ class FusekiStore:
         include_blank_nodes: bool = False,
         include_uris: Optional[List[str]] = None,
         exclude_uris: Optional[List[str]] = None,
-    ) -> Tuple[List[Dict[str, Any]], bool]:
+    ) -> Tuple[List[Dict[str, Any]], bool, Set[str]]:
         """
         Retrieve a bounded page of instance summaries.
 
-        Only URI, types, blank-node status, and label are returned.
-        Full properties remain available through the individual-instance API.
+        The returned tuple contains:
+        - instance summaries
+        - whether another page exists
+        - URIs that belong to metadata graphs
         """
         constraints = self._instance_constraints(
             search=search,
@@ -533,36 +498,44 @@ class FusekiStore:
                 f'FILTER(STR(?instance) > {cursor_literal})'
             )
 
-        label_select = ""
-        label_patterns = ""
+        label_patterns = [
+            f"OPTIONAL {{ ?instance <{prop}> ?label{i} }}"
+            for i, prop in enumerate(self.label_properties)
+        ]
 
-        if self.label_properties:
-            label_variables = [
-                f"?lbl{i}"
-                for i in range(
-                    len(self.label_properties)
-                )
-            ]
+        coalesce_parts = ", ".join(
+            f"?label{i}"
+            for i in range(len(self.label_properties))
+        )
 
-            label_select = (
-                "(SAMPLE(COALESCE("
-                + ", ".join(label_variables)
-                + ")) AS ?label)"
-            )
-
-            label_patterns = "\n".join(
-                f"OPTIONAL {{ ?instance <{prop}> ?lbl{i} }}"
-                for i, prop in enumerate(
-                    self.label_properties
-                )
-            )
+        label_expression = (
+            f"(COALESCE({coalesce_parts}) AS ?label)"
+            if self.label_properties
+            else ""
+        )
 
         select_fields = "?instance ?type"
 
-        if label_select:
-            select_fields += f" {label_select}"
+        if label_expression:
+            select_fields += f" {label_expression}"
+
+        select_fields += """
+            (EXISTS {
+                GRAPH ?metadataGraph {
+                    ?instance ?metadataP ?metadataO .
+                }
+                FILTER(
+                    STRSTARTS(
+                        STR(?metadataGraph),
+                        "urn:semantta:metadata:"
+                    )
+                )
+            } AS ?inMetadata)
+        """
 
         rows = await self.query(
+            "PREFIX rdf: "
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
             "SELECT "
             + select_fields
             + " WHERE { "
@@ -574,11 +547,10 @@ class FusekiStore:
             + "    ORDER BY STR(?instance) "
             + f"    LIMIT {limit + 1}"
             + "  } "
-            + "  ?instance a ?type . "
+            + "  ?instance rdf:type ?type . "
             + "  "
-            + label_patterns
+            + " ".join(label_patterns)
             + " } "
-            + "GROUP BY ?instance ?type "
             + "ORDER BY STR(?instance)"
         )
 
@@ -595,7 +567,7 @@ class FusekiStore:
         uris = ordered_uris[:limit]
 
         if not uris:
-            return [], False
+            return [], False, set()
 
         selected_uris = set(uris)
 
@@ -605,6 +577,7 @@ class FusekiStore:
         }
 
         labels: Dict[str, str] = {}
+        metadata_uris: Set[str] = set()
 
         for row in rows:
             uri = row["instance"]
@@ -616,8 +589,7 @@ class FusekiStore:
 
             if (
                 type_uri_value
-                and type_uri_value
-                not in types[uri]
+                and type_uri_value not in types[uri]
             ):
                 types[uri].append(type_uri_value)
 
@@ -625,6 +597,11 @@ class FusekiStore:
 
             if label and uri not in labels:
                 labels[uri] = label
+
+            in_metadata = row.get("inMetadata")
+
+            if str(in_metadata).lower() in {"true", "1"}:
+                metadata_uris.add(uri)
 
         return (
             [
@@ -638,6 +615,7 @@ class FusekiStore:
                 for uri in uris
             ],
             has_more,
+            metadata_uris,
         )
 
     async def get_instance_types(
