@@ -3384,8 +3384,37 @@ async def update_instance(uri: str, data: dict):
             else:
                 safe_val = val.replace("\\","\\\\").replace('"','\\"').replace("\n","\\n")
                 triples += f'\n<{uri}> <{pred}> "{safe_val}" .'
-    if triples: await store.update(f"INSERT DATA {{ {triples} }}")
+
+    if triples:
+        await store.update(
+            f"INSERT DATA {{ {triples} }}"
+        )
+
+    if uri in state["created_instances"]:
+        subject_uri = URIRef(uri)
+
+        for triple in list(
+            state["created_instances_graph"].triples(
+                (subject_uri, None, None)
+            )
+        ):
+            state["created_instances_graph"].remove(
+                triple
+            )
+
+        updated_graph = Graph()
+        updated_graph.parse(
+            data=triples,
+            format="turtle",
+        )
+
+        for triple in updated_graph:
+            state["created_instances_graph"].add(
+                triple
+            )
+
     invalidate_profile()
+
     return {"status": "ok"}
 
 @app.delete("/api/instances/{uri:path}")
@@ -3404,12 +3433,25 @@ async def delete_instance(uri: str):
     if was_created:
         save_created_instances()
 
-    for t in list(
+    subject_uri = URIRef(uri)
+
+    for triple in list(
         state["created_instances_graph"].triples(
-            (URIRef(uri), None, None)
+            (subject_uri, None, None)
         )
     ):
-        state["created_instances_graph"].remove(t)
+        state["created_instances_graph"].remove(
+            triple
+        )
+
+    for triple in list(
+        state["created_instances_graph"].triples(
+            (None, None, subject_uri)
+        )
+    ):
+        state["created_instances_graph"].remove(
+            triple
+        )
     
     invalidate_profile()
     return {"status": "ok"}
