@@ -243,80 +243,97 @@ class FusekiStore:
         self,
         graph_uri: str,
     ) -> Dict[str, Any]:
-        count_rows = await self.query(
+        rows = await self.query(
             f"""
             SELECT
-                (COUNT(*) AS ?triples)
-                (COUNT(DISTINCT ?s) AS ?subjects)
+                ?term
+                ?triples
+                ?subjects
+                ?primary
             WHERE {{
-                GRAPH <{graph_uri}> {{
-                    ?s ?p ?o .
+                {{
+                    SELECT
+                        (COUNT(*) AS ?triples)
+                        (COUNT(DISTINCT ?s) AS ?subjects)
+                    WHERE {{
+                        GRAPH <{graph_uri}> {{
+                            ?s ?p ?o .
+                        }}
+                    }}
+                }}
+
+                OPTIONAL {{
+                    SELECT ?primary
+                    WHERE {{
+                        GRAPH <{graph_uri}> {{
+                            ?primary ?p ?o .
+                            FILTER(
+                                isIRI(?primary)
+                                &&
+                                !STRSTARTS(
+                                    STR(?primary),
+                                    "urn:bnid:"
+                                )
+                            )
+                        }}
+                    }}
+                    LIMIT 1
+                }}
+
+                OPTIONAL {{
+                    SELECT DISTINCT ?term
+                    WHERE {{
+                        GRAPH <{graph_uri}> {{
+                            {{
+                                ?s ?p ?o .
+                                FILTER(isIRI(?p))
+                                BIND(?p AS ?term)
+                            }}
+                            UNION
+                            {{
+                                ?s a ?type .
+                                FILTER(isIRI(?type))
+                                BIND(?type AS ?term)
+                            }}
+                        }}
+                    }}
                 }}
             }}
+            ORDER BY ?term
             """
         )
 
-        namespace_rows = await self.query(
-            f"""
-            SELECT DISTINCT ?term
-            WHERE {{
-                GRAPH <{graph_uri}> {{
-                    {{
-                        ?s ?p ?o .
-                        FILTER(isIRI(?p))
-                        BIND(?p AS ?term)
-                    }}
-                    UNION
-                    {{
-                        ?s a ?type .
-                        FILTER(isIRI(?type))
-                        BIND(?type AS ?term)
-                    }}
-                }}
-            }}
-            """
-        )
+        if not rows:
+            return {
+                "triples_count": 0,
+                "instances_count": 0,
+                "primary_iri": None,
+                "terms": [],
+            }
 
-        primary_rows = await self.query(
-            f"""
-            SELECT ?subject
-            WHERE {{
-                GRAPH <{graph_uri}> {{
-                    ?subject ?p ?o .
-                    FILTER(
-                        isIRI(?subject)
-                        &&
-                        !STRSTARTS(
-                            STR(?subject),
-                            "urn:bnid:"
-                        )
-                    )
-                }}
-            }}
-            LIMIT 1
-            """
-        )
+        first_row = rows[0]
+
+        terms = [
+            row["term"]
+            for row in rows
+            if row.get("term")
+        ]
+
+        # Deduplicate because OPTIONAL/subquery result
+        # handling may expose the same term more than once.
+        terms = list(dict.fromkeys(terms))
 
         return {
-            "triples_count": (
-                int(count_rows[0]["triples"])
-                if count_rows
-                else 0
+            "triples_count": int(
+                first_row.get("triples", 0)
             ),
-            "instances_count": (
-                int(count_rows[0]["subjects"])
-                if count_rows
-                else 0
+            "instances_count": int(
+                first_row.get("subjects", 0)
             ),
-            "primary_iri": (
-                primary_rows[0]["subject"]
-                if primary_rows
-                else None
+            "primary_iri": first_row.get(
+                "primary"
             ),
-            "terms": [
-                row["term"]
-                for row in namespace_rows
-            ],
+            "terms": terms,
         }
 
     async def _fetch_best_labels(self, uris: List[str]) -> Dict[str, str]:
