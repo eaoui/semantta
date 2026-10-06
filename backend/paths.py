@@ -68,6 +68,7 @@ LOG_FILE = LOG_DIR / "semantta.log"
 FUSEKI_DATA_DIR = DATA_DIR / "database" / "fuseki"
 
 STARS_FILE = DATA_DIR / "stars.json"
+CREATED_INSTANCES_FILE = DATA_DIR / "created-instances.json"
 PREFERENCES_FILE = DATA_DIR / "preferences.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 PLUGINS_CONFIG_FILE = DATA_DIR / "plugins.json"

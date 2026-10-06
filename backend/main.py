@@ -76,6 +76,7 @@ from logging_config import logger
 from paths import (
     ACTIVE_THEME_FILE,
     CACHE_DIR,
+    CREATED_INSTANCES_FILE,
     DATA_DIR,
     INDEX_CACHE_FILE,
     METADATA_DIR,
@@ -602,6 +603,14 @@ def rewrite_uris_in_graph(g: Graph, mapping: dict):
         if new_s != s or new_o != o:
             g.remove((s, p, o))
             g.add((new_s, p, new_o))
+
+def save_created_instances() -> None:
+    atomic_write_json(
+        CREATED_INSTANCES_FILE,
+        sorted(
+            state["created_instances"]
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 #  Ontology Processing
@@ -2424,6 +2433,30 @@ async def lifespan(app: FastAPI):
             with open(STARS_FILE) as f:
                 state["starred_instance_uris"] = set(json.load(f))
 
+        # Load created-instance provenance
+        if os.path.exists(CREATED_INSTANCES_FILE):
+            try:
+                with open(
+                    CREATED_INSTANCES_FILE,
+                    encoding="utf-8",
+                ) as f:
+                    created_uris = json.load(f)
+
+                if isinstance(created_uris, list):
+                    state["created_instances"] = {
+                        uri
+                        for uri in created_uris
+                        if isinstance(uri, str)
+                        and is_valid_uri(uri)
+                    }
+
+            except Exception:
+                logger.warning(
+                    "Could not load created-instance provenance file: %s",
+                    CREATED_INSTANCES_FILE,
+                    exc_info=True,
+                )
+
         if state["created_instances"]:
             values = " ".join(f"<{u}>" for u in state["created_instances"])
             query = (
@@ -3012,8 +3045,14 @@ async def create_instance(data: dict):
     g = Graph()
     g.parse(data=triples, format="turtle")
     for t in g: state["created_instances_graph"].add(t)
-    state["created_instances"].add(instance_uri)
+
+    state["created_instances"].add(
+        instance_uri
+    )
+
+    save_created_instances()
     invalidate_profile()
+
     return {"status": "created", "uri": instance_uri}
 
 @app.get(
@@ -3295,9 +3334,23 @@ async def update_instance(uri: str, data: dict):
 async def delete_instance(uri: str):
     await store.update(f"DELETE WHERE {{ <{uri}> ?p ?o }}")
     await store.update(f"DELETE WHERE {{ ?s ?p <{uri}> }}")
+
+    was_created = (
+        uri in state["created_instances"]
+    )
+
     state["created_instances"].discard(uri)
-    for t in list(state["created_instances_graph"].triples((URIRef(uri), None, None))):
+
+    if was_created:
+        save_created_instances()
+
+    for t in list(
+        state["created_instances_graph"].triples(
+            (URIRef(uri), None, None)
+        )
+    ):
         state["created_instances_graph"].remove(t)
+    
     invalidate_profile()
     return {"status": "ok"}
 
@@ -3826,6 +3879,7 @@ async def apply_base_iri():
             state["created_instances"].discard(old_uri)
             state["created_instances"].add(new_uri)
     if not mapping: return {"status": "ok", "updated": 0}
+    save_created_instances()
     rewrite_uris_in_graph(
         state["created_instances_graph"],
         mapping,
@@ -3887,6 +3941,7 @@ async def purge_all_data():
     invalidate_everything()
     if os.path.exists(PREFERENCES_FILE): os.remove(PREFERENCES_FILE)
     if os.path.exists(SETTINGS_FILE): os.remove(SETTINGS_FILE)
+    if os.path.exists(CREATED_INSTANCES_FILE): os.remove(CREATED_INSTANCES_FILE)
     state["display_format"] = "iri"
     state["site_title"] = "Semantta"
     state["base_iri"] = ""
