@@ -320,9 +320,51 @@ LABEL_PROPERTIES: List[str] = []
 #  General Helpers
 # ---------------------------------------------------------------------------
 def is_valid_uri(uri: str) -> bool:
-    return " " not in uri and "\t" not in uri and "\n" not in uri and (
-        uri.startswith(("http://", "https://", "urn:"))
-    )
+    if not isinstance(uri, str) or not uri:
+        return False
+
+    if not uri.startswith(
+        ("http://", "https://", "urn:")
+    ):
+        return False
+
+    # SPARQL IRIREF cannot contain these characters.
+    if any(
+        char in uri
+        for char in (
+            "<",
+            ">",
+            '"',
+            "{",
+            "}",
+            "|",
+            "\\",
+            "^",
+            "`",
+        )
+    ):
+        return False
+
+    if any(
+        ord(char) < 0x20
+        for char in uri
+    ):
+        return False
+
+    return True
+
+
+def _sparql_iri(
+    uri: str,
+    label: str = "URI",
+) -> str:
+    if not is_valid_uri(uri):
+        raise HTTPException(
+            400,
+            f"Invalid {label}: {uri}",
+        )
+
+    return URIRef(uri).n3()
 
 def _require_safe_path_component(name: str | None, label: str = "name") -> str:
     """
@@ -3081,6 +3123,17 @@ async def create_instance(data: dict):
             raise HTTPException(400, f"Invalid class URI: {cls}")
 
     instance_uri = data.get("instance_uri")
+    if instance_uri is not None:
+        if not isinstance(instance_uri, str):
+            raise HTTPException(
+                400,
+                "Invalid instance URI.",
+            )
+
+        _sparql_iri(
+            instance_uri,
+            "instance URI",
+        )
     if not instance_uri:
         base_iri = state.get("base_iri", "").strip()
         if base_iri:
@@ -3091,7 +3144,16 @@ async def create_instance(data: dict):
             instance_uri = f"urn:uuid:{uuid.uuid4()}"
             while True:
                 candidate = f"urn:uuid:{uuid.uuid4()}"
-                rows = await store.query(f"SELECT ?p WHERE {{ <{candidate}> ?p ?o }} LIMIT 1")
+                candidate_ref = _sparql_iri(
+                    candidate,
+                    "instance URI",
+                )
+
+                rows = await store.query(
+                    "SELECT ?p WHERE { "
+                    f"{candidate_ref} ?p ?o "
+                    "} LIMIT 1"
+                )
                 if not rows:
                     instance_uri = candidate
                     break
@@ -3099,15 +3161,49 @@ async def create_instance(data: dict):
     properties = data.get("properties", {})
     await shacl.validate_instance(class_uris, properties)
 
-    lines = [f"<{instance_uri}> a <{c}> ." for c in class_uris]
+    instance_ref = _sparql_iri(
+        instance_uri,
+        "instance URI",
+    )
+
+    lines = [
+        f"{instance_ref} a {_sparql_iri(c, 'class URI')} ."
+        for c in class_uris
+    ]
     for pred, vals in properties.items():
-        if not isinstance(vals, list): vals = [vals]
+        pred_ref = _sparql_iri(
+            pred,
+            "property URI",
+        )
+
+        if not isinstance(vals, list):
+            vals = [vals]
+
         for val in vals:
-            if isinstance(val, str) and (val.startswith(("http://", "urn:"))):
-                lines.append(f"<{instance_uri}> <{pred}> <{val}> .")
+            if isinstance(val, str) and (
+                val.startswith(
+                    ("http://", "urn:")
+                )
+            ):
+                value_ref = _sparql_iri(
+                    val,
+                    "value URI",
+                )
+                lines.append(
+                    f"{instance_ref} {pred_ref} "
+                    f"{value_ref} ."
+                )
             else:
-                safe = val.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-                lines.append(f'<{instance_uri}> <{pred}> "{safe}" .')
+                safe = (
+                    str(val)
+                    .replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                )
+                lines.append(
+                    f'{instance_ref} {pred_ref} '
+                    f'"{safe}" .'
+                )
     triples = "\n".join(lines)
     await store.update(f"INSERT DATA {{ {triples} }}")
     invalidate_instance_count()
@@ -3251,6 +3347,10 @@ async def list_instance_types():
 
 @app.get("/api/instances/{uri:path}/syntax")
 async def get_instance_syntax(uri: str, format: str = "turtle"):
+    uri_ref = _sparql_iri(
+        uri,
+        "instance URI",
+    )
     mime_map = {
         "turtle": "text/turtle",
         "nt": "application/n-triples",
@@ -3261,8 +3361,8 @@ async def get_instance_syntax(uri: str, format: str = "turtle"):
     }
     accept = mime_map.get(format, "text/turtle")
     query = f"""
-        CONSTRUCT {{ <{uri}> ?p ?o . ?s ?p <{uri}> . }}
-        WHERE {{ {{ <{uri}> ?p ?o . }} UNION {{ ?s ?p <{uri}> . }} }}
+        CONSTRUCT {{ {uri_ref} ?p ?o . ?s ?p {uri_ref} . }}
+        WHERE {{ {{ {uri_ref} ?p ?o . }} UNION {{ ?s ?p {uri_ref} . }} }}
     """
     rdf_data = await store.construct(
         query,
@@ -3295,14 +3395,22 @@ async def toggle_star(uri: str):
 
 @app.get("/api/instances/{uri:path}")
 async def get_instance(uri: str):
-    if uri == "undefined" or not uri.startswith(("http://", "https://", "urn:")):
-        raise HTTPException(400, "Invalid instance URI")
+    if uri == "undefined":
+        raise HTTPException(
+            400,
+            "Invalid instance URI",
+        )
+
+    uri_ref = _sparql_iri(
+        uri,
+        "instance URI",
+    )
 
     rows = await store.query(f"""
         PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
         SELECT ?type ?prop ?value WHERE {{
-            <{uri}> a ?type .
-            OPTIONAL {{ <{uri}> ?prop ?value . FILTER(?prop != rdf:type) }}
+            {uri_ref} a ?type .
+            OPTIONAL {{ {uri_ref} ?prop ?value . FILTER(?prop != rdf:type) }}
         }}
     """)
     if not rows:
@@ -3326,7 +3434,13 @@ async def get_instance(uri: str):
     bnodes: Dict[str, dict] = {}
     blank_node_uris = [val for vals in props.values() for val in vals if val.startswith("urn:bnid:")]
     if blank_node_uris:
-        values = " ".join(f"<{u}>" for u in blank_node_uris)
+        values = " ".join(
+            _sparql_iri(
+                u,
+                "blank-node URI",
+            )
+            for u in blank_node_uris
+        )
         bnode_rows = await store.query(f"""
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -3367,6 +3481,14 @@ async def get_instance(uri: str):
 
 @app.put("/api/instances/{uri:path}")
 async def update_instance(uri: str, data: dict):
+    uri_ref = _sparql_iri(
+        uri,
+        "instance URI",
+    )
+    await store.update(
+        f"DELETE {{ {uri_ref} ?p ?o }} "
+        f"WHERE {{ {uri_ref} ?p ?o }}"
+    )
     class_uris = data.get("class_uris", [])
     class_uris = [c for c in class_uris if c]
     if not class_uris:
@@ -3375,15 +3497,46 @@ async def update_instance(uri: str, data: dict):
     properties = data.get("properties", {})
     await shacl.validate_instance(class_uris, properties)
     await store.update(f"DELETE {{ <{uri}> ?p ?o }} WHERE {{ <{uri}> ?p ?o }}")
-    triples = "\n".join(f"<{uri}> a <{c}> ." for c in class_uris)
+    triples = "\n".join(
+        f"{uri_ref} a {_sparql_iri(c, 'class URI')} ."
+        for c in class_uris
+    )
     for pred, vals in properties.items():
-        if not isinstance(vals, list): vals = [vals]
+        pred_ref = _sparql_iri(
+            pred,
+            "property URI",
+        )
+
+        if not isinstance(vals, list):
+            vals = [vals]
+
         for val in vals:
-            if isinstance(val, str) and (val.startswith(("http://", "urn:"))):
-                triples += f"\n<{uri}> <{pred}> <{val}> ."
+            if isinstance(val, str) and (
+                val.startswith(
+                    ("http://", "urn:")
+                )
+            ):
+                value_ref = _sparql_iri(
+                    val,
+                    "value URI",
+                )
+
+                triples += (
+                    f"\n{uri_ref} {pred_ref} "
+                    f"{value_ref} ."
+                )
             else:
-                safe_val = val.replace("\\","\\\\").replace('"','\\"').replace("\n","\\n")
-                triples += f'\n<{uri}> <{pred}> "{safe_val}" .'
+                safe_val = (
+                    str(val)
+                    .replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                )
+
+                triples += (
+                    f'\n{uri_ref} {pred_ref} '
+                    f'"{safe_val}" .'
+                )
 
     if triples:
         await store.update(
@@ -3419,8 +3572,13 @@ async def update_instance(uri: str, data: dict):
 
 @app.delete("/api/instances/{uri:path}")
 async def delete_instance(uri: str):
-    await store.update(f"DELETE WHERE {{ <{uri}> ?p ?o }}")
-    await store.update(f"DELETE WHERE {{ ?s ?p <{uri}> }}")
+    uri_ref = _sparql_iri(
+        uri,
+        "instance URI",
+    )
+    
+    await store.update(f"DELETE WHERE {{ {uri_ref} ?p ?o }}")
+    await store.update(f"DELETE WHERE {{ ?s ?p {uri_ref} }}")
 
     invalidate_instance_count()
 
