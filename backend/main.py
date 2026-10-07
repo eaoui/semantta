@@ -2384,7 +2384,6 @@ async def ensure_metadata_named_graphs():
         ) / f"{filename}.nt"
 
         try:
-
             await asyncio.to_thread(
                 stream_rdf_to_ntriples,
                 source_path,
@@ -2392,26 +2391,53 @@ async def ensure_metadata_named_graphs():
                 temporary_nt,
             )
 
-            await store.bulk_load_nt_file(
-                file_path=temporary_nt,
-                graph_uri=graph_uri,
-            )
+            if not temporary_nt.exists():
+                raise RuntimeError(
+                    "Metadata conversion did not produce "
+                    f"an N-Triples file: {temporary_nt}"
+                )
 
-            logger.info(
-                "Migrated metadata file %s into named graph %s",
-                filename,
+            await store.bulk_load_nt_file(
+                temporary_nt,
                 graph_uri,
             )
 
-        finally:
-            temporary_nt.unlink(
-                missing_ok=True
+            # Keep the rest of your EXISTING successful
+            # migration code here unchanged.
+
+        except Exception:
+            logger.exception(
+                "Failed to migrate metadata file %s; "
+                "skipping this file and continuing startup.",
+                filename,
             )
 
+            # A failed upload can leave a partially populated
+            # named graph. Remove it before continuing.
             try:
-                temporary_nt.parent.rmdir()
-            except OSError:
-                pass
+                await store.update(
+                    f"DROP GRAPH <{graph_uri}>"
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to remove partially migrated "
+                    "metadata graph %s.",
+                    graph_uri,
+                )
+
+            continue
+
+        finally:
+            if temporary_nt.exists():
+                try:
+                    temporary_nt.unlink()
+                except OSError:
+                    logger.warning(
+                        "Could not remove temporary metadata "
+                        "file: %s",
+                        temporary_nt,
+                        exc_info=True,
+                    )
 
     progress["phase"] = ""
 
