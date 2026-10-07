@@ -366,6 +366,11 @@ def _sparql_iri(
 
     return URIRef(uri).n3()
 
+def _is_iri_value(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(
+        ("http://", "https://", "urn:")
+    )
+
 def _require_safe_path_component(name: str | None, label: str = "name") -> str:
     """
     Raise HTTP 400 if *name* contains characters that could be used
@@ -3180,11 +3185,7 @@ async def create_instance(data: dict):
             vals = [vals]
 
         for val in vals:
-            if isinstance(val, str) and (
-                val.startswith(
-                    ("http://", "urn:")
-                )
-            ):
+            if _is_iri_value(val):
                 value_ref = _sparql_iri(
                     val,
                     "value URI",
@@ -3511,11 +3512,7 @@ async def update_instance(uri: str, data: dict):
             vals = [vals]
 
         for val in vals:
-            if isinstance(val, str) and (
-                val.startswith(
-                    ("http://", "urn:")
-                )
-            ):
+            if _is_iri_value(val):
                 value_ref = _sparql_iri(
                     val,
                     "value URI",
