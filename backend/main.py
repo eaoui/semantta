@@ -1222,6 +1222,143 @@ async def rebuild_default_data_graph() -> None:
             created_nt
         )
 
+def _metadata_staging_graph_uri(kind: str) -> str:
+    return (
+        "urn:semantta:staging:"
+        f"metadata-{kind}:"
+        f"{uuid.uuid4().hex}"
+    )
+
+def _metadata_files_after_upload(
+    filename: str,
+    graph_uri: str,
+    integrate_vocab: bool,
+    merge_instances: bool,
+) -> list[dict]:
+    new_entry = {
+        "filename": filename,
+        "graph_uri": graph_uri,
+        "vocab_integrated": integrate_vocab,
+        "instances_merged": merge_instances,
+    }
+
+    if not merge_instances:
+        return [new_entry]
+
+    result = []
+    replaced = False
+
+    for existing in state["metadata_files"]:
+        if existing["filename"] == filename:
+            result.append(new_entry)
+            replaced = True
+        else:
+            result.append(existing)
+
+    if not replaced:
+        result.append(new_entry)
+
+    return result
+
+async def _stage_metadata_default_graph(
+    candidate_files: list[dict],
+    filename: str,
+    staged_graph_uri: str,
+    work_dir: Path,
+) -> str | None:
+    staging_default_uri = (
+        _metadata_staging_graph_uri("default")
+    )
+
+    has_content = False
+
+    created_nt = (
+        state["created_instances_graph"]
+        .serialize(format="nt")
+    )
+
+    if created_nt.strip():
+        created_path = (
+            work_dir / "created-instances.nt"
+        )
+
+        created_path.write_text(
+            created_nt,
+            encoding="utf-8",
+        )
+
+        await store.bulk_load_nt_file(
+            created_path,
+            staging_default_uri,
+        )
+
+        has_content = True
+
+    add_operations = []
+
+    for metadata_file in candidate_files:
+        if not metadata_file.get(
+            "instances_merged",
+            True,
+        ):
+            continue
+
+        source_graph_uri = (
+            staged_graph_uri
+            if metadata_file["filename"] == filename
+            else metadata_file["graph_uri"]
+        )
+
+        add_operations.append(
+            "ADD GRAPH "
+            f"<{source_graph_uri}> "
+            "TO GRAPH "
+            f"<{staging_default_uri}>"
+        )
+
+    if add_operations:
+        await store.update(
+            ";\n".join(add_operations)
+        )
+        has_content = True
+
+    if not has_content:
+        return None
+
+    return staging_default_uri
+
+def _backup_existing_file(
+    source: Path,
+    backup: Path,
+) -> bool:
+    if not source.exists():
+        return False
+
+    shutil.copy2(
+        source,
+        backup,
+    )
+
+    return True
+
+
+def _restore_file(
+    destination: Path,
+    backup: Path,
+    existed_before: bool,
+) -> None:
+    if existed_before and backup.exists():
+        os.replace(
+            backup,
+            destination,
+        )
+        return
+
+    try:
+        destination.unlink()
+    except FileNotFoundError:
+        pass
+
 async def _save_upload_to_file(
     file: UploadFile,
     destination: Path,
@@ -2951,123 +3088,152 @@ async def upload_metadata(
     )
 
     graph_uri = metadata_graph_uri(
-        filename
+        filename,
+    )
+
+    meta_path = Path(
+        str(destination) + ".meta.json"
+    )
+
+    old_metadata_files = list(
+        state["metadata_files"]
+    )
+
+    old_metadata_only_sources = dict(
+        state["metadata_only_sources"]
+    )
+
+    candidate_files = (
+        _metadata_files_after_upload(
+            filename,
+            graph_uri,
+            integrate_vocab,
+            merge_instances,
+        )
+    )
+
+    staged_graph_uri = (
+        _metadata_staging_graph_uri("source")
     )
 
     progress["phase"] = "Saving metadata…"
 
-    await _save_upload_to_file(
-        file,
-        destination,
-        MAX_METADATA_UPLOAD_BYTES,
-    )
-
-    nt_dir = Path(
+    work_dir = Path(
         tempfile.mkdtemp(
             prefix="semantta-metadata-",
+            dir=METADATA_DIR,
         )
     )
 
-    nt_path = (
-        nt_dir / f"{filename}.nt"
+    staged_source = (
+        work_dir / filename
     )
 
+    destination_backup = (
+        work_dir / f"{filename}.backup"
+    )
+
+    meta_backup = (
+        work_dir
+        / f"{filename}.meta.json.backup"
+    )
+
+    destination_existed = _backup_existing_file(
+        destination,
+        destination_backup,
+    )
+
+    meta_existed = _backup_existing_file(
+        meta_path,
+        meta_backup,
+    )
+
+    nt_path = (
+        work_dir / f"{filename}.nt"
+    )
+
+    staged_meta = (
+        work_dir / f"{filename}.meta.json"
+    )
+
+    default_stage_uri = None
+
+    destination_backup = (
+        work_dir / f"{filename}.backup"
+    )
+
+    meta_backup = (
+        work_dir
+        / f"{filename}.meta.json.backup"
+    )
+
+    destination_existed = False
+    meta_existed = False
+    fuseki_committed = False
+
     try:
+        # ---------------------------------------------------------------
+        # 1. Save to a temporary source file.
+        #
+        # The existing metadata file is untouched.
+        # ---------------------------------------------------------------
+        await _save_upload_to_file(
+            file,
+            staged_source,
+            MAX_METADATA_UPLOAD_BYTES,
+        )
+
+        # ---------------------------------------------------------------
+        # 2. Parse into a temporary N-Triples file.
+        #
+        # The existing Fuseki graph is untouched.
+        # ---------------------------------------------------------------
         progress["phase"] = (
             "Parsing metadata…"
         )
 
-        await asyncio.to_thread(
+        triple_count = await asyncio.to_thread(
             stream_rdf_to_ntriples,
-            destination,
+            staged_source,
             fmt,
             nt_path,
         )
 
+        if triple_count <= 0:
+            raise HTTPException(
+                400,
+                "The metadata file contains no RDF triples.",
+            )
+
+        # ---------------------------------------------------------------
+        # 3. Load the new metadata into a temporary Fuseki graph.
+        #
+        # The current metadata graph is untouched.
+        # ---------------------------------------------------------------
         progress["phase"] = (
-            "Importing metadata into Fuseki…"
+            "Staging metadata in Fuseki…"
         )
 
         await store.bulk_load_nt_file(
             file_path=nt_path,
-            graph_uri=graph_uri,
+            graph_uri=staged_graph_uri,
         )
 
-        invalidate_metadata_graph_stats(
-            graph_uri
-        )
-
-        # A standalone upload replaces existing metadata sources,
-        # but the graph just imported must be preserved.
-        if (
-            not merge_instances
-            and state["metadata_files"]
-        ):
-            existing_files = list(
-                state["metadata_files"]
-            )
-
-            for existing in existing_files:
-                existing_graph_uri = (
-                    existing["graph_uri"]
-                )
-
-                if existing_graph_uri == graph_uri:
-                    continue
-
-                await store.update(
-                    "DROP GRAPH "
-                    f"<{existing_graph_uri}>"
-                )
-
-                invalidate_metadata_graph_stats(
-                    existing_graph_uri
-                )
-
-            state["metadata_files"].clear()
-            state["metadata_only_sources"].clear()
-
-        if merge_instances:
-            await store.update(
-                f"ADD GRAPH <{graph_uri}> TO DEFAULT"
-            )
-
-        meta_path = (
-            str(destination)
-            + ".meta.json"
-        )
-
-        atomic_write_json(
-            meta_path,
-            {
-                "vocab_integrated":
-                    integrate_vocab,
-                "instances_merged":
-                    merge_instances,
-            },
-        )
-
-        state["metadata_files"].append(
-            {
-                "filename": filename,
-                "graph_uri": graph_uri,
-                "vocab_integrated":
-                    integrate_vocab,
-                "instances_merged":
-                    merge_instances,
-            }
-        )
+        # ---------------------------------------------------------------
+        # 4. Discover vocabulary terms against the staged graph.
+        # ---------------------------------------------------------------
+        vocab_terms = []
 
         if integrate_vocab:
             progress["phase"] = (
-                "Integrating vocabulary…"
+                "Checking metadata vocabulary…"
             )
 
             rows = await store.query(
                 f"""
                 SELECT DISTINCT ?term
                 WHERE {{
-                    GRAPH <{graph_uri}> {{
+                    GRAPH <{staged_graph_uri}> {{
                         {{
                             ?term ?p ?o .
                         }}
@@ -3093,11 +3259,141 @@ async def upload_metadata(
                 """
             )
 
-            for row in rows:
-                await ap.merge_metadata_only_entity(
-                    row["term"],
-                    filename,
+            vocab_terms = [
+                row["term"]
+                for row in rows
+            ]
+
+        # ---------------------------------------------------------------
+        # 5. Build the replacement DEFAULT graph in a temporary graph.
+        # ---------------------------------------------------------------
+        progress["phase"] = (
+            "Preparing metadata graph…"
+        )
+
+        default_stage_uri = (
+            await _stage_metadata_default_graph(
+                candidate_files,
+                filename,
+                staged_graph_uri,
+                work_dir,
+            )
+        )
+
+        # ---------------------------------------------------------------
+        # 6. Prepare the metadata source file and sidecar.
+        #
+        # This happens before the Fuseki commit so failures can be
+        # rolled back to the previous files.
+        # ---------------------------------------------------------------
+        atomic_write_json(
+            staged_meta,
+            {
+                "vocab_integrated":
+                    integrate_vocab,
+                "instances_merged":
+                    merge_instances,
+            },
+        )
+
+        # ---------------------------------------------------------------
+        # 7. ONE Fuseki transaction.
+        #
+        # All destructive graph changes happen together.
+        # ---------------------------------------------------------------
+        progress["phase"] = (
+            "Committing metadata…"
+        )
+
+        operations = []
+
+        # Standalone mode removes all previous metadata sources.
+        if not merge_instances:
+            target_graphs_to_drop = {
+                metadata_file["graph_uri"]
+                for metadata_file in old_metadata_files
+                if metadata_file["graph_uri"]
+                != graph_uri
+            }
+
+            for old_graph_uri in sorted(
+                target_graphs_to_drop
+            ):
+                operations.append(
+                    "DROP SILENT GRAPH "
+                    f"<{old_graph_uri}>"
                 )
+
+        # Replace the target metadata graph.
+        operations.append(
+            "MOVE GRAPH "
+            f"<{staged_graph_uri}> "
+            "TO GRAPH "
+            f"<{graph_uri}>"
+        )
+
+        # Rebuild the default graph atomically within
+        # the same Fuseki transaction.
+        operations.append(
+            "CLEAR DEFAULT"
+        )
+
+        if default_stage_uri:
+            operations.append(
+                "ADD GRAPH "
+                f"<{default_stage_uri}> "
+                "TO DEFAULT"
+            )
+
+            operations.append(
+                "DROP GRAPH "
+                f"<{default_stage_uri}>"
+            )
+
+        await store.update(
+            ";\n".join(operations)
+        )
+
+        fuseki_committed = True
+
+        os.replace(
+            staged_source,
+            destination,
+        )
+
+        os.replace(
+            staged_meta,
+            meta_path,
+        )
+
+        # ---------------------------------------------------------------
+        # 8. Now update application state.
+        # ---------------------------------------------------------------
+        state["metadata_files"] = (
+            candidate_files
+        )
+
+        if merge_instances:
+            new_sources = {
+                uri: source
+                for uri, source
+                in old_metadata_only_sources.items()
+                if source != filename
+            }
+        else:
+            new_sources = {}
+
+        state["metadata_only_sources"] = (
+            new_sources
+        )
+
+        if integrate_vocab:
+            for uri in vocab_terms:
+                state[
+                    "metadata_only_sources"
+                ][uri] = filename
+
+        clear_metadata_graph_stats()
 
         invalidate_instance_count()
 
@@ -3105,6 +3401,13 @@ async def upload_metadata(
 
         invalidate_caches()
         ap.invalidate()
+
+        # Old file backups are no longer needed.
+        if destination_backup.exists():
+            destination_backup.unlink()
+
+        if meta_backup.exists():
+            meta_backup.unlink()
 
         progress["phase"] = ""
 
@@ -3134,13 +3437,35 @@ async def upload_metadata(
     finally:
         progress["phase"] = ""
 
-        try:
-            nt_path.unlink(
-                missing_ok=True
-            )
-            nt_path.parent.rmdir()
-        except OSError:
-            pass
+        # Remove temporary staging graph if the transaction failed.
+        if not fuseki_committed:
+            try:
+                await store.update(
+                    "DROP SILENT GRAPH "
+                    f"<{staged_graph_uri}>"
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to remove staged metadata graph %s",
+                    staged_graph_uri,
+                )
+
+            if default_stage_uri:
+                try:
+                    await store.update(
+                        "DROP SILENT GRAPH "
+                        f"<{default_stage_uri}>"
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to remove staged default graph %s",
+                        default_stage_uri,
+                    )
+
+        shutil.rmtree(
+            work_dir,
+            ignore_errors=True,
+        )
 
 @app.post("/api/metadata/create")
 async def create_instance(data: dict):
@@ -4158,9 +4483,15 @@ async def update_profile_order(data: dict):
 async def check_instances_exist(data: dict):
     uris = data.get("uris", [])
     if not uris: return {"existing": []}
-    safe = [u for u in uris if re.match(r'^https?://|^urn:', u) and '"' not in u]
+    safe = [
+        _sparql_iri(
+            uri,
+            "instance URI",
+        )
+        for uri in uris
+    ]
     if not safe: return {"existing": []}
-    values = " ".join(f"<{u}>" for u in safe)
+    values = " ".join(safe)
     query = f"SELECT ?uri WHERE {{ VALUES ?uri {{ {values} }} {{ ?uri ?p ?o . }} UNION {{ ?s ?p ?uri . }} }}"
     rows = await store.query(query)
     return {"existing": list({r["uri"] for r in rows})}

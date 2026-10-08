@@ -6,3 +6,4 @@ owlrl
 httpx
 pyshacl
 python-dotenv
+pytest
