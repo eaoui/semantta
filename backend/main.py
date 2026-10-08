@@ -3512,22 +3512,62 @@ async def update_instance(uri: str, data: dict):
         uri,
         "instance URI",
     )
-    await store.update(
-        f"DELETE {{ {uri_ref} ?p ?o }} "
-        f"WHERE {{ {uri_ref} ?p ?o }}"
-    )
+
     class_uris = data.get("class_uris", [])
-    class_uris = [c for c in class_uris if c]
+
+    if not isinstance(class_uris, list):
+        raise HTTPException(
+            400,
+            "class_uris must be a list",
+        )
+
+    class_uris = [
+        cls
+        for cls in class_uris
+        if cls
+    ]
+
     if not class_uris:
-        raise HTTPException(400, "At least one valid class URI is required")
-    await check_disjoint_classes(class_uris)
-    properties = data.get("properties", {})
-    await shacl.validate_instance(class_uris, properties)
-    await store.update(f"DELETE {{ <{uri}> ?p ?o }} WHERE {{ <{uri}> ?p ?o }}")
+        raise HTTPException(
+            400,
+            "At least one valid class URI is required",
+        )
+
+    for cls in class_uris:
+        _sparql_iri(
+            cls,
+            "class URI",
+        )
+
+    await check_disjoint_classes(
+        class_uris
+    )
+
+    properties = data.get(
+        "properties",
+        {},
+    )
+
+    if not isinstance(properties, dict):
+        raise HTTPException(
+            400,
+            "properties must be an object",
+        )
+
+    # Validate the complete replacement before
+    # modifying persistent RDF data.
+    await shacl.validate_instance(
+        class_uris,
+        properties,
+    )
+
+    # Construct the complete replacement RDF before
+    # modifying persistent RDF data.
     triples = "\n".join(
         f"{uri_ref} a {_sparql_iri(c, 'class URI')} ."
         for c in class_uris
     )
+
     for pred, vals in properties.items():
         pred_ref = _sparql_iri(
             pred,
@@ -3561,12 +3601,38 @@ async def update_instance(uri: str, data: dict):
                     f'"{safe_val}" .'
                 )
 
-    if triples:
-        await store.update(
-            f"INSERT DATA {{ {triples} }}"
-        )
+    # Prepare the in-memory representation before touching
+    # persistent storage.
+    updated_graph = None
 
     if uri in state["created_instances"]:
+        updated_graph = Graph()
+        updated_graph.parse(
+            data=triples,
+            format="turtle",
+        )
+
+    # Replace the instance in one SPARQL Update request.
+    # Fuseki executes the request transactionally on TDB2.
+    replacement_update = f"""
+DELETE {{
+    {uri_ref} ?p ?o
+}}
+WHERE {{
+    {uri_ref} ?p ?o
+}};
+INSERT DATA {{
+    {triples}
+}}
+"""
+
+    await store.update(
+        replacement_update
+    )
+
+    # Update local state only after persistent storage
+    # has been successfully replaced.
+    if updated_graph is not None:
         subject_uri = URIRef(uri)
 
         for triple in list(
@@ -3577,12 +3643,6 @@ async def update_instance(uri: str, data: dict):
             state["created_instances_graph"].remove(
                 triple
             )
-
-        updated_graph = Graph()
-        updated_graph.parse(
-            data=triples,
-            format="turtle",
-        )
 
         for triple in updated_graph:
             state["created_instances_graph"].add(
