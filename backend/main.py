@@ -2680,7 +2680,7 @@ async def lifespan(app: FastAPI):
         )
 
         progress["phase"] = (
-            "Migrating metadata storage…"
+            "Migrating SHACL shape identifiers…"
         )
 
         await ensure_metadata_named_graphs()
