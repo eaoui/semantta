@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
+from rdflib import Graph, URIRef
 
 import pytest
 from fastapi import HTTPException
@@ -59,3 +60,61 @@ async def test_check_instances_exist_returns_existing_uris():
         assert "<urn:test:book2>" in query
     finally:
         main.store = original_store
+
+@pytest.mark.asyncio
+async def test_apply_base_iri_rewrites_metadata_references(monkeypatch):
+    old_uri = "urn:uuid:test-id"
+    new_uri = "https://example.org/resources/test-id"
+    metadata_graph_uri = "urn:semantta:metadata:records.ttl"
+
+    store = AsyncMock()
+    store.query.return_value = []
+
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main, "rebuild_used_uris", AsyncMock())
+    monkeypatch.setattr(main, "save_created_instances", lambda: None)
+    monkeypatch.setattr(main, "atomic_write_json", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main, "invalidate_instance_count", lambda: None)
+    monkeypatch.setattr(main, "invalidate_profile", lambda: None)
+
+    created_graph = Graph()
+    rdf_type = URIRef("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+    book_class = URIRef("http://example.org/Book")
+    record = URIRef("http://example.org/record/1")
+    related = URIRef("http://example.org/related")
+
+    created_graph.add((URIRef(old_uri), rdf_type, book_class))
+    created_graph.add((record, related, URIRef(old_uri)))
+
+    monkeypatch.setitem(main.state, "base_iri", "https://example.org/resources")
+    monkeypatch.setitem(main.state, "created_instances", {old_uri})
+    monkeypatch.setitem(main.state, "created_instances_graph", created_graph)
+    monkeypatch.setitem(main.state, "starred_instance_uris", {old_uri})
+    monkeypatch.setitem(main.state, "non_integrated_uris", {old_uri})
+    monkeypatch.setitem(main.state, "metadata_only_sources", {old_uri: "records.ttl"})
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        [{"graph_uri": metadata_graph_uri}],
+    )
+
+    result = await main.apply_base_iri()
+
+    assert result == {"status": "ok", "updated": 1}
+    store.update.assert_awaited_once()
+
+    update = store.update.await_args.args[0]
+    assert metadata_graph_uri in update
+    assert f"<{old_uri}>" in update
+    assert f"<{new_uri}>" in update
+
+    assert main.state["created_instances"] == {new_uri}
+    assert main.state["starred_instance_uris"] == {new_uri}
+    assert main.state["non_integrated_uris"] == {new_uri}
+    assert main.state["metadata_only_sources"] == {
+        new_uri: "records.ttl",
+    }
+
+    assert (URIRef(new_uri), rdf_type, book_class) in created_graph
+    assert (record, related, URIRef(new_uri)) in created_graph
+    assert not list(created_graph.triples((URIRef(old_uri), None, None)))

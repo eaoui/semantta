@@ -648,10 +648,63 @@ def _flatten_class_expression(g: Graph, node) -> List[str]:
 def rewrite_uris_in_graph(g: Graph, mapping: dict):
     for s, p, o in list(g.triples((None, None, None))):
         new_s = mapping.get(s, s)
+        new_p = mapping.get(p, p) if isinstance(p, URIRef) else p
         new_o = mapping.get(o, o) if isinstance(o, URIRef) else o
-        if new_s != s or new_o != o:
+
+        if new_s != s or new_p != p or new_o != o:
             g.remove((s, p, o))
-            g.add((new_s, p, new_o))
+            g.add((new_s, new_p, new_o))
+
+def _build_uri_rewrite_update(
+    mapping: dict[str, str],
+    graph_uris: list[str],
+) -> str:
+    mapping_values = " ".join(
+        f"({_sparql_iri(old, 'old instance URI')} "
+        f"{_sparql_iri(new, 'new instance URI')})"
+        for old, new in sorted(mapping.items())
+    )
+
+    graph_values = " ".join(
+        _sparql_iri(uri, "metadata graph URI")
+        for uri in sorted(set(graph_uris))
+    )
+
+    positions = [
+        ("?old ?p ?o", "?new ?p ?o"),
+        ("?s ?old ?o", "?s ?new ?o"),
+        ("?s ?p ?old", "?s ?p ?new"),
+    ]
+
+    operations = []
+
+    if graph_values:
+        for pattern, replacement in positions:
+            operations.append(f"""
+                DELETE {{
+                    GRAPH ?g {{ {pattern} }}
+                }}
+                INSERT {{
+                    GRAPH ?g {{ {replacement} }}
+                }}
+                WHERE {{
+                    VALUES (?old ?new) {{ {mapping_values} }}
+                    VALUES ?g {{ {graph_values} }}
+                    GRAPH ?g {{ {pattern} . }}
+                }}
+            """)
+
+    for pattern, replacement in positions:
+        operations.append(f"""
+            DELETE {{ {pattern} }}
+            INSERT {{ {replacement} }}
+            WHERE {{
+                VALUES (?old ?new) {{ {mapping_values} }}
+                {pattern} .
+            }}
+        """)
+
+    return ";\n".join(operations)
 
 def save_created_instances() -> None:
     atomic_write_json(
@@ -4634,23 +4687,107 @@ async def update_settings(data: dict):
 @app.post("/api/settings/apply-base-iri")
 async def apply_base_iri():
     base_iri = state.get("base_iri", "").strip()
-    if not base_iri: raise HTTPException(400, "Base IRI is not set.")
-    if not base_iri.endswith('/'): base_iri += '/'
+
+    if not base_iri:
+        raise HTTPException(400, "Base IRI is not set.")
+
+    if not base_iri.endswith("/"):
+        base_iri += "/"
+
     mapping = {}
-    for old_uri in list(state["created_instances"]):
+
+    for old_uri in sorted(state["created_instances"]):
         if old_uri.startswith("urn:uuid:"):
             new_uri = base_iri + old_uri[len("urn:uuid:"):]
-            mapping[URIRef(old_uri)] = URIRef(new_uri)
-            state["created_instances"].discard(old_uri)
-            state["created_instances"].add(new_uri)
-    if not mapping: return {"status": "ok", "updated": 0}
-    save_created_instances()
-    rewrite_uris_in_graph(
-        state["created_instances_graph"],
-        mapping,
+
+            _sparql_iri(old_uri, "old instance URI")
+            _sparql_iri(new_uri, "new instance URI")
+
+            mapping[old_uri] = new_uri
+
+    if not mapping:
+        return {"status": "ok", "updated": 0}
+
+    target_values = " ".join(
+        _sparql_iri(uri, "new instance URI")
+        for uri in mapping.values()
     )
 
-    await rebuild_default_data_graph()
+    collisions = await store.query(f"""
+        SELECT DISTINCT ?uri WHERE {{
+            VALUES ?uri {{ {target_values} }}
+            {{
+                ?uri ?p ?o .
+            }}
+            UNION
+            {{
+                GRAPH ?g {{ ?uri ?p ?o . }}
+            }}
+        }}
+    """)
+
+    if collisions:
+        raise HTTPException(
+            409,
+            "Cannot apply Base IRI because a target URI already exists: "
+            f"{collisions[0]['uri']}",
+        )
+
+    graph_uris = [
+        item["graph_uri"]
+        for item in state["metadata_files"]
+        if item.get("graph_uri")
+    ]
+
+    update = _build_uri_rewrite_update(
+        mapping,
+        graph_uris,
+    )
+
+    # Persistent RDF changes must succeed before in-memory state changes.
+    await store.update(update)
+
+    rdf_mapping = {
+        URIRef(old): URIRef(new)
+        for old, new in mapping.items()
+    }
+
+    rewrite_uris_in_graph(
+        state["created_instances_graph"],
+        rdf_mapping,
+    )
+
+    state["created_instances"] = {
+        mapping.get(uri, uri)
+        for uri in state["created_instances"]
+    }
+
+    state["starred_instance_uris"] = {
+        mapping.get(uri, uri)
+        for uri in state["starred_instance_uris"]
+    }
+
+    state["non_integrated_uris"] = {
+        mapping.get(uri, uri)
+        for uri in state["non_integrated_uris"]
+    }
+
+    state["metadata_only_sources"] = {
+        mapping.get(uri, uri): source
+        for uri, source in state["metadata_only_sources"].items()
+    }
+
+    save_created_instances()
+
+    atomic_write_json(
+        STARS_FILE,
+        sorted(state["starred_instance_uris"]),
+    )
+
+    clear_metadata_graph_stats()
+    invalidate_instance_count()
+    invalidate_profile()
+
     await rebuild_used_uris()
 
     return {
