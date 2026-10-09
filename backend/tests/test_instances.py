@@ -64,7 +64,7 @@ async def test_check_instances_exist_returns_existing_uris():
 @pytest.mark.asyncio
 async def test_apply_base_iri_rewrites_metadata_references(monkeypatch):
     old_uri = "urn:uuid:test-id"
-    new_uri = "https://example.org/resources/test-id"
+    new_uri = "https://example.org/testing/test-id"
     metadata_graph_uri = "urn:semantta:metadata:records.ttl"
 
     store = AsyncMock()
@@ -98,9 +98,15 @@ async def test_apply_base_iri_rewrites_metadata_references(monkeypatch):
         [{"graph_uri": metadata_graph_uri}],
     )
 
-    result = await main.apply_base_iri()
+    result = await main.apply_base_iri({
+        "base_iri": "https://example.org/testing/",
+    })
 
-    assert result == {"status": "ok", "updated": 1}
+    assert result == {
+        "status": "ok",
+        "updated": 1,
+        "base_iri": "https://example.org/testing/",
+    }
     store.update.assert_awaited_once()
 
     update = store.update.await_args.args[0]
@@ -118,3 +124,28 @@ async def test_apply_base_iri_rewrites_metadata_references(monkeypatch):
     assert (URIRef(new_uri), rdf_type, book_class) in created_graph
     assert (record, related, URIRef(new_uri)) in created_graph
     assert not list(created_graph.triples((URIRef(old_uri), None, None)))
+
+def test_base_iri_mapping_supports_repeated_changes():
+    identifier = "123e4567-e89b-12d3-a456-426614174000"
+
+    first = main._build_base_iri_mapping(
+        {f"https://first.example/data/{identifier}"},
+        "https://first.example/data/",
+        "https://second.example/data/",
+    )
+
+    assert first == {
+        f"https://first.example/data/{identifier}":
+        f"https://second.example/data/{identifier}"
+    }
+
+    second = main._build_base_iri_mapping(
+        set(first.values()),
+        "https://second.example/data/",
+        "https://third.example/data/",
+    )
+
+    assert second == {
+        f"https://second.example/data/{identifier}":
+        f"https://third.example/data/{identifier}"
+    }

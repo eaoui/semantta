@@ -302,6 +302,7 @@ state = {
     "profile_version": 0,
     "full_label_properties": [],
     "starred_instance_uris": set(),
+    "applied_base_iri": "",
 }
 
 _subclass_pairs: Set[tuple] = set()
@@ -713,6 +714,45 @@ def save_created_instances() -> None:
             state["created_instances"]
         ),
     )
+
+def _build_base_iri_mapping(
+    created_uris: set[str],
+    applied_base_iri: str,
+    base_iri: str,
+) -> dict[str, str]:
+    if applied_base_iri and not applied_base_iri.endswith("/"):
+        applied_base_iri += "/"
+
+    uuid_suffix = re.compile(
+        r"(?:^|/)"
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{12})$"
+    )
+
+    mapping = {}
+
+    for old_uri in sorted(created_uris):
+        if old_uri.startswith("urn:uuid:"):
+            suffix = old_uri[len("urn:uuid:"):]
+
+        elif applied_base_iri and old_uri.startswith(applied_base_iri):
+            suffix = old_uri[len(applied_base_iri):]
+
+        else:
+            # Recover previously generated UUID-based URIs if an
+            # older version saved the new setting before applying it.
+            match = uuid_suffix.search(old_uri)
+            if not match:
+                continue
+            suffix = match.group(1)
+
+        new_uri = base_iri + suffix
+
+        if new_uri != old_uri:
+            mapping[old_uri] = new_uri
+
+    return mapping
 
 # ---------------------------------------------------------------------------
 #  Ontology Processing
@@ -2887,6 +2927,10 @@ async def lifespan(app: FastAPI):
         settings = load_settings()
         state["site_title"] = settings.get("site_title", "Semantta")
         state["base_iri"] = settings.get("base_iri", "")
+        state["applied_base_iri"] = settings.get(
+            "applied_base_iri",
+            settings.get("base_iri", ""),
+        )
 
         active_theme = settings.get("active_theme", "default")
         set_active_theme(active_theme)
@@ -4675,18 +4719,39 @@ def get_settings():
 @app.post("/api/settings")
 async def update_settings(data: dict):
     changed = False
+    settings = load_settings()
+
     if "site_title" in data:
         title = data["site_title"].strip()
-        if title: state["site_title"] = title; changed = True
+        if title:
+            state["site_title"] = title
+            changed = True
+
     if "base_iri" in data:
-        iri = data["base_iri"].strip()
-        state["base_iri"] = iri; changed = True
-    if changed: save_settings({"site_title": state["site_title"], "base_iri": state["base_iri"]})
+        state["base_iri"] = data["base_iri"].strip()
+        changed = True
+
+    if changed:
+        settings.update({
+            "site_title": state["site_title"],
+            "base_iri": state["base_iri"],
+            "applied_base_iri": state.get(
+                "applied_base_iri",
+                settings.get("applied_base_iri", settings.get("base_iri", "")),
+            ),
+        })
+        save_settings(settings)
+
     return {"status": "ok"}
 
 @app.post("/api/settings/apply-base-iri")
-async def apply_base_iri():
-    base_iri = state.get("base_iri", "").strip()
+async def apply_base_iri(data: dict):
+    requested_base_iri = data.get("base_iri")
+
+    if not isinstance(requested_base_iri, str):
+        raise HTTPException(400, "Base IRI is required.")
+
+    base_iri = requested_base_iri.strip()
 
     if not base_iri:
         raise HTTPException(400, "Base IRI is not set.")
@@ -4694,105 +4759,123 @@ async def apply_base_iri():
     if not base_iri.endswith("/"):
         base_iri += "/"
 
-    mapping = {}
+    _sparql_iri(base_iri, "Base IRI")
 
-    for old_uri in sorted(state["created_instances"]):
-        if old_uri.startswith("urn:uuid:"):
-            new_uri = base_iri + old_uri[len("urn:uuid:"):]
+    applied_base_iri = (
+        state.get("applied_base_iri")
+        or state.get("base_iri", "")
+    ).strip()
 
-            _sparql_iri(old_uri, "old instance URI")
-            _sparql_iri(new_uri, "new instance URI")
-
-            mapping[old_uri] = new_uri
-
-    if not mapping:
-        return {"status": "ok", "updated": 0}
-
-    target_values = " ".join(
-        _sparql_iri(uri, "new instance URI")
-        for uri in mapping.values()
+    mapping = _build_base_iri_mapping(
+        state["created_instances"],
+        applied_base_iri,
+        base_iri,
     )
 
-    collisions = await store.query(f"""
-        SELECT DISTINCT ?uri WHERE {{
-            VALUES ?uri {{ {target_values} }}
-            {{
-                ?uri ?p ?o .
-            }}
-            UNION
-            {{
-                GRAPH ?g {{ ?uri ?p ?o . }}
-            }}
-        }}
-    """)
+    for old_uri, new_uri in mapping.items():
+        _sparql_iri(old_uri, "Old instance URI")
+        _sparql_iri(new_uri, "New instance URI")
 
-    if collisions:
-        raise HTTPException(
-            409,
-            "Cannot apply Base IRI because a target URI already exists: "
-            f"{collisions[0]['uri']}",
+    if mapping:
+        target_values = " ".join(
+            _sparql_iri(uri, "New instance URI")
+            for uri in mapping.values()
         )
 
-    graph_uris = [
-        item["graph_uri"]
-        for item in state["metadata_files"]
-        if item.get("graph_uri")
-    ]
+        collisions = await store.query(f"""
+            SELECT DISTINCT ?uri WHERE {{
+                VALUES ?uri {{ {target_values} }}
+                {{
+                    ?uri ?p ?o .
+                }}
+                UNION
+                {{
+                    GRAPH ?g {{ ?uri ?p ?o . }}
+                }}
+            }}
+        """)
 
-    update = _build_uri_rewrite_update(
-        mapping,
-        graph_uris,
-    )
+        if collisions:
+            raise HTTPException(
+                409,
+                "Cannot apply Base IRI because a target URI already exists: "
+                f"{collisions[0]['uri']}",
+            )
 
-    # Persistent RDF changes must succeed before in-memory state changes.
-    await store.update(update)
+        graph_uris = [
+            item["graph_uri"]
+            for item in state["metadata_files"]
+            if item.get("graph_uri")
+        ]
 
-    rdf_mapping = {
-        URIRef(old): URIRef(new)
-        for old, new in mapping.items()
-    }
+        update = _build_uri_rewrite_update(
+            mapping,
+            graph_uris,
+        )
 
-    rewrite_uris_in_graph(
-        state["created_instances_graph"],
-        rdf_mapping,
-    )
+        # Persistent RDF changes must succeed before state is changed.
+        await store.update(update)
 
-    state["created_instances"] = {
-        mapping.get(uri, uri)
-        for uri in state["created_instances"]
-    }
+        rdf_mapping = {
+            URIRef(old): URIRef(new)
+            for old, new in mapping.items()
+        }
 
-    state["starred_instance_uris"] = {
-        mapping.get(uri, uri)
-        for uri in state["starred_instance_uris"]
-    }
+        rewrite_uris_in_graph(
+            state["created_instances_graph"],
+            rdf_mapping,
+        )
 
-    state["non_integrated_uris"] = {
-        mapping.get(uri, uri)
-        for uri in state["non_integrated_uris"]
-    }
+        state["created_instances"] = {
+            mapping.get(uri, uri)
+            for uri in state["created_instances"]
+        }
 
-    state["metadata_only_sources"] = {
-        mapping.get(uri, uri): source
-        for uri, source in state["metadata_only_sources"].items()
-    }
+        state["starred_instance_uris"] = {
+            mapping.get(uri, uri)
+            for uri in state["starred_instance_uris"]
+        }
 
-    save_created_instances()
+        state["non_integrated_uris"] = {
+            mapping.get(uri, uri)
+            for uri in state["non_integrated_uris"]
+        }
 
-    atomic_write_json(
-        STARS_FILE,
-        sorted(state["starred_instance_uris"]),
-    )
+        state["metadata_only_sources"] = {
+            mapping.get(uri, uri): source
+            for uri, source in state["metadata_only_sources"].items()
+        }
 
-    clear_metadata_graph_stats()
-    invalidate_instance_count()
-    invalidate_profile()
+        save_created_instances()
 
-    await rebuild_used_uris()
+        atomic_write_json(
+            STARS_FILE,
+            sorted(
+                uri
+                for uri in state["starred_instance_uris"]
+                if uri is not None
+            ),
+        )
+
+    # Save the requested Base IRI even when no instances need rewriting.
+    state["base_iri"] = base_iri
+    state["applied_base_iri"] = base_iri
+
+    settings = load_settings()
+    settings["base_iri"] = base_iri
+    settings["applied_base_iri"] = base_iri
+    save_settings(settings)
+
+    if mapping:
+        clear_metadata_graph_stats()
+        invalidate_instance_count()
+        invalidate_profile()
+        await rebuild_used_uris()
 
     return {
         "status": "ok",
         "updated": len(mapping),
+        "base_iri": base_iri,
     }
 
 @app.get("/api/ontology/raw/{filename:path}")

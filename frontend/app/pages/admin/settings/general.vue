@@ -91,8 +91,25 @@ async function save() {
 async function applyBaseIri() {
   showConfirm.value = false
   loadingMsg.value = 'Updating all local instance URIs…'
+
   try {
-    const res = await $fetch<{ updated: number }>(`${apiBase}/api/settings/apply-base-iri`, { method: 'POST' })
+    const res = await $fetch<{
+      updated: number
+      base_iri: string
+    }>(`${apiBase}/api/settings/apply-base-iri`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_iri: baseIri.value.trim()
+      })
+    })
+
+    baseIri.value = res.base_iri
+
+    if (store.baseIri !== undefined) {
+      store.baseIri = res.base_iri
+    }
+
     toast.success(`Updated ${res.updated} instance(s).`)
     await store.fetchState()
   } catch (e: any) {
