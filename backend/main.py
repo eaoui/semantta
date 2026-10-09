@@ -4168,7 +4168,6 @@ async def delete_instance(uri: str):
     )
     
     await store.update(f"DELETE WHERE {{ {uri_ref} ?p ?o }}")
-    await store.update(f"DELETE WHERE {{ ?s ?p {uri_ref} }}")
 
     invalidate_instance_count()
 
@@ -4186,15 +4185,6 @@ async def delete_instance(uri: str):
     for triple in list(
         state["created_instances_graph"].triples(
             (subject_uri, None, None)
-        )
-    ):
-        state["created_instances_graph"].remove(
-            triple
-        )
-
-    for triple in list(
-        state["created_instances_graph"].triples(
-            (None, None, subject_uri)
         )
     ):
         state["created_instances_graph"].remove(

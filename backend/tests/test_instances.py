@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
-from rdflib import Graph, URIRef
+from rdflib import Graph, Literal, URIRef
 
 import pytest
 from fastapi import HTTPException
@@ -149,3 +149,35 @@ def test_base_iri_mapping_supports_repeated_changes():
         f"https://second.example/data/{identifier}":
         f"https://third.example/data/{identifier}"
     }
+
+@pytest.mark.asyncio
+async def test_delete_instance_preserves_incoming_references(monkeypatch):
+    uri = "http://example.org/book2"
+    subject = URIRef(uri)
+    related_subject = URIRef("http://example.org/book1")
+    related_predicate = URIRef("http://example.org/relatedTo")
+    title_predicate = URIRef("http://example.org/title")
+
+    graph = Graph()
+    graph.add((subject, title_predicate, Literal("Book 2")))
+    graph.add((related_subject, related_predicate, subject))
+
+    store = AsyncMock()
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setitem(main.state, "created_instances", {uri})
+    monkeypatch.setitem(main.state, "created_instances_graph", graph)
+    monkeypatch.setattr(main, "save_created_instances", lambda: None)
+    monkeypatch.setattr(main, "invalidate_instance_count", lambda: None)
+    monkeypatch.setattr(main, "invalidate_profile", lambda: None)
+
+    result = await main.delete_instance(uri)
+
+    assert result == {"status": "ok"}
+    store.update.assert_awaited_once()
+
+    update = store.update.await_args.args[0]
+    assert "?s ?p" not in update
+
+    assert (subject, title_predicate, Literal("Book 2")) not in graph
+    assert (related_subject, related_predicate, subject) in graph
+    assert uri not in main.state["created_instances"]
