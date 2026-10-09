@@ -2149,92 +2149,177 @@ class SHACLProfile:
 # ---------------------------------------------------------------------------
 #  Sync Entity Links
 # ---------------------------------------------------------------------------
+
 async def _sync_entity_links(entity_uri: str, etype: str, linked_uris: List[str]):
-    if etype in ("object_property", "datatype_property", "annotation_property"):
-        prop_shape_uri = shape_uri_for_entity(entity_uri, "property", state["prefix_map"])
-        desired_classes = set(linked_uris)
+    property_types = (
+        "object_property",
+        "datatype_property",
+        "annotation_property",
+    )
+
+    if etype not in property_types and etype != "class":
+        return
+
+    if not isinstance(linked_uris, list):
+        raise HTTPException(400, "Linked entities must be a list")
+
+    entity_ref = _sparql_iri(entity_uri, "entity URI")
+    linked_refs = {
+        uri: _sparql_iri(uri, "linked entity URI")
+        for uri in linked_uris
+    }
+
+    if etype in property_types:
+        prop_shape_uri = shape_uri_for_entity(
+            entity_uri, "property", state["prefix_map"]
+        )
+        prop_shape_ref = _sparql_iri(
+            prop_shape_uri, "property shape URI"
+        )
+        desired_classes = set(linked_refs)
 
         cur_rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?classShape sh:targetClass ?class ; sh:property <{prop_shape_uri}> .
+                    ?classShape sh:targetClass ?class ;
+                                sh:property {prop_shape_ref} .
                 }}
             }}
         """)
         current_classes = {r["class"] for r in cur_rows}
 
-        for cls in current_classes - desired_classes:
-            class_shape_uri = shape_uri_for_entity(cls, "class", state["prefix_map"])
-            await store.update(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }} }}
-                WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }} }}
+        additions = desired_classes - current_classes
+        removals = current_classes - desired_classes
+
+        # Validate all additions before mutating the profile.
+        domains = get_property_domains(entity_uri)
+        for cls in additions:
+            if domains and not any(
+                is_subclass(cls, [domain]) or cls == domain
+                for domain in domains
+            ):
+                raise HTTPException(
+                    400,
+                    f"Class {cls} is not in the domain of property {entity_uri}",
+                )
+
+        operations = []
+
+        if removals:
+            triples = []
+            for cls in sorted(removals):
+                class_shape_uri = shape_uri_for_entity(
+                    cls, "class", state["prefix_map"]
+                )
+                class_shape_ref = _sparql_iri(
+                    class_shape_uri, "class shape URI"
+                )
+                triples.append(
+                    f"{class_shape_ref} sh:property {prop_shape_ref} ."
+                )
+
+            operations.append(f"""
+                DELETE DATA {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {" ".join(triples)}
+                    }}
+                }}
             """)
 
-        for cls in desired_classes - current_classes:
-            domains = get_property_domains(entity_uri)
-            if domains and not any(is_subclass(cls, [d]) or cls == d for d in domains):
-                raise HTTPException(400,
-                    f"Class {cls} is not in the domain of property {entity_uri}")
-            class_shape_uri = shape_uri_for_entity(cls, "class", state["prefix_map"])
-            # Ensure class shape exists
-            await store.update(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a sh:NodeShape ; sh:targetClass <{cls}> }}
-                }}
-                WHERE {{
-                    FILTER NOT EXISTS {{
-                        GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a sh:NodeShape }}
+        if additions:
+            triples = []
+            for cls in sorted(additions):
+                class_shape_uri = shape_uri_for_entity(
+                    cls, "class", state["prefix_map"]
+                )
+                class_shape_ref = _sparql_iri(
+                    class_shape_uri, "class shape URI"
+                )
+                triples.append(
+                    f"{class_shape_ref} a sh:NodeShape ; "
+                    f"sh:targetClass {linked_refs[cls]} ; "
+                    f"sh:property {prop_shape_ref} ."
+                )
+
+            operations.append(f"""
+                INSERT DATA {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {" ".join(triples)}
                     }}
                 }}
             """)
-            await store.update(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
-                }}
-                WHERE {{
-                    FILTER NOT EXISTS {{
-                        GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
-                    }}
-                }}
-            """)
+
+        if operations:
+            await store.update(
+                "PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
+                + ";\n".join(operations)
+            )
 
     elif etype == "class":
-        class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
-        desired_props = set(linked_uris)
+        class_shape_uri = shape_uri_for_entity(
+            entity_uri, "class", state["prefix_map"]
+        )
+        class_shape_ref = _sparql_iri(
+            class_shape_uri, "class shape URI"
+        )
+        desired_props = set(linked_refs)
 
-        await store.update(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property ?ps }} }}
-            WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property ?ps }} }}
-        """)
-
-        for prop_uri in desired_props:
+        # Validate every desired property before deleting any links.
+        for prop_uri in sorted(desired_props):
             domains = get_property_domains(prop_uri)
-            if domains and not any(is_subclass(entity_uri, [d]) or entity_uri == d for d in domains):
-                raise HTTPException(400,
-                    f"Property {prop_uri} does not have class {entity_uri} in its domain")
-            prop_shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-            await store.update(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a sh:PropertyShape ; sh:path <{prop_uri}> }}
+            if domains and not any(
+                is_subclass(entity_uri, [domain])
+                or entity_uri == domain
+                for domain in domains
+            ):
+                raise HTTPException(
+                    400,
+                    f"Property {prop_uri} does not have class {entity_uri} in its domain",
+                )
+
+        operations = [f"""
+            DELETE WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    {class_shape_ref} sh:property ?ps
                 }}
-                WHERE {{
-                    FILTER NOT EXISTS {{
-                        GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a sh:PropertyShape }}
+            }}
+        """]
+
+        if desired_props:
+            triples = [
+                f"{class_shape_ref} a sh:NodeShape ; "
+                f"sh:targetClass {entity_ref} ."
+            ]
+
+            for prop_uri in sorted(desired_props):
+                prop_shape_uri = shape_uri_for_entity(
+                    prop_uri, "property", state["prefix_map"]
+                )
+                prop_shape_ref = _sparql_iri(
+                    prop_shape_uri, "property shape URI"
+                )
+
+                triples.append(
+                    f"{prop_shape_ref} a sh:PropertyShape ; "
+                    f"sh:path {linked_refs[prop_uri]} ."
+                )
+                triples.append(
+                    f"{class_shape_ref} sh:property {prop_shape_ref} ."
+                )
+
+            operations.append(f"""
+                INSERT DATA {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {" ".join(triples)}
                     }}
                 }}
             """)
-            await store.update(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                INSERT DATA {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> sh:property <{prop_shape_uri}> }}
-                }}
-            """)
+
+        await store.update(
+            "PREFIX sh: <http://www.w3.org/ns/shacl#>\n"
+            + ";\n".join(operations)
+        )
 
 # ---------------------------------------------------------------------------
 #  Plugin & Theme Helpers
