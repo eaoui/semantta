@@ -28,6 +28,12 @@ class FakeSHACL:
     def __init__(self, error: HTTPException | None = None):
         self.error = error
 
+    async def get_active_classes(self):
+        return [TEST_CLASS]
+
+    async def get_active_properties(self):
+        return [TEST_PROPERTY]
+
     async def validate_instance(self, class_uris, properties):
         if self.error is not None:
             raise self.error

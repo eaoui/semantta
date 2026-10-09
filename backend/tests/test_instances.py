@@ -181,3 +181,76 @@ async def test_delete_instance_preserves_incoming_references(monkeypatch):
     assert (subject, title_predicate, Literal("Book 2")) not in graph
     assert (related_subject, related_predicate, subject) in graph
     assert uri not in main.state["created_instances"]
+
+@pytest.mark.asyncio
+async def test_create_instance_rejects_inactive_class(monkeypatch):
+    store = AsyncMock()
+
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(
+        main,
+        "check_disjoint_classes",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main.shacl,
+        "get_active_classes",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        main.shacl,
+        "get_active_properties",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setitem(
+        main.state,
+        "base_iri",
+        "https://example.org/resources/",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.create_instance({
+            "class_uris": ["https://example.org/InactiveClass"],
+            "properties": {},
+        })
+
+    assert exc_info.value.status_code == 400
+    store.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_instance_rejects_inactive_property(monkeypatch):
+    store = AsyncMock()
+    class_uri = "https://example.org/Book"
+    property_uri = "https://example.org/inactiveProperty"
+
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(
+        main,
+        "check_disjoint_classes",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main.shacl,
+        "get_active_classes",
+        AsyncMock(return_value=[class_uri]),
+    )
+    monkeypatch.setattr(
+        main.shacl,
+        "get_active_properties",
+        AsyncMock(return_value=[]),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.update_instance(
+            "https://example.org/book/1",
+            {
+                "class_uris": [class_uri],
+                "properties": {
+                    property_uri: ["Example"],
+                },
+            },
+        )
+
+    assert exc_info.value.status_code == 400
+    store.update.assert_not_awaited()

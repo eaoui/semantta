@@ -556,6 +556,44 @@ def _safe_extract_zip(
                 target,
             )
 
+async def _validate_metadata_profile_membership(
+    class_uris: list[str],
+    properties: dict,
+):
+    if not isinstance(properties, dict):
+        raise HTTPException(
+            400,
+            "properties must be an object",
+        )
+
+    for cls in class_uris:
+        _sparql_iri(cls, "class URI")
+
+    for prop in properties:
+        _sparql_iri(prop, "property URI")
+
+    active_classes = set(
+        await shacl.get_active_classes()
+    )
+
+    for cls in class_uris:
+        if cls not in active_classes:
+            raise HTTPException(
+                400,
+                f"Class is not active in the Application Profile: {cls}",
+            )
+
+    active_properties = set(
+        await shacl.get_active_properties()
+    )
+
+    for prop in properties:
+        if prop not in active_properties:
+            raise HTTPException(
+                400,
+                f"Property is not active in the Application Profile: {prop}",
+            )
+
 def _is_specific_range(range_uri: str) -> bool:
     return range_uri not in GENERIC_RANGES
 
@@ -3697,7 +3735,16 @@ async def create_instance(data: dict):
                     break
 
     properties = data.get("properties", {})
-    await shacl.validate_instance(class_uris, properties)
+
+    await _validate_metadata_profile_membership(
+        class_uris,
+        properties,
+    )
+
+    await shacl.validate_instance(
+        class_uris,
+        properties,
+    )
 
     instance_ref = _sparql_iri(
         instance_uri,
@@ -4060,6 +4107,11 @@ async def update_instance(uri: str, data: dict):
             400,
             "properties must be an object",
         )
+
+    await _validate_metadata_profile_membership(
+        class_uris,
+        properties,
+    )
 
     # Validate the complete replacement before
     # modifying persistent RDF data.
