@@ -61,7 +61,7 @@ from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, RDFS, split_uri
 
 
-from config import FUSEKI_CONFIG
+from config import FUSEKI_CONFIG, is_loopback_host
 from fuseki_store import FusekiStore, SHAPES_GRAPH
 from rdf_store import RDFStore
 from streaming_rdf import stream_rdf_to_ntriples
@@ -3005,6 +3005,23 @@ app.add_middleware(
         "localhost",
     ],
 )
+
+@app.middleware("http")
+async def restrict_remote_clients(request: Request, call_next):
+    client = request.client
+
+    if client is None or not is_loopback_host(client.host):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Remote access is disabled. "
+                    "Semantta accepts requests from localhost only."
+                )
+            },
+        )
+
+    return await call_next(request)
 
 @app.exception_handler(Exception)
 async def internal_error_handler(
