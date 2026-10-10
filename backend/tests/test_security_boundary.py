@@ -68,3 +68,26 @@ def test_api_allows_loopback_clients():
     response = client.get("/api/settings")
 
     assert response.status_code == 200
+
+
+def test_env_list_parses_explicit_values(monkeypatch):
+    monkeypatch.setenv(
+        "SEMANTTA_ALLOWED_HOSTS",
+        "semantta.example.com,localhost",
+    )
+
+    assert main._env_list(
+        "SEMANTTA_ALLOWED_HOSTS",
+        "localhost",
+    ) == [
+        "semantta.example.com",
+        "localhost",
+    ]
+
+
+def test_env_list_rejects_wildcards():
+    with pytest.raises(RuntimeError):
+        main._env_list(
+            "TEST_ALLOWED_HOSTS",
+            "*",
+        )

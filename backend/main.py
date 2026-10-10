@@ -204,10 +204,30 @@ MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES = (
     * 1024
 )
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+
+def _env_list(name: str, default: str) -> list[str]:
+    values = [
+        value.strip()
+        for value in os.getenv(name, default).split(",")
+        if value.strip()
+    ]
+
+    if not values or "*" in values:
+        raise RuntimeError(
+            f"{name} must contain explicit, non-wildcard values."
+        )
+
+    return values
+
+CORS_ALLOWED_ORIGINS = _env_list(
+    "SEMANTTA_CORS_ALLOWED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+)
+
+TRUSTED_HOSTS = _env_list(
+    "SEMANTTA_ALLOWED_HOSTS",
+    "127.0.0.1,localhost",
+)
 
 # ---------------------------------------------------------------------------
 #  System Datatypes & Annotation Properties
@@ -3000,10 +3020,7 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=[
-        "127.0.0.1",
-        "localhost",
-    ],
+    allowed_hosts=TRUSTED_HOSTS,
 )
 
 @app.middleware("http")
