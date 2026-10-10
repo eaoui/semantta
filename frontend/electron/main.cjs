@@ -73,6 +73,8 @@ let fusekiBaseUrl = null
 let mainWindow = null
 let backendProcess = null
 
+let backendReady = false
+
 function getElectronLogFile() {
   return path.join(
     getSemanttaDataDir(),
@@ -934,8 +936,43 @@ async function allocateBackendPort() {
   )
 }
 
+function captureBackendOutput(stream, source) {
+  if (!stream) {
+    return
+  }
+
+  let pending = ''
+
+  stream.setEncoding('utf8')
+
+  function writeLine(line) {
+    if (!backendReady && line.trim()) {
+      log(`[Backend ${source}] ${line}`)
+    }
+  }
+
+  stream.on('data', (chunk) => {
+    const lines = (
+      pending + chunk
+    ).split(/\r?\n/)
+
+    pending = lines.pop() || ''
+
+    for (const line of lines) {
+      writeLine(line)
+    }
+  })
+
+  stream.on('end', () => {
+    if (pending) {
+      writeLine(pending)
+    }
+  })
+}
+
 function startBackend() {
   const executablePath = getBackendExecutable()
+  backendReady = false
 
   backendProcess = spawn(
     executablePath,
@@ -950,8 +987,18 @@ function startBackend() {
           `${fusekiBaseUrl}/${FUSEKI_DATASET_NAME}`,
       },
       windowsHide: true,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
+  )
+
+  captureBackendOutput(
+    backendProcess.stdout,
+    'stdout',
+  )
+
+  captureBackendOutput(
+    backendProcess.stderr,
+    'stderr',
   )
 
   backendProcess.on('error', (error) => {
@@ -978,6 +1025,7 @@ function waitForBackend() {
   return new Promise(
     (resolve, reject) => {
       let settled = false
+      let lastLoggedStatus = null
 
       const cleanup = () => {
         if (process) {
@@ -1043,8 +1091,17 @@ function waitForBackend() {
               response.statusCode === 200 ||
               response.statusCode === 503
             ) {
+              backendReady = true
               finish(resolve)
               return
+            }
+
+            if (response.statusCode !== lastLoggedStatus) {
+              lastLoggedStatus = response.statusCode
+
+              log(
+                `Backend readiness probe returned HTTP ${response.statusCode}.`,
+              )
             }
 
             setTimeout(
