@@ -3,6 +3,6 @@ uvicorn[standard]
 python-multipart
 rdflib
 owlrl
-httpx2
+httpx
 pyshacl
 python-dotenv

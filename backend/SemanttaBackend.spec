@@ -19,6 +19,8 @@ hiddenimports += collect_submodules("rdflib.plugins.parsers")
 hiddenimports += collect_submodules("rdflib.plugins.serializers")
 hiddenimports += collect_submodules("pyshacl")
 hiddenimports += collect_submodules("owlrl")
+hiddenimports += collect_submodules("httpx")
+hiddenimports += collect_submodules("httpcore")
 
 
 a = Analysis(
