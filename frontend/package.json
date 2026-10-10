@@ -52,6 +52,9 @@
     "nuxt-phosphor-icons": "^2.3.3",
     "tailwindcss": "^4.3.2"
   },
+  "overrides": {
+    "@nuxt/devtools": "4.0.0-beta.4"
+  },
   "build": {
     "appId": "org.eaoui.semantta",
     "productName": "Semantta",
