@@ -26,7 +26,6 @@ class MetadataFileInfo(BaseModel):
     instances_count: int = 0
     triples_count: int = 0
     vocab_integrated: bool = True
-    instances_merged: bool = True
 
 
 class ProfileEntityItem(BaseModel):

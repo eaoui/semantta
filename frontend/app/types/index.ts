@@ -21,7 +21,6 @@ export interface MetadataFileInfo {
   instances_count: number
   triples_count: number
   vocab_integrated: boolean
-  instances_merged: boolean
 }
 
 export interface Instance {

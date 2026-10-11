@@ -1353,8 +1353,8 @@ def clear_metadata_graph_stats() -> None:
 
 async def rebuild_default_data_graph() -> None:
     """
-    Rebuild the Fuseki default graph from currently merged metadata
-    named graphs plus application-created instances.
+    Rebuild the Fuseki default graph from all metadata named graphs
+    plus application-created instances.
 
     Metadata named graphs remain the authoritative source.
     """
@@ -1362,12 +1362,6 @@ async def rebuild_default_data_graph() -> None:
     await store.update("CLEAR DEFAULT")
 
     for metadata_file in state["metadata_files"]:
-        if not metadata_file.get(
-            "instances_merged",
-            True,
-        ):
-            continue
-
         graph_uri = metadata_file["graph_uri"]
 
         if not await store.graph_exists(graph_uri):
@@ -1402,17 +1396,12 @@ def _metadata_files_after_upload(
     filename: str,
     graph_uri: str,
     integrate_vocab: bool,
-    merge_instances: bool,
 ) -> list[dict]:
     new_entry = {
         "filename": filename,
         "graph_uri": graph_uri,
         "vocab_integrated": integrate_vocab,
-        "instances_merged": merge_instances,
     }
-
-    if not merge_instances:
-        return [new_entry]
 
     result = []
     replaced = False
@@ -1466,12 +1455,6 @@ async def _stage_metadata_default_graph(
     add_operations = []
 
     for metadata_file in candidate_files:
-        if not metadata_file.get(
-            "instances_merged",
-            True,
-        ):
-            continue
-
         source_graph_uri = (
             staged_graph_uri
             if metadata_file["filename"] == filename
@@ -2858,7 +2841,6 @@ def load_saved_metadata():
         )
 
         vocab_integrated = True
-        instances_merged = True
 
         meta_path = (
             metadata_path
@@ -2890,10 +2872,6 @@ def load_saved_metadata():
                     "vocab_integrated",
                     True,
                 )
-                instances_merged = meta_info.get(
-                    "instances_merged",
-                    True,
-                )
             except Exception:
                 logger.warning(
                     "Could not read metadata sidecar: %s",
@@ -2906,7 +2884,6 @@ def load_saved_metadata():
                 "filename": filename,
                 "graph_uri": graph_uri,
                 "vocab_integrated": vocab_integrated,
-                "instances_merged": instances_merged,
             }
         )
 
@@ -3226,10 +3203,6 @@ async def get_state():
                     "vocab_integrated",
                     True,
                 ),
-                instances_merged=mf.get(
-                    "instances_merged",
-                    True,
-                ),
             )
         )
 
@@ -3388,7 +3361,6 @@ async def delete_ontology(filename: str):
 async def upload_metadata(
     file: UploadFile = File(...),
     integrate_vocab: bool = Form(True),
-    merge_instances: bool = Form(True),
 ):
     if not state["ontologies"]:
         raise HTTPException(
@@ -3406,12 +3378,6 @@ async def upload_metadata(
         file.filename,
         "filename",
     )
-
-    if (
-        not state["metadata_files"]
-        and not state["created_instances"]
-    ):
-        merge_instances = True
 
     ext = (
         filename.rsplit(".", 1)[-1].lower()
@@ -3453,7 +3419,6 @@ async def upload_metadata(
             filename,
             graph_uri,
             integrate_vocab,
-            merge_instances,
         )
     )
 
@@ -3502,20 +3467,7 @@ async def upload_metadata(
     fuseki_committed = False
     preserve_rollback_artifacts = False
 
-    target_graphs_to_drop = set()
-
-    if not merge_instances:
-        target_graphs_to_drop = {
-            metadata_file["graph_uri"]
-            for metadata_file in old_metadata_files
-            if metadata_file["graph_uri"]
-            != graph_uri
-        }
-
     rollback_graph_uris = {graph_uri}
-    rollback_graph_uris.update(
-        target_graphs_to_drop
-    )
 
     graph_backups: Dict[str, str] = {}
 
@@ -3783,8 +3735,6 @@ async def upload_metadata(
             {
                 "vocab_integrated":
                     integrate_vocab,
-                "instances_merged":
-                    merge_instances,
             },
         )
 
@@ -3835,15 +3785,6 @@ async def upload_metadata(
 
         operations = []
 
-        # Standalone mode removes all previous metadata sources.
-        for old_graph_uri in sorted(
-            target_graphs_to_drop
-        ):
-            operations.append(
-                "DROP SILENT GRAPH "
-                f"<{old_graph_uri}>"
-            )
-
         # Replace the target metadata graph.
         operations.append(
             "MOVE GRAPH "
@@ -3893,15 +3834,12 @@ async def upload_metadata(
             candidate_files
         )
 
-        if merge_instances:
-            new_sources = {
-                uri: source
-                for uri, source
-                in old_metadata_only_sources.items()
-                if source != filename
-            }
-        else:
-            new_sources = {}
+        new_sources = {
+            uri: source
+            for uri, source
+            in old_metadata_only_sources.items()
+            if source != filename
+        }
 
         state["metadata_only_sources"] = (
             new_sources
@@ -4651,67 +4589,9 @@ async def integrate_file_vocab(
         ),
         {
             "vocab_integrated": True,
-            "instances_merged": mf.get(
-                "instances_merged",
-                True,
-            ),
         },
     )
 
-    invalidate_profile()
-
-    return {"status": "ok"}
-
-@app.post("/api/metadata/file/{filename:path}/merge-metadata")
-async def merge_file_metadata(
-    filename: str,
-):
-    mf = next(
-        (
-            f
-            for f in state["metadata_files"]
-            if f["filename"] == filename
-        ),
-        None,
-    )
-
-    if not mf:
-        raise HTTPException(
-            404,
-            "Metadata file not found",
-        )
-
-    if mf.get(
-        "instances_merged",
-        True,
-    ):
-        return {
-            "status": "already merged"
-        }
-
-    await store.update(
-        f"ADD GRAPH <{mf['graph_uri']}> TO DEFAULT"
-    )
-
-    invalidate_instance_count()
-
-    mf["instances_merged"] = True
-
-    atomic_write_json(
-        os.path.join(
-            METADATA_DIR,
-            filename + ".meta.json",
-        ),
-        {
-            "vocab_integrated": mf.get(
-                "vocab_integrated",
-                True,
-            ),
-            "instances_merged": True,
-        },
-    )
-
-    await rebuild_used_uris()
     invalidate_profile()
 
     return {"status": "ok"}

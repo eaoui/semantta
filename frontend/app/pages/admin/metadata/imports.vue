@@ -5,11 +5,6 @@
     <ImportBox title="Import Metadata File" accept=".nt,.txt,.ttl,.rdf,.xml,.jsonld,.json,.trig,.trix,.nq"
       buttonText="Import" @upload="upload">
       <div class="mt-3 space-y-2">
-        <label v-if="hasExistingMetadata"
-          class="flex items-center gap-2 cursor-pointer text-gray-700 dark:text-gray-300">
-          <input type="checkbox" v-model="mergeInstances" class="h-4 w-4" />
-          <span class="text-sm">Integrate into existing metadata (Recommended)</span>
-        </label>
         <label class="flex items-center gap-2 cursor-pointer text-gray-700 dark:text-gray-300">
           <input type="checkbox" v-model="integrateVocab" class="h-4 w-4" />
           <span class="text-sm">Integrate all vocabularies into Application Profile</span>
@@ -34,11 +29,7 @@
           <div class="mt-2 flex gap-4 text-sm">
             <span
               :class="mf.vocab_integrated ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'">
-              {{ mf.vocab_integrated ? '✓ Vocab integrated' : '✗ Vocab not integrated' }}
-            </span>
-            <span v-if="hasMultipleSources"
-              :class="mf.instances_merged ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'">
-              {{ mf.instances_merged ? '✓ Merged' : '✗ Standalone' }}
+              {{ mf.vocab_integrated ? '✓ Vocabulary integrated' : '✗ Vocabulary not integrated' }}
             </span>
           </div>
 
@@ -51,14 +42,10 @@
               @click="selectedFile = mf.filename; confirmDelete = true" />
           </template>
 
-          <template v-if="!mf.vocab_integrated || (hasMultipleSources && !mf.instances_merged)" #footer>
+          <template v-if="!mf.vocab_integrated" #footer>
             <button v-if="!mf.vocab_integrated" @click="integrateVocabForFile(mf.filename)"
               class="text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800">
               Integrate vocabulary now
-            </button>
-            <button v-if="hasMultipleSources && !mf.instances_merged" @click="mergeMetadataForFile(mf.filename)"
-              class="text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800">
-              Merge metadata now
             </button>
           </template>
         </ItemCard>
@@ -89,22 +76,9 @@ const toast = useToast()
 const { phase, startPolling, stopPolling } = useProgress()
 
 const integrateVocab = ref(false)
-const mergeInstances = ref(true)
 const loadingMsg = ref('')
 const selectedFile = ref('')
 const confirmDelete = ref(false)
-
-const hasExistingMetadata = computed(
-  () =>
-    store.instanceTotal > 0 ||
-    store.metadataFiles.length > 0
-)
-
-const hasMultipleSources = computed(
-  () =>
-    store.instanceTotal > 0 ||
-    store.metadataFiles.length > 1
-)
 
 // Ontology base namespaces (derived from each ontology's IRI)
 const ontologyBaseNamespaces = computed(() =>
@@ -121,7 +95,6 @@ async function upload(file: File) {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('integrate_vocab', String(integrateVocab.value))
-    formData.append('merge_instances', String(hasExistingMetadata.value ? mergeInstances.value : false))
     await $fetch(`${apiBase}/api/metadata/upload`, { method: 'POST', body: formData })
     await store.fetchState()
   } catch (e: any) {
@@ -147,13 +120,6 @@ async function handleDeleteFile() {
 async function integrateVocabForFile(filename: string) {
   try {
     await $fetch(`${apiBase}/api/metadata/file/${encodeURIComponent(filename)}/integrate-vocab`, { method: 'POST' })
-    await store.fetchState()
-  } catch (e: any) { toast.error(e.message) }
-}
-
-async function mergeMetadataForFile(filename: string) {
-  try {
-    await $fetch(`${apiBase}/api/metadata/file/${encodeURIComponent(filename)}/merge-metadata`, { method: 'POST' })
     await store.fetchState()
   } catch (e: any) { toast.error(e.message) }
 }

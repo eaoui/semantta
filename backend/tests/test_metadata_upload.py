@@ -119,7 +119,7 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
     )
 
     original_content = b"original metadata"
-    original_meta_content = b'{"instances_merged": false}'
+    original_meta_content = b'{"vocab_integrated": false}'
 
     try:
         main.METADATA_DIR = tmp_path
@@ -138,7 +138,6 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
                     "filename": "records.ttl",
                     "graph_uri": graph_uri,
                     "vocab_integrated": False,
-                    "instances_merged": True,
                 }
             ]
 
@@ -227,7 +226,6 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
                 await main.upload_metadata(
                     file=_upload("records.ttl"),
                     integrate_vocab=False,
-                    merge_instances=True,
                 )
 
             assert exc_info.value.status_code == 400
@@ -379,7 +377,6 @@ def test_failed_fuseki_import_preserves_existing_file(
                         "records.ttl"
                     ),
                 "vocab_integrated": False,
-                "instances_merged": True,
             }
         ]
 
@@ -418,7 +415,6 @@ def test_failed_fuseki_import_preserves_existing_file(
                         "records.ttl"
                     ),
                     integrate_vocab=False,
-                    merge_instances=True,
                 )
             except HTTPException as exc:
                 assert exc.status_code == 400
@@ -517,3 +513,151 @@ async def test_check_instances_exist_uses_validated_uris():
         )
     finally:
         main.store = original_store
+
+def test_metadata_files_after_upload_preserves_existing_sources(
+    monkeypatch,
+):
+    existing_graph_uri = main.metadata_graph_uri(
+        "existing.ttl"
+    )
+    previous_graph_uri = main.metadata_graph_uri(
+        "records.ttl"
+    )
+    replacement_graph_uri = main.metadata_graph_uri(
+        "records.ttl"
+    )
+
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        [
+            {
+                "filename": "existing.ttl",
+                "graph_uri": existing_graph_uri,
+                "vocab_integrated": False,
+            },
+            {
+                "filename": "records.ttl",
+                "graph_uri": previous_graph_uri,
+                "vocab_integrated": False,
+            },
+        ],
+    )
+
+    candidate_files = main._metadata_files_after_upload(
+        "records.ttl",
+        replacement_graph_uri,
+        True,
+    )
+
+    assert [
+        item["filename"]
+        for item in candidate_files
+    ] == [
+        "existing.ttl",
+        "records.ttl",
+    ]
+
+    assert (
+        candidate_files[0]["graph_uri"]
+        == existing_graph_uri
+    )
+
+    assert (
+        candidate_files[1]["graph_uri"]
+        == replacement_graph_uri
+    )
+
+    assert (
+        candidate_files[1]["vocab_integrated"]
+        is True
+    )
+
+@pytest.mark.asyncio
+async def test_rebuild_default_graph_includes_all_metadata_sources(
+    monkeypatch,
+):
+    metadata_files = [
+        {
+            "filename": "first.ttl",
+            "graph_uri": main.metadata_graph_uri(
+                "first.ttl"
+            ),
+            "vocab_integrated": False,
+        },
+        {
+            "filename": "second.ttl",
+            "graph_uri": main.metadata_graph_uri(
+                "second.ttl"
+            ),
+            "vocab_integrated": True,
+        },
+    ]
+
+    existing_graphs = {
+        item["graph_uri"]
+        for item in metadata_files
+    }
+    store = WorkingStore(existing_graphs)
+
+    monkeypatch.setattr(
+        main,
+        "store",
+        store,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        metadata_files,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "created_instances_graph",
+        main.Graph(),
+    )
+
+    await main.rebuild_default_data_graph()
+
+    assert "CLEAR DEFAULT" in store.update_calls
+
+    for metadata_file in metadata_files:
+        assert (
+            f"ADD GRAPH <{metadata_file['graph_uri']}> TO DEFAULT"
+            in store.update_calls
+        )
+
+def test_load_saved_metadata_reads_current_sidecar(
+    tmp_path,
+    monkeypatch,
+):
+    metadata_file = tmp_path / "records.ttl"
+    metadata_file.write_text(
+        "@prefix ex: <http://example.org/> .",
+        encoding="utf-8",
+    )
+
+    sidecar = tmp_path / "records.ttl.meta.json"
+    sidecar.write_text(
+        '{"vocab_integrated": false}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        main,
+        "METADATA_DIR",
+        tmp_path,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        [],
+    )
+
+    main.load_saved_metadata()
+
+    assert len(main.state["metadata_files"]) == 1
+
+    metadata_info = main.state["metadata_files"][0]
+
+    assert metadata_info["filename"] == "records.ttl"
+    assert metadata_info["vocab_integrated"] is False
