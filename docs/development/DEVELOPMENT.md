@@ -81,6 +81,25 @@ Next time you only need steps 1 and 3.
 
 The app will be available at `http://localhost:3000`.
 
+### Request-origin configuration
+
+The backend validates the source origin of state-changing API requests
+(`POST`, `PUT`, `PATCH`, and `DELETE`). Requests must include an `Origin`
+or `Referer` header identifying an approved application origin.
+
+The default trusted web origins are:
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+
+The packaged Electron origin, `semantta://bundle`, is trusted separately.
+
+Configure `SEMANTTA_CORS_ALLOWED_ORIGINS` in the backend environment,
+using the exact frontend origin, including its scheme and port. For a
+web deployment, configure the actual frontend origin rather than relying
+on the development defaults. The backend's `SEMANTTA_ALLOWED_HOSTS`
+setting must also reflect the expected HTTP Host header values.
+
 ## Project Structure
 
 ```

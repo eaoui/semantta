@@ -22,7 +22,7 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -227,6 +227,24 @@ CORS_ALLOWED_ORIGINS = _env_list(
 TRUSTED_HOSTS = _env_list(
     "SEMANTTA_ALLOWED_HOSTS",
     "127.0.0.1,localhost",
+)
+
+# HTTP methods that can change application state.
+UNSAFE_HTTP_METHODS = frozenset({
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+})
+
+# Must match APP_SCHEME and APP_HOST in frontend/electron/main.cjs.
+ELECTRON_APP_ORIGIN = "semantta://bundle"
+
+# Browser origins trusted to submit state-changing requests.
+# The Electron application origin is trusted separately because it
+# is not part of the normal HTTP frontend origin configuration.
+TRUSTED_REQUEST_ORIGINS = frozenset(
+    [*CORS_ALLOWED_ORIGINS, ELECTRON_APP_ORIGIN]
 )
 
 # ---------------------------------------------------------------------------
@@ -3009,6 +3027,56 @@ async def lifespan(app: FastAPI):
         logger.info("Semantta backend stopped")
         progress["phase"] = ""
 
+def _origin_from_referer(referer: str | None) -> str | None:
+    """Extract a normalized origin from a Referer URL."""
+    if not referer:
+        return None
+
+    try:
+        parsed = urlsplit(referer)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+
+    scheme = parsed.scheme.lower()
+
+    if not scheme or not hostname:
+        return None
+
+    hostname = hostname.lower()
+
+    # Restore brackets when reconstructing an IPv6 authority.
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+
+    # Normalize explicit default ports to their origin representation.
+    if (
+        (scheme == "http" and port == 80)
+        or (scheme == "https" and port == 443)
+    ):
+        port = None
+
+    authority = (
+        hostname
+        if port is None
+        else f"{hostname}:{port}"
+    )
+
+    return f"{scheme}://{authority}"
+
+
+def _request_source_origin(request: Request) -> str | None:
+    """Determine the request origin, falling back to Referer."""
+    origin = request.headers.get("origin")
+
+    if origin is not None:
+        return origin.strip()
+
+    return _origin_from_referer(
+        request.headers.get("referer")
+    )
+
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -3024,7 +3092,11 @@ app.add_middleware(
 )
 
 @app.middleware("http")
-async def restrict_remote_clients(request: Request, call_next):
+async def enforce_local_api_security(
+    request: Request,
+    call_next,
+):
+    # Preserve the existing loopback-client restriction.
     client = request.client
 
     if client is None or not is_loopback_host(client.host):
@@ -3037,6 +3109,21 @@ async def restrict_remote_clients(request: Request, call_next):
                 )
             },
         )
+
+    # Validate the origin of every state-changing request.
+    if request.method.upper() in UNSAFE_HTTP_METHODS:
+        source_origin = _request_source_origin(request)
+
+        if source_origin not in TRUSTED_REQUEST_ORIGINS:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "The request origin is missing or not allowed "
+                        "for state-changing requests."
+                    )
+                },
+            )
 
     return await call_next(request)
 

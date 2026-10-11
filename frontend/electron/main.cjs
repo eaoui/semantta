@@ -639,8 +639,6 @@ function registerFrontendProtocol() {
 
         headers.delete('host')
         headers.delete('content-length')
-        headers.delete('origin')
-        headers.delete('referer')
 
         let body
 
