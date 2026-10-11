@@ -32,8 +32,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run backend tests
+        run: python -m pytest backend/tests
+
   build:
     name: Build ${{ matrix.name }}
+    needs: backend-tests
     runs-on: ${{ matrix.os }}
     env:
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.ci-cache/electron-builder
@@ -126,7 +151,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: backend/requirements-build.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-build.txt
 
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
@@ -138,9 +165,7 @@ jobs:
 
       - name: Install Python build dependencies
         working-directory: backend
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-build.txt
+        run: python -m pip install -r requirements-build.txt
 
       - name: Install frontend dependencies
         working-directory: frontend
