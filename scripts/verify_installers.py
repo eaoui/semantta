@@ -60,15 +60,19 @@ def run_packaged_executable(
     executable: Path,
     env: dict[str, str],
 ) -> None:
-    command = [str(executable)]
-
-    if sys.platform == "linux":
-        command.insert(0, str(executable))
-        command.insert(0, "xvfb-run")
-        command.insert(1, "-a")
-        command.extend(["--no-sandbox", "--smoke-test"])
+    if sys.platform.startswith("linux"):
+        command = [
+            "xvfb-run",
+            "-a",
+            str(executable),
+            "--no-sandbox",
+            "--smoke-test",
+        ]
     else:
-        command.append("--smoke-test")
+        command = [
+            str(executable),
+            "--smoke-test",
+        ]
 
     run(command, env=env)
 

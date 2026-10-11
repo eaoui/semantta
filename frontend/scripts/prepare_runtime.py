@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -308,6 +310,77 @@ def download_java(
         "sha256": expected,
     }
 
+def runtime_components_are_usable(
+    os_name: str,
+) -> bool:
+    fuseki_name = (
+        "fuseki-server.bat"
+        if os_name == "windows"
+        else "fuseki-server"
+    )
+
+    java_name = (
+        "java.exe"
+        if os_name == "windows"
+        else "java"
+    )
+
+    fuseki_executable = (
+        FUSEKI_DIR / fuseki_name
+    )
+
+    java_executable = (
+        JAVA_DIR / "bin" / java_name
+    )
+
+    if not fuseki_executable.is_file():
+        return False
+
+    if not java_executable.is_file():
+        return False
+
+    if os_name != "windows":
+        if (
+            not os.access(
+                fuseki_executable,
+                os.X_OK,
+            )
+            or not os.access(
+                java_executable,
+                os.X_OK,
+            )
+        ):
+            return False
+
+    try:
+        result = subprocess.run(
+            [
+                str(java_executable),
+                "--version",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (
+        OSError,
+        subprocess.SubprocessError,
+    ):
+        return False
+
+    version_output = (
+        f"{result.stdout}\n{result.stderr}"
+    )
+
+    return re.search(
+        rf"\b(?:openjdk|java)\s+"
+        rf"(?:version\s+)?[\"']?"
+        rf"{JAVA_FEATURE_VERSION}(?:[.\s+-]|$)",
+        version_output,
+        re.IGNORECASE,
+    ) is not None
+
 
 def runtime_is_current(
     os_name: str,
@@ -325,15 +398,30 @@ def runtime_is_current(
     except Exception:
         return False
 
+    if not isinstance(manifest, dict):
+        return False
+
+    fuseki_manifest = manifest.get("fuseki")
+    java_manifest = manifest.get("java")
+
+    if (
+        not isinstance(fuseki_manifest, dict)
+        or not isinstance(java_manifest, dict)
+    ):
+        return False
+
     return (
-        manifest.get("fuseki", {}).get("version")
+        fuseki_manifest.get("version")
         == FUSEKI_VERSION
-        and manifest.get("java", {}).get("major_version")
+        and java_manifest.get("major_version")
         == JAVA_FEATURE_VERSION
         and manifest.get("platform") == os_name
         and manifest.get("architecture") == architecture
         and FUSEKI_DIR.is_dir()
         and JAVA_DIR.is_dir()
+        and runtime_components_are_usable(
+            os_name
+        )
     )
 
 
