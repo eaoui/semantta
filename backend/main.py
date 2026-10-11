@@ -1510,13 +1510,17 @@ def _backup_existing_file(
 
     return True
 
-
 def _restore_file(
     destination: Path,
     backup: Path,
     existed_before: bool,
 ) -> None:
-    if existed_before and backup.exists():
+    if existed_before:
+        if not backup.exists():
+            raise FileNotFoundError(
+                f"Backup file not found: {backup}"
+            )
+
         os.replace(
             backup,
             destination,
@@ -3479,16 +3483,6 @@ async def upload_metadata(
         / f"{filename}.meta.json.backup"
     )
 
-    destination_existed = _backup_existing_file(
-        destination,
-        destination_backup,
-    )
-
-    meta_existed = _backup_existing_file(
-        meta_path,
-        meta_backup,
-    )
-
     nt_path = (
         work_dir / f"{filename}.nt"
     )
@@ -3499,20 +3493,177 @@ async def upload_metadata(
 
     default_stage_uri = None
 
-    destination_backup = (
-        work_dir / f"{filename}.backup"
-    )
-
-    meta_backup = (
-        work_dir
-        / f"{filename}.meta.json.backup"
-    )
-
     destination_existed = False
     meta_existed = False
+
+    destination_backup_ready = False
+    meta_backup_ready = False
+
     fuseki_committed = False
+    preserve_rollback_artifacts = False
+
+    target_graphs_to_drop = set()
+
+    if not merge_instances:
+        target_graphs_to_drop = {
+            metadata_file["graph_uri"]
+            for metadata_file in old_metadata_files
+            if metadata_file["graph_uri"]
+            != graph_uri
+        }
+
+    rollback_graph_uris = {graph_uri}
+    rollback_graph_uris.update(
+        target_graphs_to_drop
+    )
+
+    graph_backups: Dict[str, str] = {}
+
+    default_backup_uri = (
+        _metadata_staging_graph_uri(
+            "rollback-default"
+        )
+    )
+
+    async def rollback_upload() -> None:
+        nonlocal fuseki_committed
+        nonlocal preserve_rollback_artifacts
+
+        rollback_failed = False
+
+        # Restore the Fuseki graphs if the new graph
+        # transaction has already committed.
+        if fuseki_committed:
+            rollback_operations = [
+                "CLEAR DEFAULT",
+                "ADD SILENT GRAPH "
+                f"<{default_backup_uri}> TO DEFAULT",
+            ]
+
+            for rollback_graph_uri in sorted(
+                rollback_graph_uris
+            ):
+                backup_uri = graph_backups.get(
+                    rollback_graph_uri
+                )
+
+                if backup_uri:
+                    rollback_operations.append(
+                        "COPY GRAPH "
+                        f"<{backup_uri}> "
+                        "TO GRAPH "
+                        f"<{rollback_graph_uri}>"
+                    )
+                else:
+                    rollback_operations.append(
+                        "DROP SILENT GRAPH "
+                        f"<{rollback_graph_uri}>"
+                    )
+
+            try:
+                await store.update(
+                    ";\n".join(
+                        rollback_operations
+                    )
+                )
+
+                fuseki_committed = False
+
+            except Exception:
+                rollback_failed = True
+
+                logger.exception(
+                    "Failed to restore Fuseki state "
+                    "after metadata upload failure."
+                )
+
+        # Restore the original source file if its
+        # backup was prepared successfully.
+        if destination_backup_ready:
+            try:
+                _restore_file(
+                    destination,
+                    destination_backup,
+                    destination_existed,
+                )
+            except Exception:
+                rollback_failed = True
+
+                logger.exception(
+                    "Failed to restore metadata file %s",
+                    destination,
+                )
+
+        # Restore the original metadata sidecar.
+        if meta_backup_ready:
+            try:
+                _restore_file(
+                    meta_path,
+                    meta_backup,
+                    meta_existed,
+                )
+            except Exception:
+                rollback_failed = True
+
+                logger.exception(
+                    "Failed to restore metadata sidecar %s",
+                    meta_path,
+                )
+
+        # Restore the application state.
+        state["metadata_files"] = (
+            old_metadata_files
+        )
+
+        state["metadata_only_sources"] = (
+            old_metadata_only_sources
+        )
+
+        clear_metadata_graph_stats()
+        invalidate_instance_count()
+
+        try:
+            invalidate_caches()
+            ap.invalidate()
+        except Exception:
+            logger.exception(
+                "Failed to invalidate caches after "
+                "metadata upload rollback."
+            )
+
+        if not fuseki_committed:
+            await rebuild_used_uris()
+
+        # Preserve database and filesystem recovery
+        # artifacts if any restoration step failed.
+        if rollback_failed:
+            preserve_rollback_artifacts = True
+
+            logger.error(
+                "Metadata upload rollback was incomplete. "
+                "Recovery artifacts retained at %s",
+                work_dir,
+            )
 
     try:
+        destination_existed = (
+            _backup_existing_file(
+                destination,
+                destination_backup,
+            )
+        )
+
+        destination_backup_ready = True
+
+        meta_existed = (
+            _backup_existing_file(
+                meta_path,
+                meta_backup,
+            )
+        )
+
+        meta_backup_ready = True
+
         # ---------------------------------------------------------------
         # 1. Save to a temporary source file.
         #
@@ -3637,6 +3788,42 @@ async def upload_metadata(
             },
         )
 
+        # Preserve the current RDF graphs before any
+        # destructive changes are committed.
+        backup_operations = [
+            "COPY DEFAULT TO GRAPH "
+            f"<{default_backup_uri}>"
+        ]
+
+        for old_graph_uri in sorted(
+            rollback_graph_uris
+        ):
+            if await store.graph_exists(
+                old_graph_uri
+            ):
+                backup_uri = (
+                    _metadata_staging_graph_uri(
+                        "rollback-source"
+                    )
+                )
+
+                graph_backups[
+                    old_graph_uri
+                ] = backup_uri
+
+                backup_operations.append(
+                    "COPY GRAPH "
+                    f"<{old_graph_uri}> "
+                    "TO GRAPH "
+                    f"<{backup_uri}>"
+                )
+
+        await store.update(
+            ";\n".join(
+                backup_operations
+            )
+        )
+
         # ---------------------------------------------------------------
         # 7. ONE Fuseki transaction.
         #
@@ -3649,21 +3836,13 @@ async def upload_metadata(
         operations = []
 
         # Standalone mode removes all previous metadata sources.
-        if not merge_instances:
-            target_graphs_to_drop = {
-                metadata_file["graph_uri"]
-                for metadata_file in old_metadata_files
-                if metadata_file["graph_uri"]
-                != graph_uri
-            }
-
-            for old_graph_uri in sorted(
-                target_graphs_to_drop
-            ):
-                operations.append(
-                    "DROP SILENT GRAPH "
-                    f"<{old_graph_uri}>"
-                )
+        for old_graph_uri in sorted(
+            target_graphs_to_drop
+        ):
+            operations.append(
+                "DROP SILENT GRAPH "
+                f"<{old_graph_uri}>"
+            )
 
         # Replace the target metadata graph.
         operations.append(
@@ -3743,13 +3922,6 @@ async def upload_metadata(
         invalidate_caches()
         ap.invalidate()
 
-        # Old file backups are no longer needed.
-        if destination_backup.exists():
-            destination_backup.unlink()
-
-        if meta_backup.exists():
-            meta_backup.unlink()
-
         progress["phase"] = ""
 
         return {
@@ -3758,6 +3930,7 @@ async def upload_metadata(
         }
 
     except HTTPException:
+        await rollback_upload()
         raise
 
     except Exception as exc:
@@ -3765,6 +3938,8 @@ async def upload_metadata(
             "Metadata import failed for %s",
             filename,
         )
+
+        await rollback_upload()
 
         raise HTTPException(
             400,
@@ -3778,7 +3953,8 @@ async def upload_metadata(
     finally:
         progress["phase"] = ""
 
-        # Remove temporary staging graph if the transaction failed.
+        # Remove temporary staging graphs when the
+        # transaction did not remain committed.
         if not fuseki_committed:
             try:
                 await store.update(
@@ -3803,10 +3979,38 @@ async def upload_metadata(
                         default_stage_uri,
                     )
 
-        shutil.rmtree(
-            work_dir,
-            ignore_errors=True,
-        )
+        if not preserve_rollback_artifacts:
+            backup_graph_uris = list(
+                graph_backups.values()
+            )
+
+            backup_graph_uris.append(
+                default_backup_uri
+            )
+
+            for backup_uri in backup_graph_uris:
+                try:
+                    await store.update(
+                        "DROP SILENT GRAPH "
+                        f"<{backup_uri}>"
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to remove metadata rollback "
+                        "graph %s",
+                        backup_uri,
+                    )
+
+            shutil.rmtree(
+                work_dir,
+                ignore_errors=True,
+            )
+
+        else:
+            logger.error(
+                "Metadata upload recovery artifacts retained at %s",
+                work_dir,
+            )
 
 @app.post("/api/metadata/create")
 async def create_instance(data: dict):

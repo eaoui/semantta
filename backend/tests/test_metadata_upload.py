@@ -44,9 +44,12 @@ class FailingStore:
 
 
 class WorkingStore:
-    def __init__(self):
+    def __init__(self, existing_graphs=None):
         self.bulk_calls = []
         self.update_calls = []
+        self.existing_graphs = set(
+            existing_graphs or []
+        )
 
     async def bulk_load_nt_file(self, file_path, graph_uri):
         self.bulk_calls.append((Path(file_path), graph_uri))
@@ -58,7 +61,7 @@ class WorkingStore:
         return []
 
     async def graph_exists(self, graph_uri):
-        return True
+        return graph_uri in self.existing_graphs
 
 
 def _upload(filename: str = "records.ttl"):
@@ -79,9 +82,255 @@ async def _noop(*args, **kwargs):
     return None
 
 
-def test_placeholder():
-    assert True
+@pytest.mark.parametrize(
+    "existing_metadata",
+    [True, False],
+)
+def test_failed_file_replacement_rolls_back_metadata_upload(
+    tmp_path,
+    monkeypatch,
+    existing_metadata,
+):
+    import asyncio
 
+    original_metadata_dir = main.METADATA_DIR
+    original_store = main.store
+
+    original_ontologies = main.state["ontologies"]
+    original_metadata_files = main.state["metadata_files"]
+    original_metadata_only_sources = (
+        main.state["metadata_only_sources"]
+    )
+    original_created_instances = (
+        main.state["created_instances"]
+    )
+    original_created_instances_graph = (
+        main.state["created_instances_graph"]
+    )
+    original_metadata_graph_stats = (
+        main.state["metadata_graph_stats"]
+    )
+
+    metadata_path = tmp_path / "records.ttl"
+    meta_path = tmp_path / "records.ttl.meta.json"
+
+    graph_uri = main.metadata_graph_uri(
+        "records.ttl"
+    )
+
+    original_content = b"original metadata"
+    original_meta_content = b'{"instances_merged": false}'
+
+    try:
+        main.METADATA_DIR = tmp_path
+
+        if existing_metadata:
+            metadata_path.write_bytes(
+                original_content
+            )
+
+            meta_path.write_bytes(
+                original_meta_content
+            )
+
+            main.state["metadata_files"] = [
+                {
+                    "filename": "records.ttl",
+                    "graph_uri": graph_uri,
+                    "vocab_integrated": False,
+                    "instances_merged": True,
+                }
+            ]
+
+            store = WorkingStore(
+                {graph_uri}
+            )
+        else:
+            main.state["metadata_files"] = []
+            store = WorkingStore()
+
+        main.state["ontologies"] = [
+            {"filename": "test.ttl"}
+        ]
+
+        main.state["metadata_only_sources"] = {}
+        main.state["created_instances"] = set()
+        main.state["created_instances_graph"] = main.Graph()
+        main.state["metadata_graph_stats"] = {}
+
+        main.store = store
+
+        # Prevent unrelated cache and application side
+        # effects from influencing this regression test.
+        monkeypatch.setattr(
+            main,
+            "invalidate_instance_count",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            main,
+            "invalidate_caches",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            main,
+            "clear_metadata_graph_stats",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            main,
+            "rebuild_used_uris",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            main.ap,
+            "invalidate",
+            lambda: None,
+        )
+
+        original_replace = main.os.replace
+
+        def fail_on_staged_sidecar(
+            source,
+            destination,
+        ):
+            source_path = Path(source)
+            destination_path = Path(destination)
+
+            if (
+                source_path.name
+                == "records.ttl.meta.json"
+                and source_path.parent.name.startswith(
+                    "semantta-metadata-"
+                )
+                and destination_path == meta_path
+            ):
+                raise OSError(
+                    "Simulated sidecar replacement failure"
+                )
+
+            return original_replace(
+                source,
+                destination,
+            )
+
+        monkeypatch.setattr(
+            main.os,
+            "replace",
+            fail_on_staged_sidecar,
+        )
+
+        async def run_upload():
+            with pytest.raises(
+                HTTPException
+            ) as exc_info:
+                await main.upload_metadata(
+                    file=_upload("records.ttl"),
+                    integrate_vocab=False,
+                    merge_instances=True,
+                )
+
+            assert exc_info.value.status_code == 400
+
+        asyncio.run(
+            run_upload()
+        )
+
+        # The failure must occur after the graph commit,
+        # exercising the post-commit recovery path.
+        assert any(
+            "MOVE GRAPH" in update
+            for update in store.update_calls
+        )
+
+        # Both files must return to their original state.
+        if existing_metadata:
+            assert (
+                metadata_path.read_bytes()
+                == original_content
+            )
+
+            assert (
+                meta_path.read_bytes()
+                == original_meta_content
+            )
+        else:
+            assert not metadata_path.exists()
+            assert not meta_path.exists()
+
+        # Application state must remain unchanged.
+        if existing_metadata:
+            assert (
+                main.state["metadata_files"][0]["filename"]
+                == "records.ttl"
+            )
+        else:
+            assert main.state["metadata_files"] == []
+
+        # The default graph and affected named graph must
+        # be restored after the committed update fails.
+        rollback_updates = [
+            update
+            for update in store.update_calls
+            if (
+                "CLEAR DEFAULT" in update
+                and "ADD SILENT GRAPH" in update
+            )
+        ]
+
+        assert rollback_updates
+
+        rollback_update = rollback_updates[-1]
+
+        if existing_metadata:
+            assert "COPY GRAPH" in rollback_update
+        else:
+            assert (
+                f"DROP SILENT GRAPH <{graph_uri}>"
+                in rollback_update
+            )
+
+    finally:
+        main.METADATA_DIR = original_metadata_dir
+        main.store = original_store
+
+        main.state["ontologies"] = original_ontologies
+        main.state["metadata_files"] = original_metadata_files
+        main.state["metadata_only_sources"] = (
+            original_metadata_only_sources
+        )
+        main.state["created_instances"] = (
+            original_created_instances
+        )
+        main.state["created_instances_graph"] = (
+            original_created_instances_graph
+        )
+        main.state["metadata_graph_stats"] = (
+            original_metadata_graph_stats
+        )
+
+
+def test_restore_file_does_not_delete_destination_without_backup(
+    tmp_path,
+):
+    destination = tmp_path / "records.ttl"
+    backup = tmp_path / "missing.backup"
+
+    destination.write_text(
+        "current content",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError):
+        main._restore_file(
+            destination,
+            backup,
+            existed_before=True,
+        )
+
+    assert destination.read_text(
+        encoding="utf-8"
+    ) == "current content"
 
 
 def test_failed_fuseki_import_preserves_existing_file(
