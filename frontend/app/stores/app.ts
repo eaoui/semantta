@@ -65,6 +65,14 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  async function refreshInstanceCount(
+    includeBlankNodes = publicShowBlankNodes.value,
+  ) {
+    instanceTotal.value = await api.fetchInstanceCount(
+      includeBlankNodes,
+    )
+  }
+
   async function fetchInstances(
     options: InstanceListOptions = {},
   ) {
@@ -149,6 +157,7 @@ export const useAppStore = defineStore('app', () => {
       body: JSON.stringify({ show }),
     })
     publicShowBlankNodes.value = show
+    await refreshInstanceCount(show)
   }
 
   // ── Instance CRUD ─────────────────────────────────────
@@ -403,6 +412,7 @@ export const useAppStore = defineStore('app', () => {
 
     // actions
     fetchState,
+    refreshInstanceCount,
     fetchInstances,
     uploadOntology,
     setDisplayFormat,

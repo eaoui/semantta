@@ -65,7 +65,7 @@
     <div v-else-if="store.instances.length">
       <p class="text-sm text-gray-600 dark:text-gray-400 mb-2">
         Showing {{ pageStart }}–{{ pageEnd }}
-        of {{ store.instanceTotal }} instance(s)
+        of {{ displayedInstanceTotal }} instance(s)
       </p>
 
       <table class="w-full border-collapse border border-gray-300 dark:border-gray-600">
@@ -160,7 +160,10 @@ import Pagination from '@/components/shared/Pagination.vue'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
-const { fetchInstanceTypes } = useApi()
+const {
+  fetchInstanceTypes,
+  fetchInstanceCount,
+} = useApi()
 
 const pageSize = 50
 const currentPage = ref(1)
@@ -170,6 +173,9 @@ const searchQuery = ref('')
 const selectedType = ref('')
 const sourceFilter = ref<'all' | 'imported' | 'created'>('all')
 const showBlankNodes = ref(false)
+const displayedInstanceTotal = ref(
+  store.instanceTotal,
+)
 
 const uniqueTypes = ref<string[]>([])
 
@@ -190,8 +196,16 @@ function instanceDisplayName(
   return formatUri(inst.uri) || inst.uri
 }
 
+async function loadInstanceCount() {
+  displayedInstanceTotal.value = (
+    await fetchInstanceCount(
+      showBlankNodes.value,
+    )
+  )
+}
+
 const pageStart = computed(() =>
-  store.instanceTotal === 0
+  displayedInstanceTotal.value === 0
     ? 0
     : (currentPage.value - 1) * pageSize + 1,
 )
@@ -266,6 +280,10 @@ watch(
   },
 )
 
+watch(showBlankNodes, async () => {
+  await loadInstanceCount()
+})
+
 const showConfirm = ref(false)
 const instanceToDelete = ref<string | null>(null)
 
@@ -286,7 +304,10 @@ async function deleteInstance() {
   try {
     await store.deleteInstance(uri)
 
-    await loadInstances()
+    await Promise.all([
+      loadInstances(),
+      loadInstanceCount(),
+    ])
 
     if (
       store.instances.length === 0 &&
@@ -303,8 +324,11 @@ async function deleteInstance() {
 }
 
 onMounted(async () => {
-  await loadTypes()
-  await loadInstances()
+  await Promise.all([
+    loadTypes(),
+    loadInstanceCount(),
+    loadInstances(),
+  ])
 })
 
 useHead({

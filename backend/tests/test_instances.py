@@ -5,6 +5,7 @@ from rdflib import Graph, Literal, URIRef
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -254,3 +255,99 @@ async def test_update_instance_rejects_inactive_property(monkeypatch):
 
     assert exc_info.value.status_code == 400
     store.update.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_cached_instance_count_caches_blank_node_modes(
+    monkeypatch,
+):
+    store = AsyncMock()
+    store.count_instances.side_effect = [
+        100,
+        125,
+        101,
+    ]
+
+    monkeypatch.setattr(
+        main,
+        "store",
+        store,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "instance_count_cache",
+        {},
+    )
+
+    assert await main.get_cached_instance_count() == 100
+    assert await main.get_cached_instance_count() == 100
+
+    assert (
+        await main.get_cached_instance_count(
+            include_blank_nodes=True,
+        )
+        == 125
+    )
+    assert (
+        await main.get_cached_instance_count(
+            include_blank_nodes=True,
+        )
+        == 125
+    )
+
+    assert store.count_instances.await_count == 2
+
+    assert (
+        store.count_instances.await_args_list[0].kwargs
+        == {"include_blank_nodes": False}
+    )
+    assert (
+        store.count_instances.await_args_list[1].kwargs
+        == {"include_blank_nodes": True}
+    )
+
+    main.invalidate_instance_count()
+
+    assert await main.get_cached_instance_count() == 101
+    assert store.count_instances.await_count == 3
+
+def test_instance_count_endpoint_respects_blank_node_option(
+    monkeypatch,
+):
+    get_count = AsyncMock(
+        side_effect=[100, 125],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_cached_instance_count",
+        get_count,
+    )
+
+    client = TestClient(
+        main.app,
+        base_url="http://localhost",
+        client=("127.0.0.1", 12345),
+    )
+
+    response = client.get("/api/instances/count")
+
+    assert response.status_code == 200
+    assert response.json() == {"count": 100}
+
+    response = client.get(
+        "/api/instances/count?include_blank_nodes=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"count": 125}
+
+    assert get_count.await_count == 2
+
+    assert (
+        get_count.await_args_list[0].kwargs
+        == {"include_blank_nodes": False}
+    )
+    assert (
+        get_count.await_args_list[1].kwargs
+        == {"include_blank_nodes": True}
+    )

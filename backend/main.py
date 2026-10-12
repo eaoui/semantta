@@ -328,7 +328,7 @@ state = {
     "combined_onto_graph": Graph(),
     "prefix_map": {},
     "instances": [],
-    "instance_count_cache": None,
+    "instance_count_cache": {},
     "display_format": "iri",
     "metadata_files": [],
     "metadata_graph_stats": {},
@@ -1128,23 +1128,33 @@ def update_label_hierarchy():
     LABEL_PROPERTIES = [uri for uri in sorted_labels if uri not in excluded]
     store.set_label_properties(LABEL_PROPERTIES)
 
-async def get_cached_instance_count() -> int:
-    cached = state.get("instance_count_cache")
-
-    if cached is not None:
-        return cached
-
-    count = await store.count_instances(
-        include_blank_nodes=True,
+async def get_cached_instance_count(
+    include_blank_nodes: bool = False,
+) -> int:
+    cached_counts = state.get(
+        "instance_count_cache"
     )
 
-    state["instance_count_cache"] = count
+    if not isinstance(cached_counts, dict):
+        cached_counts = {}
+        state["instance_count_cache"] = (
+            cached_counts
+        )
+
+    if include_blank_nodes in cached_counts:
+        return cached_counts[include_blank_nodes]
+
+    count = await store.count_instances(
+        include_blank_nodes=include_blank_nodes,
+    )
+
+    cached_counts[include_blank_nodes] = count
 
     return count
 
 
 def invalidate_instance_count() -> None:
-    state["instance_count_cache"] = None
+    state["instance_count_cache"] = {}
 
 # ---------------------------------------------------------------------------
 #  Validation Ontology
@@ -3206,7 +3216,14 @@ async def get_state():
             )
         )
 
-    instance_count = await get_cached_instance_count()
+    public_display_blank_nodes = load_preferences().get(
+        "public_display_blank_nodes",
+        False,
+    )
+
+    instance_count = await get_cached_instance_count(
+        include_blank_nodes=public_display_blank_nodes,
+    )
 
     return StateResponse(
         ontologies=ontos,
@@ -3216,10 +3233,7 @@ async def get_state():
         instance_count=instance_count,
         display_format=state["display_format"],
         prefix_map=state["prefix_map"],
-        public_display_blank_nodes=load_preferences().get(
-            "public_display_blank_nodes",
-            False,
-        ),
+        public_display_blank_nodes=public_display_blank_nodes,
         ontology_namespaces=sorted(
             state["all_ontology_namespaces"]
         ),
@@ -4182,6 +4196,16 @@ async def list_instances(
         limit=limit,
         cursor=cursor,
     )
+
+@app.get("/api/instances/count")
+async def get_instance_count(
+    include_blank_nodes: bool = Query(False),
+):
+    count = await get_cached_instance_count(
+        include_blank_nodes=include_blank_nodes,
+    )
+
+    return {"count": count}
 
 @app.get("/api/instances/types")
 async def list_instance_types():

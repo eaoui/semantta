@@ -168,7 +168,12 @@ onMounted(async () => {
     await store.fetchState()
   }
 
-  await loadInstances()
+  await Promise.all([
+    store.refreshInstanceCount(
+      store.publicShowBlankNodes,
+    ),
+    loadInstances(),
+  ])
 })
 
 useHead({

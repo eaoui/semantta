@@ -103,6 +103,27 @@ export const useApi = () => {
       '/api/instances/types',
     )
 
+  const fetchInstanceCount = async (
+    includeBlankNodes = false,
+  ): Promise<number> => {
+    const params = new URLSearchParams()
+
+    if (includeBlankNodes) {
+      params.set(
+        'include_blank_nodes',
+        'true',
+      )
+    }
+
+    const query = params.toString()
+
+    const data = await request<{ count: number }>(
+      `/api/instances/count${query ? `?${query}` : ''}`,
+    )
+
+    return data.count
+  }
+
   const uploadOntology = (file: File) => {
     const form = new FormData()
     form.append('file', file)
@@ -125,6 +146,7 @@ export const useApi = () => {
     fetchState,
     fetchInstances,
     fetchInstanceTypes,
+    fetchInstanceCount,
     uploadOntology,
     setDisplayFormat,
     request,
