@@ -7,7 +7,7 @@
       <div class="mt-3 space-y-2">
         <label class="flex items-center gap-2 cursor-pointer text-gray-700 dark:text-gray-300">
           <input type="checkbox" v-model="integrateVocab" class="h-4 w-4" />
-          <span class="text-sm">Integrate all vocabularies into Application Profile</span>
+          <span class="text-sm">Add all ontology entities used in this metadata to Application Profile</span>
         </label>
       </div>
     </ImportBox>
@@ -35,27 +35,26 @@
               :title="ns">{{ ns }}</span>
           </div>
           <div class="mt-2 flex gap-4 text-sm">
-            <span v-if="integrationStatusLoading" class="text-gray-500 dark:text-gray-400">
-              Checking vocabulary status…
+            <span v-if="integrationStatusLoading" class="text-gray-500/80 dark:text-gray-400/80">
+              Checking used-entity status…
             </span>
 
-            <span v-else-if="!integrationStatusLoaded" class="text-gray-500 dark:text-gray-400">
-              Vocabulary status unavailable
+            <span v-else-if="!integrationStatusLoaded" class="text-gray-500/80 dark:text-gray-400/80">
+              Used-entities status unavailable
             </span>
 
             <span v-else-if="integrationStatuses[mf.filename]?.status === 'integrated'"
-              class="text-green-600 dark:text-green-400">
-              ✓ Vocabulary integrated
+              class="text-green-600/80 dark:text-green-400/80">
+              All used entities are in the AP
             </span>
 
             <span v-else-if="integrationStatuses[mf.filename]?.status === 'not_integrated'"
-              class="text-orange-600 dark:text-orange-400">
-              ✗ Vocabulary not integrated
-              ({{ integrationStatuses[mf.filename]?.missing_count }} missing)
+              class="text-gray-600/80 dark:text-yellow-300/80">
+              {{ integrationStatuses[mf.filename]?.missing_count }} used entities are not in the AP
             </span>
 
-            <span v-else class="text-gray-500 dark:text-gray-400">
-              No vocabulary entities detected
+            <span v-else class="text-gray-500/80 dark:text-gray-400/80">
+              No used entities detected
             </span>
           </div>
 
@@ -76,8 +75,8 @@
               class="text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800 disabled:opacity-50">
               {{
                 integratingFilename === mf.filename
-                  ? 'Integrating…'
-                  : 'Integrate vocabulary now'
+                  ? 'Adding…'
+                  : 'Add used entities now'
               }}
             </button>
           </template>
