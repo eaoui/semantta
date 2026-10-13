@@ -227,8 +227,7 @@ async def test_file_integration_uses_shared_service(
         [
             {
                 "filename": filename,
-                "graph_uri": graph_uri,
-                "vocab_integrated": False,
+                "graph_uri": graph_uri
             }
         ],
     )
@@ -278,18 +277,10 @@ async def test_file_integration_uses_shared_service(
         "status": "ok",
         "entities_integrated": 2,
     }
-    assert (
-        main.state["metadata_files"][0]["vocab_integrated"]
-        is True
-    )
 
-    with open(
-        tmp_path / f"{filename}.meta.json",
-        encoding="utf-8",
-    ) as file:
-        sidecar = json.load(file)
-
-    assert sidecar["vocab_integrated"] is True
+    assert not (
+        tmp_path / f"{filename}.meta.json"
+    ).exists()
 
 @pytest.mark.asyncio
 async def test_integration_status_is_batched_and_live(

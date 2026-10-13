@@ -1625,7 +1625,6 @@ def _metadata_files_after_upload(
     new_entry = {
         "filename": filename,
         "graph_uri": graph_uri,
-        "vocab_integrated": False,
     }
 
     result = []
@@ -3446,11 +3445,7 @@ async def ensure_metadata_named_graphs():
     progress["phase"] = ""
 
 def load_saved_metadata():
-    """
-    Load metadata manifests without parsing RDF into Python graphs.
-
-    RDF content is stored in Fuseki named graphs.
-    """
+    """Load metadata manifests without persisted integration status."""
     state["metadata_files"].clear()
 
     if not os.path.isdir(METADATA_DIR):
@@ -3460,17 +3455,6 @@ def load_saved_metadata():
         metadata_path = os.path.join(
             METADATA_DIR,
             filename,
-        )
-
-        graph_uri = metadata_graph_uri(
-            filename
-        )
-
-        vocab_integrated = True
-
-        meta_path = (
-            metadata_path
-            + ".meta.json"
         )
 
         ext = (
@@ -3486,32 +3470,23 @@ def load_saved_metadata():
             )
             continue
 
-        if os.path.exists(meta_path):
-            try:
-                with open(
-                    meta_path,
-                    encoding="utf-8",
-                ) as mf:
-                    meta_info = json.load(mf)
+        # Remove obsolete sidecars written by the former status system.
+        sidecar_path = metadata_path + ".meta.json"
 
-                vocab_integrated = meta_info.get(
-                    "vocab_integrated",
-                    True,
-                )
-            except Exception:
-                logger.warning(
-                    "Could not read metadata sidecar: %s",
-                    meta_path,
-                    exc_info=True,
-                )
+        try:
+            if os.path.exists(sidecar_path):
+                os.remove(sidecar_path)
+        except OSError:
+            logger.warning(
+                "Could not remove obsolete metadata sidecar: %s",
+                sidecar_path,
+                exc_info=True,
+            )
 
-        state["metadata_files"].append(
-            {
-                "filename": filename,
-                "graph_uri": graph_uri,
-                "vocab_integrated": vocab_integrated,
-            }
-        )
+        state["metadata_files"].append({
+            "filename": filename,
+            "graph_uri": metadata_graph_uri(filename),
+        })
 
 # Create global service instances (after all class definitions)
 store: RDFStore = FusekiStore(
@@ -4066,26 +4041,15 @@ async def upload_metadata(
         work_dir / f"{filename}.backup"
     )
 
-    meta_backup = (
-        work_dir
-        / f"{filename}.meta.json.backup"
-    )
-
     nt_path = (
         work_dir / f"{filename}.nt"
-    )
-
-    staged_meta = (
-        work_dir / f"{filename}.meta.json"
     )
 
     default_stage_uri = None
 
     destination_existed = False
-    meta_existed = False
 
     destination_backup_ready = False
-    meta_backup_ready = False
 
     fuseki_committed = False
     preserve_rollback_artifacts = False
@@ -4169,22 +4133,6 @@ async def upload_metadata(
                     destination,
                 )
 
-        # Restore the original metadata sidecar.
-        if meta_backup_ready:
-            try:
-                _restore_file(
-                    meta_path,
-                    meta_backup,
-                    meta_existed,
-                )
-            except Exception:
-                rollback_failed = True
-
-                logger.exception(
-                    "Failed to restore metadata sidecar %s",
-                    meta_path,
-                )
-
         # Restore the application state.
         state["metadata_files"] = (
             old_metadata_files
@@ -4229,15 +4177,6 @@ async def upload_metadata(
         )
 
         destination_backup_ready = True
-
-        meta_existed = (
-            _backup_existing_file(
-                meta_path,
-                meta_backup,
-            )
-        )
-
-        meta_backup_ready = True
 
         # ---------------------------------------------------------------
         # 1. Save to a temporary source file.
@@ -4308,12 +4247,6 @@ async def upload_metadata(
         # This happens before the Fuseki commit so failures can be
         # rolled back to the previous files.
         # ---------------------------------------------------------------
-        atomic_write_json(
-            staged_meta,
-            {
-                "vocab_integrated": False,
-            },
-        )
 
         # Preserve the current RDF graphs before any
         # destructive changes are committed.
@@ -4399,11 +4332,6 @@ async def upload_metadata(
             destination,
         )
 
-        os.replace(
-            staged_meta,
-            meta_path,
-        )
-
         # ---------------------------------------------------------------
         # 7. Update application state.
         # ---------------------------------------------------------------
@@ -4447,37 +4375,23 @@ async def upload_metadata(
                     [graph_uri],
                     source=filename,
                 )
-
-                atomic_write_json(
-                    meta_path,
-                    {"vocab_integrated": True},
-                )
-
-                metadata_file["vocab_integrated"] = True
-
             except Exception:
-                # The metadata upload is already committed. Keep the
-                # file and allow vocabulary integration to be retried.
+                # The metadata upload has already committed.
+                # Its status will be assessed on demand.
                 logger.exception(
                     "Vocabulary integration failed for %s",
                     filename,
                 )
-
-                metadata_file["vocab_integrated"] = False
-
-                try:
-                    atomic_write_json(
-                        meta_path,
-                        {"vocab_integrated": False},
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to save vocabulary status for %s",
-                        filename,
-                    )
-
-                # The SHACL graph may have been partially updated.
                 invalidate_profile()
+
+        try:
+            meta_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Could not remove obsolete metadata sidecar: %s",
+                meta_path,
+                exc_info=True,
+            )
 
         progress["phase"] = ""
 
@@ -5335,10 +5249,8 @@ async def get_metadata_integration_status():
     return {"statuses": statuses}
 
 @app.post("/api/metadata/file/{filename:path}/integrate-vocab")
-async def integrate_file_vocab(
-    filename: str,
-):
-    mf = next(
+async def integrate_file_vocab(filename: str):
+    metadata_file = next(
         (
             item
             for item in state["metadata_files"]
@@ -5347,20 +5259,15 @@ async def integrate_file_vocab(
         None,
     )
 
-    if not mf:
+    if not metadata_file:
         raise HTTPException(
             404,
             "Metadata file not found",
         )
 
-    sidecar_path = os.path.join(
-        METADATA_DIR,
-        filename + ".meta.json",
-    )
-
     try:
         entities = await shacl.integrate_metadata_graphs(
-            [mf["graph_uri"]],
+            [metadata_file["graph_uri"]],
             source=filename,
         )
     except Exception:
@@ -5368,29 +5275,8 @@ async def integrate_file_vocab(
             "Vocabulary integration failed for %s",
             filename,
         )
-
-        mf["vocab_integrated"] = False
-
-        try:
-            atomic_write_json(
-                sidecar_path,
-                {"vocab_integrated": False},
-            )
-        except Exception:
-            logger.exception(
-                "Failed to save vocabulary status for %s",
-                filename,
-            )
-
         invalidate_profile()
         raise
-
-    mf["vocab_integrated"] = True
-
-    atomic_write_json(
-        sidecar_path,
-        {"vocab_integrated": True},
-    )
 
     integrated_uris = set().union(
         *entities.values()

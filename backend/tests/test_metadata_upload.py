@@ -189,7 +189,7 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
 
         original_replace = main.os.replace
 
-        def fail_on_staged_sidecar(
+        def fail_on_staged_source(
             source,
             destination,
         ):
@@ -197,15 +197,14 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
             destination_path = Path(destination)
 
             if (
-                source_path.name
-                == "records.ttl.meta.json"
+                source_path.name == "records.ttl"
                 and source_path.parent.name.startswith(
                     "semantta-metadata-"
                 )
-                and destination_path == meta_path
+                and destination_path == metadata_path
             ):
                 raise OSError(
-                    "Simulated sidecar replacement failure"
+                    "Simulated metadata source replacement failure"
                 )
 
             return original_replace(
@@ -216,7 +215,7 @@ def test_failed_file_replacement_rolls_back_metadata_upload(
         monkeypatch.setattr(
             main.os,
             "replace",
-            fail_on_staged_sidecar,
+            fail_on_staged_source,
         )
 
         async def run_upload():
@@ -567,10 +566,7 @@ def test_metadata_files_after_upload_preserves_existing_sources(
         == replacement_graph_uri
     )
 
-    assert (
-        candidate_files[1]["vocab_integrated"]
-        is False
-    )
+    assert "vocab_integrated" not in candidate_files[1]
 
 @pytest.mark.asyncio
 async def test_rebuild_default_graph_includes_all_metadata_sources(
@@ -625,7 +621,7 @@ async def test_rebuild_default_graph_includes_all_metadata_sources(
             in store.update_calls
         )
 
-def test_load_saved_metadata_reads_current_sidecar(
+def test_load_saved_metadata_ignores_legacy_integration_sidecar(
     tmp_path,
     monkeypatch,
 ):
@@ -658,5 +654,8 @@ def test_load_saved_metadata_reads_current_sidecar(
 
     metadata_info = main.state["metadata_files"][0]
 
-    assert metadata_info["filename"] == "records.ttl"
-    assert metadata_info["vocab_integrated"] is False
+    assert metadata_info == {
+        "filename": "records.ttl",
+        "graph_uri": main.metadata_graph_uri("records.ttl"),
+    }
+    assert not sidecar.exists()
