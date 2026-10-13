@@ -36,6 +36,10 @@ export const useApi = () => {
   const fetchState = (): Promise<StateResponse> =>
     request('/api/state')
 
+  const fetchMetadataIntegrationStatus =
+    (): Promise<MetadataIntegrationStatusResponse> =>
+      request('/api/metadata/integration-status')
+
   const fetchInstances = (
     options: InstanceListOptions = {},
   ) => {
@@ -144,6 +148,7 @@ export const useApi = () => {
 
   return {
     fetchState,
+    fetchMetadataIntegrationStatus,
     fetchInstances,
     fetchInstanceTypes,
     fetchInstanceCount,

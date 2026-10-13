@@ -12,6 +12,14 @@
       </div>
     </ImportBox>
 
+    <div v-if="integrationStatusError" role="alert"
+      class="mb-4 flex items-center gap-3 text-sm text-red-600 dark:text-red-400">
+      <span>{{ integrationStatusError }}</span>
+      <button type="button" class="underline" :disabled="integrationStatusLoading" @click="loadIntegrationStatuses">
+        Retry status check
+      </button>
+    </div>
+
     <!-- File list -->
     <div v-if="store.metadataFiles.length">
       <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Imported Metadata Files</h3>
@@ -27,9 +35,27 @@
               :title="ns">{{ ns }}</span>
           </div>
           <div class="mt-2 flex gap-4 text-sm">
-            <span
-              :class="mf.vocab_integrated ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'">
-              {{ mf.vocab_integrated ? '✓ Vocabulary integrated' : '✗ Vocabulary not integrated' }}
+            <span v-if="integrationStatusLoading" class="text-gray-500 dark:text-gray-400">
+              Checking vocabulary status…
+            </span>
+
+            <span v-else-if="!integrationStatusLoaded" class="text-gray-500 dark:text-gray-400">
+              Vocabulary status unavailable
+            </span>
+
+            <span v-else-if="integrationStatuses[mf.filename]?.status === 'integrated'"
+              class="text-green-600 dark:text-green-400">
+              ✓ Vocabulary integrated
+            </span>
+
+            <span v-else-if="integrationStatuses[mf.filename]?.status === 'not_integrated'"
+              class="text-orange-600 dark:text-orange-400">
+              ✗ Vocabulary not integrated
+              ({{ integrationStatuses[mf.filename]?.missing_count }} missing)
+            </span>
+
+            <span v-else class="text-gray-500 dark:text-gray-400">
+              No vocabulary entities detected
             </span>
           </div>
 
@@ -42,10 +68,17 @@
               @click="selectedFile = mf.filename; confirmDelete = true" />
           </template>
 
-          <template v-if="!mf.vocab_integrated" #footer>
-            <button v-if="!mf.vocab_integrated" @click="integrateVocabForFile(mf.filename)"
-              class="text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800">
-              Integrate vocabulary now
+          <template v-if="
+            integrationStatusLoaded &&
+            integrationStatuses[mf.filename]?.status === 'not_integrated'
+          " #footer>
+            <button :disabled="integratingFilename === mf.filename" @click="integrateVocabForFile(mf.filename)"
+              class="text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 dark:hover:bg-blue-800 disabled:opacity-50">
+              {{
+                integratingFilename === mf.filename
+                  ? 'Integrating…'
+                  : 'Integrate vocabulary now'
+              }}
             </button>
           </template>
         </ItemCard>
@@ -61,7 +94,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import type { MetadataIntegrationStatus } from '@/types'
 import { useAppStore } from '@/stores/app'
 import ImportBox from '@/components/admin/ImportBox.vue'
 import ItemCard from '@/components/admin/ItemCard.vue'
@@ -71,6 +105,15 @@ import { useProgress } from '@/composables/useProgress'
 import { useToast } from '@/composables/useToast'
 
 const store = useAppStore()
+const api = useApi()
+
+const integrationStatuses =
+  ref<Record<string, MetadataIntegrationStatus>>({})
+const integrationStatusLoaded = ref(false)
+const integrationStatusLoading = ref(false)
+const integrationStatusError = ref('')
+const integratingFilename = ref('')
+
 const apiBase = useRuntimeConfig().public.apiBase
 const toast = useToast()
 const { phase, startPolling, stopPolling } = useProgress()
@@ -97,6 +140,7 @@ async function upload(file: File) {
     formData.append('integrate_vocab', String(integrateVocab.value))
     await $fetch(`${apiBase}/api/metadata/upload`, { method: 'POST', body: formData })
     await store.fetchState()
+    await loadIntegrationStatuses()
   } catch (e: any) {
     toast.error(e?.data?.detail || e.message)
   } finally {
@@ -112,15 +156,56 @@ async function handleDeleteFile() {
   try {
     await store.deleteMetadataFile(selectedFile.value)
     selectedFile.value = ''
+    await loadIntegrationStatuses()
   } finally {
     loadingMsg.value = ''
   }
 }
 
 async function integrateVocabForFile(filename: string) {
+  integratingFilename.value = filename
+
   try {
-    await $fetch(`${apiBase}/api/metadata/file/${encodeURIComponent(filename)}/integrate-vocab`, { method: 'POST' })
+    await api.request(
+      `/api/metadata/file/${encodeURIComponent(filename)}/integrate-vocab`,
+      { method: 'POST' },
+    )
+
     await store.fetchState()
-  } catch (e: any) { toast.error(e.message) }
+  } catch (e: any) {
+    toast.error(
+      e?.data?.detail ||
+      e?.message ||
+      'Vocabulary integration failed.',
+    )
+  } finally {
+    integratingFilename.value = ''
+    await loadIntegrationStatuses()
+  }
 }
+
+async function loadIntegrationStatuses() {
+  integrationStatusLoaded.value = false
+  integrationStatusLoading.value = true
+  integrationStatusError.value = ''
+
+  try {
+    const response =
+      await api.fetchMetadataIntegrationStatus()
+
+    integrationStatuses.value = response.statuses
+    integrationStatusLoaded.value = true
+  } catch (e: any) {
+    integrationStatusError.value =
+      e?.data?.detail ||
+      e?.message ||
+      'Failed to check metadata vocabulary status.'
+  } finally {
+    integrationStatusLoading.value = false
+  }
+}
+
+onMounted(() => {
+  void loadIntegrationStatuses()
+})
 </script>

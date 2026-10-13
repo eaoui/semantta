@@ -20,7 +20,21 @@ export interface MetadataFileInfo {
   namespaces: string[]
   instances_count: number
   triples_count: number
-  vocab_integrated: boolean
+}
+
+export type MetadataIntegrationStatusValue =
+  | 'integrated'
+  | 'not_integrated'
+  | 'no_vocabulary'
+
+export interface MetadataIntegrationStatus {
+  status: MetadataIntegrationStatusValue
+  required_count: number
+  missing_count: number
+}
+
+export interface MetadataIntegrationStatusResponse {
+  statuses: Record<string, MetadataIntegrationStatus>
 }
 
 export interface Instance {

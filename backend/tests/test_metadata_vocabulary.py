@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 from collections.abc import Iterable
 from typing import cast
+from types import SimpleNamespace
 import json
 
 import pytest
@@ -86,6 +87,37 @@ def test_metadata_vocabulary_query_uses_uri_and_role():
     assert str(OWL.DatatypeProperty) not in extracted_uris
     assert str(OWL.NamedIndividual) not in extracted_uris
     assert str(RDFS.Datatype) not in extracted_uris
+
+    graph_result = dataset.query(
+        main._metadata_vocabulary_query(
+            [GRAPH_ONE, GRAPH_TWO],
+            include_graph=True,
+        )
+    )
+
+    assert isinstance(graph_result, Result)
+
+    graph_rows = cast(
+        Iterable[tuple[object, object, object]],
+        graph_result,
+    )
+
+    graph_terms = {
+        (str(graph), str(term), str(role))
+        for graph, term, role in graph_rows
+    }
+
+    assert (
+        GRAPH_ONE,
+        str(EX.Book),
+        "class",
+    ) in graph_terms
+
+    assert (
+        GRAPH_TWO,
+        str(EX2.Article),
+        "class",
+    ) in graph_terms
 
 
 @pytest.mark.asyncio
@@ -258,3 +290,150 @@ async def test_file_integration_uses_shared_service(
         sidecar = json.load(file)
 
     assert sidecar["vocab_integrated"] is True
+
+@pytest.mark.asyncio
+async def test_integration_status_is_batched_and_live(
+    monkeypatch,
+):
+    graph_catalog = main.metadata_graph_uri(
+        "catalog.ttl"
+    )
+    graph_inventory = main.metadata_graph_uri(
+        "inventory.ttl"
+    )
+    graph_empty = main.metadata_graph_uri(
+        "empty.ttl"
+    )
+
+    metadata_files = [
+        {
+            "filename": "catalog.ttl",
+            "graph_uri": graph_catalog,
+        },
+        {
+            "filename": "inventory.ttl",
+            "graph_uri": graph_inventory,
+        },
+        {
+            "filename": "empty.ttl",
+            "graph_uri": graph_empty,
+        },
+    ]
+
+    graph_stats = {
+        graph_catalog: {},
+        graph_inventory: {},
+        graph_empty: {},
+    }
+
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        metadata_files,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_graph_stats",
+        graph_stats,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+
+    vocabulary_rows = [
+        {
+            "graph": graph_catalog,
+            "term": str(EX.Book),
+            "role": "class",
+        },
+        {
+            "graph": graph_catalog,
+            "term": str(EX.title),
+            "role": "property",
+        },
+        {
+            "graph": graph_inventory,
+            "term": str(EX2.Article),
+            "role": "class",
+        },
+    ]
+
+    active_rows_initial = [
+        {"uri": str(EX.Book), "role": "class"},
+        {"uri": str(EX.title), "role": "property"},
+        {"uri": str(EX2.Article), "role": "class"},
+    ]
+
+    # Simulate removal of the title property from the active profile.
+    active_rows_after_change = [
+        {"uri": str(EX.Book), "role": "class"},
+        {"uri": str(EX2.Article), "role": "class"},
+    ]
+
+    fake_store = SimpleNamespace(
+        query=AsyncMock(
+            side_effect=[
+                vocabulary_rows,
+                active_rows_initial,
+                active_rows_after_change,
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        main,
+        "store",
+        fake_store,
+    )
+
+    first_result = (
+        await main.get_metadata_integration_status()
+    )
+
+    first_statuses = first_result["statuses"]
+
+    assert (
+        first_statuses["catalog.ttl"]["status"]
+        == "integrated"
+    )
+    assert (
+        first_statuses["inventory.ttl"]["status"]
+        == "integrated"
+    )
+    assert (
+        first_statuses["empty.ttl"]["status"]
+        == "no_vocabulary"
+    )
+
+    # The second request reuses extracted metadata summaries,
+    # but queries the current active profile again.
+    second_result = (
+        await main.get_metadata_integration_status()
+    )
+
+    second_statuses = second_result["statuses"]
+
+    assert (
+        second_statuses["catalog.ttl"]["status"]
+        == "not_integrated"
+    )
+    assert (
+        second_statuses["catalog.ttl"]["missing_count"]
+        == 1
+    )
+    assert (
+        second_statuses["inventory.ttl"]["status"]
+        == "integrated"
+    )
+
+    # One batched vocabulary query, followed by one active-profile
+    # query per status request.
+    assert fake_store.query.await_count == 3
+
+    # Summaries have been retained in the existing graph-stat cache.
+    assert (
+        "vocabulary_entities"
+        in graph_stats[graph_catalog]
+    )

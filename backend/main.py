@@ -1344,9 +1344,16 @@ def _metadata_graph_values(graph_uris: List[str]) -> str:
 def _metadata_vocabulary_query(
     graph_uris: List[str],
     known_individual_uris: Optional[List[str]] = None,
+    include_graph: bool = False,
 ) -> str:
     """Extract vocabulary references by URI and semantic role."""
     graph_values = _metadata_graph_values(graph_uris)
+
+    select_variables = (
+        "?graph ?term ?role"
+        if include_graph
+        else "?term ?role"
+    )
 
     declaration_types = (
         OWL.Class,
@@ -1428,7 +1435,7 @@ def _metadata_vocabulary_query(
         PREFIX rdfs: <{RDFS}>
         PREFIX owl: <{OWL}>
 
-        SELECT DISTINCT ?term ?role WHERE {{
+        SELECT DISTINCT {select_variables} WHERE {{
             VALUES ?graph {{ {graph_values} }}
 
             GRAPH ?graph {{
@@ -1532,6 +1539,43 @@ def invalidate_metadata_graph_stats(
 
 def clear_metadata_graph_stats() -> None:
     state["metadata_graph_stats"].clear()
+
+def _summarize_metadata_integration_status(
+    required_entities: Dict[str, List[str]],
+    active_entities: Dict[str, Set[str]],
+) -> Dict[str, Any]:
+    """Compare a file's vocabulary with the active profile entities."""
+    roles = (
+        "class",
+        "property",
+        "datatype",
+        "individual",
+    )
+
+    required_count = 0
+    missing_count = 0
+
+    for role in roles:
+        required = set(
+            required_entities.get(role, [])
+        )
+        active = active_entities.get(role, set())
+
+        required_count += len(required)
+        missing_count += len(required - active)
+
+    if required_count == 0:
+        status = "no_vocabulary"
+    elif missing_count == 0:
+        status = "integrated"
+    else:
+        status = "not_integrated"
+
+    return {
+        "status": status,
+        "required_count": required_count,
+        "missing_count": missing_count,
+    }
 
 async def rebuild_default_data_graph() -> None:
     """
@@ -3781,10 +3825,6 @@ async def get_state():
                     "triples_count",
                     0,
                 ),
-                vocab_integrated=mf.get(
-                    "vocab_integrated",
-                    True,
-                ),
             )
         )
 
@@ -5097,6 +5137,202 @@ async def delete_instance(uri: str):
     
     invalidate_profile()
     return {"status": "ok"}
+
+@app.get("/api/metadata/integration-status")
+async def get_metadata_integration_status():
+    """Calculate metadata integration status on demand."""
+    metadata_files = state["metadata_files"]
+
+    if not metadata_files:
+        return {"statuses": {}}
+
+    known_individual_uris = sorted({
+        entity["uri"]
+        for ontology in state["ontologies"]
+        for entity in ontology.get("entities", [])
+        if (
+            entity.get("type") == "individual"
+            and isinstance(entity.get("uri"), str)
+            and is_valid_uri(entity["uri"])
+        )
+    })
+
+    # Cached vocabulary extraction depends on which ontology
+    # individuals are currently available.
+    individual_signature = tuple(
+        known_individual_uris
+    )
+
+    stats_by_graph = {}
+    graphs_to_extract = set()
+
+    for metadata_file in metadata_files:
+        graph_uri = metadata_file.get("graph_uri")
+
+        if not graph_uri:
+            continue
+
+        stats = await get_cached_metadata_graph_stats(
+            graph_uri
+        )
+        stats_by_graph[graph_uri] = stats
+
+        cached_entities = stats.get(
+            "vocabulary_entities"
+        )
+
+        if (
+            not isinstance(cached_entities, dict)
+            or stats.get(
+                "vocabulary_individuals_signature"
+            ) != individual_signature
+        ):
+            graphs_to_extract.add(graph_uri)
+
+    # Extract all uncached file summaries in a single query.
+    if graphs_to_extract:
+        graphs = sorted(graphs_to_extract)
+
+        extracted = {
+            graph_uri: {
+                "class": set(),
+                "property": set(),
+                "datatype": set(),
+                "individual": set(),
+            }
+            for graph_uri in graphs
+        }
+
+        rows = await store.query(
+            _metadata_vocabulary_query(
+                graphs,
+                known_individual_uris,
+                include_graph=True,
+            )
+        )
+
+        for row in rows:
+            graph_uri = str(
+                row.get("graph", "")
+            )
+            term_uri = str(
+                row.get("term", "")
+            )
+            role = row.get("role", "")
+
+            if (
+                graph_uri in extracted
+                and role in extracted[graph_uri]
+                and is_valid_uri(term_uri)
+            ):
+                extracted[graph_uri][role].add(
+                    term_uri
+                )
+
+        # Reuse the existing per-graph statistics cache.
+        # No separate cache or invalidation mechanism is needed.
+        for graph_uri, entities in extracted.items():
+            stats_by_graph[graph_uri][
+                "vocabulary_entities"
+            ] = {
+                role: sorted(uris)
+                for role, uris in entities.items()
+            }
+            stats_by_graph[graph_uri][
+                "vocabulary_individuals_signature"
+            ] = individual_signature
+
+    # Read the current profile once per status request.
+    active_rows = await store.query(f"""
+        PREFIX sh: <{SH}>
+
+        SELECT DISTINCT ?uri ?role WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                {{
+                    ?shape a sh:NodeShape ;
+                           sh:targetClass ?uri .
+                    BIND("class" AS ?role)
+                }}
+                UNION
+                {{
+                    ?shape sh:path ?uri .
+                    BIND("property" AS ?role)
+                }}
+                UNION
+                {{
+                    ?shape a sh:NodeShape ;
+                           sh:targetNode ?uri .
+                    FILTER(
+                        STRSTARTS(
+                            STR(?shape),
+                            "urn:shape:datatype:"
+                        )
+                    )
+                    BIND("datatype" AS ?role)
+                }}
+                UNION
+                {{
+                    ?shape a sh:NodeShape ;
+                           sh:targetNode ?uri .
+                    FILTER(
+                        STRSTARTS(
+                            STR(?shape),
+                            "urn:shape:individual:"
+                        )
+                    )
+                    BIND("individual" AS ?role)
+                }}
+            }}
+
+            FILTER(isIRI(?uri))
+        }}
+    """)
+
+    active_entities = {
+        role: set()
+        for role in (
+            "class",
+            "property",
+            "datatype",
+            "individual",
+        )
+    }
+
+    for row in active_rows:
+        role = row.get("role")
+        uri = row.get("uri")
+
+        if (
+            role in active_entities
+            and isinstance(uri, str)
+            and is_valid_uri(uri)
+        ):
+            active_entities[role].add(uri)
+
+    statuses = {}
+
+    for metadata_file in metadata_files:
+        filename = metadata_file["filename"]
+        graph_uri = metadata_file.get("graph_uri")
+
+        stats = stats_by_graph.get(
+            graph_uri,
+            {},
+        )
+
+        required_entities = stats.get(
+            "vocabulary_entities",
+            {},
+        )
+
+        statuses[filename] = (
+            _summarize_metadata_integration_status(
+                required_entities,
+                active_entities,
+            )
+        )
+
+    return {"statuses": statuses}
 
 @app.post("/api/metadata/file/{filename:path}/integrate-vocab")
 async def integrate_file_vocab(
