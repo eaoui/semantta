@@ -547,7 +547,6 @@ def test_metadata_files_after_upload_preserves_existing_sources(
     candidate_files = main._metadata_files_after_upload(
         "records.ttl",
         replacement_graph_uri,
-        True,
     )
 
     assert [
@@ -570,7 +569,7 @@ def test_metadata_files_after_upload_preserves_existing_sources(
 
     assert (
         candidate_files[1]["vocab_integrated"]
-        is True
+        is False
     )
 
 @pytest.mark.asyncio

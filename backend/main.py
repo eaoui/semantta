@@ -1577,12 +1577,11 @@ def _metadata_staging_graph_uri(kind: str) -> str:
 def _metadata_files_after_upload(
     filename: str,
     graph_uri: str,
-    integrate_vocab: bool,
 ) -> list[dict]:
     new_entry = {
         "filename": filename,
         "graph_uri": graph_uri,
-        "vocab_integrated": integrate_vocab,
+        "vocab_integrated": False,
     }
 
     result = []
@@ -1933,49 +1932,143 @@ class ApplicationProfile:
             if "System" not in candidates[uri]["sources"]:
                 candidates[uri]["sources"].append("System")
 
+        active_classes = set(
+            await shacl.get_active_classes()
+        )
+        active_props = set(
+            await shacl.get_active_properties()
+        )
+        active_datatypes = set(
+            await shacl.get_active_datatypes()
+        )
+        active_individuals = set(
+            await shacl.get_active_individuals()
+        )
+
         if not _used_uris_set:
             await rebuild_used_uris()
+
         md_uri_list = [
-            uri for uri in _used_uris_set
+            uri
+            for uri in _used_uris_set
             if uri not in candidates
-            and not any(uri.startswith(ns) for ns in IGNORE_NAMESPACES)
+            and not any(
+                uri.startswith(ns)
+                for ns in IGNORE_NAMESPACES
+            )
         ]
-        types_map: Dict[str, List[str]] = {}
-        if md_uri_list:
-            values = " ".join(f"<{u}>" for u in md_uri_list)
-            batch_query = f"SELECT ?uri ?type WHERE {{ VALUES ?uri {{ {values} }} . ?uri a ?type . }}"
-            try:
-                rows = await self.store.query(batch_query)
-                for r in rows:
-                    types_map.setdefault(r["uri"], []).append(r["type"])
-            except Exception:
-                pass
-        role_map = await self._batch_entity_roles(md_uri_list) if md_uri_list else {}
+
+        role_map = (
+            await self._batch_entity_roles(md_uri_list)
+            if md_uri_list
+            else {}
+        )
+
         for uri in md_uri_list:
-            types = types_map.get(uri, [])
-            if types and all(any(t.startswith(ns) for ns in IGNORE_NAMESPACES) for t in types):
+            entity_type = role_map.get(uri)
+
+            # Do not invent a role for a URI merely because it occurs
+            # in the metadata graph.
+            if entity_type is None:
                 continue
-            entity_type = role_map.get(uri, "individual")
-            source_file = state["metadata_only_sources"].get(uri, "Metadata")
+
+            source_file = state["metadata_only_sources"].get(
+                uri,
+                "Metadata",
+            )
+
             candidates[uri] = {
                 "type": entity_type,
                 "sources": [source_file],
                 "in_onto": False,
             }
 
-        active_classes = set(await shacl.get_active_classes())
-        active_props = set(await shacl.get_active_properties())
-        active_individuals = set(await shacl.get_active_individuals())
+        # Include entities represented by active SHACL shapes, even when
+        # they are not discoverable from instance-type/predicate usage.
+        for uri in active_classes:
+            candidates.setdefault(
+                uri,
+                {
+                    "type": "class",
+                    "sources": [
+                        state["metadata_only_sources"].get(
+                            uri,
+                            "Metadata",
+                        )
+                    ],
+                    "in_onto": False,
+                },
+            )
+
+        for uri in active_props:
+            if uri in candidates:
+                continue
+
+            if uri in SYSTEM_ANNOTATION_PROPERTIES:
+                entity_type = "annotation_property"
+            elif _get_property_type(uri) == "datatype":
+                entity_type = "datatype_property"
+            else:
+                entity_type = "object_property"
+
+            candidates[uri] = {
+                "type": entity_type,
+                "sources": [
+                    state["metadata_only_sources"].get(
+                        uri,
+                        "Metadata",
+                    )
+                ],
+                "in_onto": False,
+            }
+
+        for uri in active_datatypes:
+            candidates.setdefault(
+                uri,
+                {
+                    "type": "datatype",
+                    "sources": [
+                        state["metadata_only_sources"].get(
+                            uri,
+                            "Metadata",
+                        )
+                    ],
+                    "in_onto": False,
+                },
+            )
+
+        for uri in active_individuals:
+            candidates.setdefault(
+                uri,
+                {
+                    "type": "individual",
+                    "sources": [
+                        state["metadata_only_sources"].get(
+                            uri,
+                            "Metadata",
+                        )
+                    ],
+                    "in_onto": False,
+                },
+            )
 
         result = []
         for uri, cand in candidates.items():
             etype = cand["type"]
             if etype == "class":
                 active = uri in active_classes
-            elif etype in ("object_property", "datatype_property", "annotation_property"):
+            elif etype == "datatype":
+                active = uri in active_datatypes
+            elif etype in (
+                "object_property",
+                "datatype_property",
+                "annotation_property",
+            ):
                 active = uri in active_props
-            else:
+            elif etype == "individual":
                 active = uri in active_individuals
+            else:
+                active = False
 
             item = ProfileEntityItem(
                 uri=uri, type=etype, in_onto=cand["in_onto"], active=active,
@@ -2126,42 +2219,80 @@ class ApplicationProfile:
             del state["metadata_only_sources"][entity_uri]
         self.invalidate()
 
-    async def _batch_entity_roles(self, uris: list[str]) -> Dict[str, str]:
+    async def _batch_entity_roles(
+        self,
+        uris: list[str],
+    ) -> Dict[str, str]:
         if not uris:
             return {}
-        values = " ".join(f"<{u}>" for u in uris)
 
-        # Three concurrent SELECT DISTINCT queries – each returns URIs of one role
-        async def select_classes():
-            q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s a ?uri }}"
-            rows = await self.store.query(q)
-            return {r["uri"] for r in rows}
-
-        async def select_object_props():
-            q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s ?uri ?o . FILTER(isIRI(?o)) }}"
-            rows = await self.store.query(q)
-            return {r["uri"] for r in rows}
-
-        async def select_datatype_props():
-            q = f"SELECT DISTINCT ?uri WHERE {{ VALUES ?uri {{ {values} }} . ?s ?uri ?o . FILTER(isLiteral(?o)) }}"
-            rows = await self.store.query(q)
-            return {r["uri"] for r in rows}
-
-        classes_set, obj_props_set, data_props_set = await asyncio.gather(
-            select_classes(), select_object_props(), select_datatype_props()
+        values = " ".join(
+            _sparql_iri(uri, "entity URI")
+            for uri in sorted(set(uris))
         )
 
-        # Build role map: class takes priority over property
+        async def select_classes():
+            rows = await self.store.query(f"""
+                SELECT DISTINCT ?uri WHERE {{
+                    VALUES ?uri {{ {values} }}
+                    ?s a ?uri .
+                }}
+            """)
+            return {row["uri"] for row in rows}
+
+        async def select_object_props():
+            rows = await self.store.query(f"""
+                SELECT DISTINCT ?uri WHERE {{
+                    VALUES ?uri {{ {values} }}
+                    ?s ?uri ?o .
+                    FILTER(isIRI(?o))
+                }}
+            """)
+            return {row["uri"] for row in rows}
+
+        async def select_datatype_props():
+            rows = await self.store.query(f"""
+                SELECT DISTINCT ?uri WHERE {{
+                    VALUES ?uri {{ {values} }}
+                    ?s ?uri ?o .
+                    FILTER(isLiteral(?o))
+                }}
+            """)
+            return {row["uri"] for row in rows}
+
+        async def select_individuals():
+            rows = await self.store.query(f"""
+                SELECT DISTINCT ?uri WHERE {{
+                    VALUES ?uri {{ {values} }}
+                    ?uri a <{OWL.NamedIndividual}> .
+                }}
+            """)
+            return {row["uri"] for row in rows}
+
+        (
+            classes_set,
+            obj_props_set,
+            data_props_set,
+            individuals_set,
+        ) = await asyncio.gather(
+            select_classes(),
+            select_object_props(),
+            select_datatype_props(),
+            select_individuals(),
+        )
+
         role_map = {}
+
         for uri in uris:
             if uri in classes_set:
                 role_map[uri] = "class"
+            elif uri in individuals_set:
+                role_map[uri] = "individual"
             elif uri in obj_props_set:
                 role_map[uri] = "object_property"
             elif uri in data_props_set:
                 role_map[uri] = "datatype_property"
-            else:
-                role_map[uri] = "individual"
+
         return role_map
 
     async def _get_shacl_domains(self) -> Dict[str, List[str]]:
@@ -2360,16 +2491,47 @@ class SHACLProfile:
         """)
         return [r["prop"] for r in rows]
 
-    async def get_active_individuals(self) -> List[str]:
+    async def get_active_datatypes(self) -> List[str]:
         rows = await self.store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
+            PREFIX sh: <{SH}>
+
             SELECT DISTINCT ?uri WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape a sh:NodeShape ; sh:targetNode ?uri .
+                    ?shape a sh:NodeShape ;
+                           sh:targetNode ?uri .
+
+                    FILTER(
+                        STRSTARTS(
+                            STR(?shape),
+                            "urn:shape:datatype:"
+                        )
+                    )
                 }}
             }}
         """)
-        return [r["uri"] for r in rows]
+
+        return [row["uri"] for row in rows]
+
+    async def get_active_individuals(self) -> List[str]:
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?uri WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape a sh:NodeShape ;
+                           sh:targetNode ?uri .
+
+                    FILTER(
+                        STRSTARTS(
+                            STR(?shape),
+                            "urn:shape:individual:"
+                        )
+                    )
+                }}
+            }}
+        """)
+
+        return [row["uri"] for row in rows]
 
     async def extract_metadata_vocabulary_entities(
         self,
@@ -2413,17 +2575,21 @@ class SHACLProfile:
 
         return entities
 
-    async def generate_from_metadata(self):
-        # Include all registered metadata graphs, regardless of whether
-        # their instances have been merged into the default graph.
+    async def integrate_metadata_graphs(
+        self,
+        graph_uris: List[str],
+        source: str = "Metadata",
+    ) -> Dict[str, Set[str]]:
+        """Integrate vocabulary extracted from the specified metadata graphs."""
         graph_uris = sorted({
-            item["graph_uri"]
-            for item in state["metadata_files"]
-            if item.get("graph_uri")
+            uri for uri in graph_uris if uri
         })
 
         if not graph_uris:
-            raise HTTPException(400, "No metadata files found.")
+            raise HTTPException(
+                400,
+                "No metadata graphs provided.",
+            )
 
         entities = await self.extract_metadata_vocabulary_entities(
             graph_uris
@@ -2640,7 +2806,45 @@ class SHACLProfile:
                 }}
             """)
 
+        integrated_uris = set().union(
+            *entities.values()
+        )
+
+        for uri in integrated_uris:
+            current_source = state["metadata_only_sources"].get(uri)
+
+            if (
+                current_source is None
+                or (
+                    current_source == "Metadata"
+                    and source != "Metadata"
+                )
+            ):
+                state["metadata_only_sources"][uri] = source
+
+            state["non_integrated_uris"].discard(uri)
+
         self._changed()
+        return entities
+
+    async def generate_from_metadata(self):
+        """Generate the profile from all registered metadata files."""
+        graph_uris = sorted({
+            item["graph_uri"]
+            for item in state["metadata_files"]
+            if item.get("graph_uri")
+        })
+
+        if not graph_uris:
+            raise HTTPException(
+                400,
+                "No metadata files found.",
+            )
+
+        await self.integrate_metadata_graphs(
+            graph_uris,
+            source="Metadata",
+        )
 
     async def validate_instance(self, class_uris: List[str], properties: Dict[str, List[str]]):
         data_g = Graph()
@@ -3796,12 +4000,9 @@ async def upload_metadata(
         state["metadata_only_sources"]
     )
 
-    candidate_files = (
-        _metadata_files_after_upload(
-            filename,
-            graph_uri,
-            integrate_vocab,
-        )
+    candidate_files = _metadata_files_after_upload(
+        filename,
+        graph_uri,
     )
 
     staged_graph_uri = (
@@ -4046,52 +4247,7 @@ async def upload_metadata(
         )
 
         # ---------------------------------------------------------------
-        # 4. Discover vocabulary terms against the staged graph.
-        # ---------------------------------------------------------------
-        vocab_terms = []
-
-        if integrate_vocab:
-            progress["phase"] = (
-                "Checking metadata vocabulary…"
-            )
-
-            rows = await store.query(
-                f"""
-                SELECT DISTINCT ?term
-                WHERE {{
-                    GRAPH <{staged_graph_uri}> {{
-                        {{
-                            ?term ?p ?o .
-                        }}
-                        UNION
-                        {{
-                            ?s ?term ?o .
-                        }}
-                        UNION
-                        {{
-                            ?s ?p ?term .
-                        }}
-
-                        FILTER(
-                            isIRI(?term)
-                            &&
-                            !STRSTARTS(
-                                STR(?term),
-                                "urn:bnid:"
-                            )
-                        )
-                    }}
-                }}
-                """
-            )
-
-            vocab_terms = [
-                row["term"]
-                for row in rows
-            ]
-
-        # ---------------------------------------------------------------
-        # 5. Build the replacement DEFAULT graph in a temporary graph.
+        # 4. Build the replacement DEFAULT graph in a temporary graph.
         # ---------------------------------------------------------------
         progress["phase"] = (
             "Preparing metadata graph…"
@@ -4107,7 +4263,7 @@ async def upload_metadata(
         )
 
         # ---------------------------------------------------------------
-        # 6. Prepare the metadata source file and sidecar.
+        # 5. Prepare the metadata source file and sidecar.
         #
         # This happens before the Fuseki commit so failures can be
         # rolled back to the previous files.
@@ -4115,8 +4271,7 @@ async def upload_metadata(
         atomic_write_json(
             staged_meta,
             {
-                "vocab_integrated":
-                    integrate_vocab,
+                "vocab_integrated": False,
             },
         )
 
@@ -4157,7 +4312,7 @@ async def upload_metadata(
         )
 
         # ---------------------------------------------------------------
-        # 7. ONE Fuseki transaction.
+        # 6. ONE Fuseki transaction.
         #
         # All destructive graph changes happen together.
         # ---------------------------------------------------------------
@@ -4210,7 +4365,7 @@ async def upload_metadata(
         )
 
         # ---------------------------------------------------------------
-        # 8. Now update application state.
+        # 7. Update application state.
         # ---------------------------------------------------------------
         state["metadata_files"] = (
             candidate_files
@@ -4227,12 +4382,6 @@ async def upload_metadata(
             new_sources
         )
 
-        if integrate_vocab:
-            for uri in vocab_terms:
-                state[
-                    "metadata_only_sources"
-                ][uri] = filename
-
         clear_metadata_graph_stats()
 
         invalidate_instance_count()
@@ -4241,6 +4390,54 @@ async def upload_metadata(
 
         invalidate_caches()
         ap.invalidate()
+
+        metadata_file = next(
+            item
+            for item in state["metadata_files"]
+            if item["filename"] == filename
+        )
+
+        if integrate_vocab:
+            progress["phase"] = (
+                "Integrating metadata vocabulary…"
+            )
+
+            try:
+                await shacl.integrate_metadata_graphs(
+                    [graph_uri],
+                    source=filename,
+                )
+
+                atomic_write_json(
+                    meta_path,
+                    {"vocab_integrated": True},
+                )
+
+                metadata_file["vocab_integrated"] = True
+
+            except Exception:
+                # The metadata upload is already committed. Keep the
+                # file and allow vocabulary integration to be retried.
+                logger.exception(
+                    "Vocabulary integration failed for %s",
+                    filename,
+                )
+
+                metadata_file["vocab_integrated"] = False
+
+                try:
+                    atomic_write_json(
+                        meta_path,
+                        {"vocab_integrated": False},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to save vocabulary status for %s",
+                        filename,
+                    )
+
+                # The SHACL graph may have been partially updated.
+                invalidate_profile()
 
         progress["phase"] = ""
 
@@ -4907,9 +5104,9 @@ async def integrate_file_vocab(
 ):
     mf = next(
         (
-            f
-            for f in state["metadata_files"]
-            if f["filename"] == filename
+            item
+            for item in state["metadata_files"]
+            if item["filename"] == filename
         ),
         None,
     )
@@ -4920,73 +5117,53 @@ async def integrate_file_vocab(
             "Metadata file not found",
         )
 
-    if mf.get(
-        "vocab_integrated",
-        True,
-    ):
-        return {
-            "status": "already integrated"
-        }
-
-    graph_uri = mf["graph_uri"]
-
-    rows = await store.query(
-        f"""
-        SELECT DISTINCT ?term
-        WHERE {{
-            GRAPH <{graph_uri}> {{
-                {{
-                    ?term ?p ?o .
-                }}
-                UNION
-                {{
-                    ?s ?term ?o .
-                }}
-                UNION
-                {{
-                    ?s ?p ?term .
-                }}
-
-                FILTER(
-                    isIRI(?term)
-                    &&
-                    !STRSTARTS(
-                        STR(?term),
-                        "urn:bnid:"
-                    )
-                )
-            }}
-        }}
-        """
+    sidecar_path = os.path.join(
+        METADATA_DIR,
+        filename + ".meta.json",
     )
 
-    for row in rows:
-        uri = row["term"]
-
-        state["non_integrated_uris"].discard(
-            uri
+    try:
+        entities = await shacl.integrate_metadata_graphs(
+            [mf["graph_uri"]],
+            source=filename,
         )
-
-        await ap.merge_metadata_only_entity(
-            uri,
+    except Exception:
+        logger.exception(
+            "Vocabulary integration failed for %s",
             filename,
         )
+
+        mf["vocab_integrated"] = False
+
+        try:
+            atomic_write_json(
+                sidecar_path,
+                {"vocab_integrated": False},
+            )
+        except Exception:
+            logger.exception(
+                "Failed to save vocabulary status for %s",
+                filename,
+            )
+
+        invalidate_profile()
+        raise
 
     mf["vocab_integrated"] = True
 
     atomic_write_json(
-        os.path.join(
-            METADATA_DIR,
-            filename + ".meta.json",
-        ),
-        {
-            "vocab_integrated": True,
-        },
+        sidecar_path,
+        {"vocab_integrated": True},
     )
 
-    invalidate_profile()
+    integrated_uris = set().union(
+        *entities.values()
+    )
 
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "entities_integrated": len(integrated_uris),
+    }
 
 @app.get("/api/metadata/raw/{filename:path}")
 async def get_raw_metadata(filename: str):

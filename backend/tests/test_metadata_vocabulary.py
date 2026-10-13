@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 from collections.abc import Iterable
 from typing import cast
+import json
 
 import pytest
 from rdflib import Dataset, Literal, Namespace, URIRef
@@ -105,8 +106,26 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
             },
         ],
     )
-    monkeypatch.setitem(main.state, "prefix_map", {})
-    monkeypatch.setitem(main.state, "ontologies", [])
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {}
+    )
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        []
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_only_sources",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "non_integrated_uris",
+        set(),
+    )
 
     store = AsyncMock()
     store.query.side_effect = [
@@ -161,3 +180,81 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
     assert "sh:path" in update
     assert "sh:property" in update
     assert "sh:targetNode" in update
+
+@pytest.mark.asyncio
+async def test_file_integration_uses_shared_service(
+    monkeypatch,
+    tmp_path,
+):
+    filename = "catalog.ttl"
+    graph_uri = main.metadata_graph_uri(filename)
+
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        [
+            {
+                "filename": filename,
+                "graph_uri": graph_uri,
+                "vocab_integrated": False,
+            }
+        ],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_only_sources",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "non_integrated_uris",
+        set(),
+    )
+    monkeypatch.setattr(
+        main,
+        "METADATA_DIR",
+        tmp_path,
+    )
+
+    entities = {
+        "class": {str(EX.Book)},
+        "property": {str(EX.title)},
+        "datatype": set(),
+        "individual": set(),
+    }
+
+    integration = AsyncMock(
+        return_value=entities,
+    )
+
+    monkeypatch.setattr(
+        main.shacl,
+        "integrate_metadata_graphs",
+        integration,
+    )
+
+    result = await main.integrate_file_vocab(
+        filename
+    )
+
+    integration.assert_awaited_once_with(
+        [graph_uri],
+        source=filename,
+    )
+
+    assert result == {
+        "status": "ok",
+        "entities_integrated": 2,
+    }
+    assert (
+        main.state["metadata_files"][0]["vocab_integrated"]
+        is True
+    )
+
+    with open(
+        tmp_path / f"{filename}.meta.json",
+        encoding="utf-8",
+    ) as file:
+        sidecar = json.load(file)
+
+    assert sidecar["vocab_integrated"] is True
