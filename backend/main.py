@@ -1329,6 +1329,178 @@ def metadata_filename_from_graph(
         graph_uri[len(METADATA_GRAPH_PREFIX):]
     )
 
+def _metadata_graph_values(graph_uris: List[str]) -> str:
+    """Return a validated, deterministic SPARQL VALUES list."""
+    unique_graph_uris = sorted(set(graph_uris))
+    if not unique_graph_uris:
+        raise ValueError("At least one metadata graph URI is required.")
+
+    return " ".join(
+        _sparql_iri(uri, "metadata graph URI")
+        for uri in unique_graph_uris
+    )
+
+
+def _metadata_vocabulary_query(
+    graph_uris: List[str],
+    known_individual_uris: Optional[List[str]] = None,
+) -> str:
+    """Extract vocabulary references by URI and semantic role."""
+    graph_values = _metadata_graph_values(graph_uris)
+
+    declaration_types = (
+        OWL.Class,
+        RDFS.Class,
+        OWL.ObjectProperty,
+        OWL.DatatypeProperty,
+        OWL.AnnotationProperty,
+        RDF.Property,
+        RDFS.Datatype,
+        OWL.NamedIndividual,
+        OWL.Ontology,
+        OWL.FunctionalProperty,
+        OWL.InverseFunctionalProperty,
+        OWL.TransitiveProperty,
+        OWL.SymmetricProperty,
+        OWL.AsymmetricProperty,
+        OWL.ReflexiveProperty,
+        OWL.IrreflexiveProperty,
+        OWL.Restriction,
+        OWL.Axiom,
+        OWL.AllDifferent,
+        OWL.AllDisjointClasses,
+        OWL.AllDisjointProperties,
+        OWL.NegativePropertyAssertion,
+        RDF.List,
+    )
+
+    excluded_types = ", ".join(
+        _sparql_iri(str(uri), "RDF type")
+        for uri in declaration_types
+    )
+
+    property_types = (
+        OWL.ObjectProperty,
+        OWL.DatatypeProperty,
+        OWL.AnnotationProperty,
+        RDF.Property,
+        OWL.FunctionalProperty,
+        OWL.InverseFunctionalProperty,
+        OWL.TransitiveProperty,
+        OWL.SymmetricProperty,
+        OWL.AsymmetricProperty,
+        OWL.ReflexiveProperty,
+        OWL.IrreflexiveProperty,
+    )
+
+    property_type_values = " ".join(
+        _sparql_iri(str(uri), "property type")
+        for uri in property_types
+    )
+
+    individual_branch = ""
+
+    known_individual_uris = known_individual_uris or []
+    if known_individual_uris:
+        individual_values = " ".join(
+            _sparql_iri(uri, "individual URI")
+            for uri in sorted(set(known_individual_uris))
+        )
+
+        individual_branch = f"""
+            UNION
+            {{
+                VALUES ?knownIndividual {{ {individual_values} }}
+                {{
+                    ?knownIndividual ?p ?o .
+                }}
+                UNION
+                {{
+                    ?s ?p ?knownIndividual .
+                }}
+                BIND(?knownIndividual AS ?term)
+                BIND("individual" AS ?role)
+            }}
+        """
+
+    return f"""
+        PREFIX rdf: <{RDF}>
+        PREFIX rdfs: <{RDFS}>
+        PREFIX owl: <{OWL}>
+
+        SELECT DISTINCT ?term ?role WHERE {{
+            VALUES ?graph {{ {graph_values} }}
+
+            GRAPH ?graph {{
+                {{
+                    ?subject rdf:type ?term .
+                    FILTER(?term NOT IN ({excluded_types}))
+                    BIND("class" AS ?role)
+                }}
+                UNION
+                {{
+                    ?subject ?term ?value .
+                    FILTER(?term != rdf:type)
+                    FILTER NOT EXISTS {{
+                        ?subject rdf:type ?subjectType .
+                        VALUES ?subjectType {{
+                            owl:Class
+                            rdfs:Class
+                            owl:ObjectProperty
+                            owl:DatatypeProperty
+                            owl:AnnotationProperty
+                            rdf:Property
+                            rdfs:Datatype
+                            owl:Ontology
+                        }}
+                    }}
+                    BIND("property" AS ?role)
+                }}
+                UNION
+                {{
+                    ?subject ?predicate ?literal .
+                    FILTER(isLiteral(?literal))
+                    BIND(DATATYPE(?literal) AS ?term)
+                    BIND("datatype" AS ?role)
+                }}
+                UNION
+                {{
+                    ?term rdf:type owl:Class .
+                    BIND("class" AS ?role)
+                }}
+                UNION
+                {{
+                    ?term rdf:type rdfs:Class .
+                    BIND("class" AS ?role)
+                }}
+                UNION
+                {{
+                    ?term rdf:type ?propertyType .
+                    VALUES ?propertyType {{
+                        {property_type_values}
+                    }}
+                    BIND("property" AS ?role)
+                }}
+                UNION
+                {{
+                    ?term rdf:type rdfs:Datatype .
+                    BIND("datatype" AS ?role)
+                }}
+                UNION
+                {{
+                    ?term rdf:type owl:NamedIndividual .
+                    BIND("individual" AS ?role)
+                }}
+                {individual_branch}
+            }}
+
+            FILTER(
+                isIRI(?term)
+                && !STRSTARTS(STR(?term), "urn:bnid:")
+            )
+        }}
+    """
+
 async def get_cached_metadata_graph_stats(
     graph_uri: str,
 ) -> Dict[str, Any]:
@@ -2199,78 +2371,274 @@ class SHACLProfile:
         """)
         return [r["uri"] for r in rows]
 
+    async def extract_metadata_vocabulary_entities(
+        self,
+        graph_uris: List[str],
+    ) -> Dict[str, Set[str]]:
+        """Extract vocabulary entities by URI and semantic role."""
+        entities: Dict[str, Set[str]] = {
+            "class": set(),
+            "property": set(),
+            "datatype": set(),
+            "individual": set(),
+        }
+
+        if not graph_uris:
+            return entities
+
+        known_individual_uris = [
+            entity["uri"]
+            for ontology in state["ontologies"]
+            for entity in ontology["entities"]
+            if entity["type"] == "individual"
+        ]
+
+        rows = await self.store.query(
+            _metadata_vocabulary_query(
+                graph_uris,
+                known_individual_uris,
+            )
+        )
+
+        for row in rows:
+            uri = row.get("term", "")
+            role = row.get("role", "")
+
+            if (
+                role in entities
+                and is_valid_uri(uri)
+                and not uri.startswith("urn:bnid:")
+            ):
+                entities[role].add(uri)
+
+        return entities
+
     async def generate_from_metadata(self):
-        if not _used_uris_set:
-            await rebuild_used_uris()
-        rows = await self.store.query("""
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT DISTINCT ?class ?prop WHERE {
-                ?instance a ?class . ?instance ?prop ?value .
-                FILTER(?prop != rdf:type) }""")
-        if not rows:
-            raise HTTPException(400, "No metadata instances found.")
+        # Include all registered metadata graphs, regardless of whether
+        # their instances have been merged into the default graph.
+        graph_uris = sorted({
+            item["graph_uri"]
+            for item in state["metadata_files"]
+            if item.get("graph_uri")
+        })
+
+        if not graph_uris:
+            raise HTTPException(400, "No metadata files found.")
+
+        entities = await self.extract_metadata_vocabulary_entities(
+            graph_uris
+        )
+
+        class_uris = entities["class"]
+        property_uris = entities["property"]
+        datatype_uris = entities["datatype"]
+        individual_uris = entities["individual"]
+
+        if not any((
+            class_uris,
+            property_uris,
+            datatype_uris,
+            individual_uris,
+        )):
+            raise HTTPException(
+                400,
+                "No vocabulary entities found in metadata files.",
+            )
+
+        graph_values = _metadata_graph_values(graph_uris)
+
+        pair_rows = await self.store.query(f"""
+            PREFIX rdf: <{RDF}>
+
+            SELECT DISTINCT ?class ?prop WHERE {{
+                VALUES ?graph {{ {graph_values} }}
+
+                GRAPH ?graph {{
+                    ?instance rdf:type ?class .
+                    ?instance ?prop ?value .
+                    FILTER(?prop != rdf:type)
+                }}
+            }}
+        """)
 
         pairs = defaultdict(set)
-        for r in rows:
-            pairs[r["class"]].add(r["prop"])
 
-        order_map = await get_global_property_order()
-        NS = str(SH)
+        for row in pair_rows:
+            class_uri = row.get("class")
+            prop_uri = row.get("prop")
 
-        for class_uri in pairs:
-            class_shape_uri = shape_uri_for_entity(class_uri, "class", state["prefix_map"])
-            await self.store.update(f"""
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a <{NS}NodeShape> ; <{NS}targetClass> <{class_uri}> . }}
-                }}
-                WHERE {{ FILTER NOT EXISTS {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{class_shape_uri}> a <{NS}NodeShape> }} }} }}""")
+            if (
+                class_uri in class_uris
+                and prop_uri in property_uris
+            ):
+                pairs[class_uri].add(prop_uri)
 
-        all_props = {prop for props in pairs.values() for prop in props}
-        for prop_uri in all_props:
-            prop_shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-            await self.store.update(f"""
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a <{NS}PropertyShape> ; <{NS}path> <{prop_uri}> . }}
-                }}
-                WHERE {{ FILTER NOT EXISTS {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> a <{NS}PropertyShape> }} }} }}""")
-            await self._set_default_constraints(prop_uri)
-            if prop_uri in order_map:
-                ord_val = order_map[prop_uri]
-                ord_triple = f"<{prop_shape_uri}> <{NS}order> {_format_constraint_value(NS+'order', ord_val)} ."
-                await self.store.update(f"""
-                    INSERT {{ GRAPH <{SHAPES_GRAPH}> {{ {ord_triple} }} }}
-                    WHERE {{ FILTER NOT EXISTS {{
-                        GRAPH <{SHAPES_GRAPH}> {{ <{prop_shape_uri}> <{NS}order> ?o }} }} }}""")
+        shape_triples = []
 
+        for class_uri in sorted(class_uris):
+            class_shape_uri = _sparql_iri(
+                shape_uri_for_entity(
+                    class_uri,
+                    "class",
+                    state["prefix_map"],
+                ),
+                "class shape URI",
+            )
+
+            shape_triples.append(
+                f"{class_shape_uri} a sh:NodeShape ; "
+                f"sh:targetClass "
+                f"{_sparql_iri(class_uri, 'class URI')} ."
+            )
+
+        for prop_uri in sorted(property_uris):
+            property_shape_uri = _sparql_iri(
+                shape_uri_for_entity(
+                    prop_uri,
+                    "property",
+                    state["prefix_map"],
+                ),
+                "property shape URI",
+            )
+
+            shape_triples.append(
+                f"{property_shape_uri} a sh:PropertyShape ; "
+                f"sh:path "
+                f"{_sparql_iri(prop_uri, 'property URI')} ."
+            )
+
+        for datatype_uri in sorted(datatype_uris):
+            datatype_shape_uri = _sparql_iri(
+                shape_uri_for_entity(
+                    datatype_uri,
+                    "datatype",
+                    state["prefix_map"],
+                ),
+                "datatype shape URI",
+            )
+
+            shape_triples.append(
+                f"{datatype_shape_uri} a sh:NodeShape ; "
+                f"sh:targetNode "
+                f"{_sparql_iri(datatype_uri, 'datatype URI')} ."
+            )
+
+        for individual_uri in sorted(individual_uris):
+            individual_shape_uri = _sparql_iri(
+                shape_uri_for_entity(
+                    individual_uri,
+                    "individual",
+                    state["prefix_map"],
+                ),
+                "individual shape URI",
+            )
+
+            shape_triples.append(
+                f"{individual_shape_uri} a sh:NodeShape ; "
+                f"sh:targetNode "
+                f"{_sparql_iri(individual_uri, 'individual URI')} ."
+            )
+
+        # Profile generation is additive. Do not call _sync_entity_links()
+        # here because its class-editing behavior replaces the complete
+        # property-link set.
         for class_uri, props in pairs.items():
-            valid_props = []
-            for prop_uri in props:
+            for prop_uri in sorted(props):
                 domains = get_property_domains(prop_uri)
-                if domains and not any(is_subclass(class_uri, [d]) or class_uri == d for d in domains):
+
+                if domains and not any(
+                    is_subclass(class_uri, [domain])
+                    or class_uri == domain
+                    for domain in domains
+                ):
                     continue
-                valid_props.append(prop_uri)
-            if valid_props:
-                await _sync_entity_links(class_uri, "class", valid_props)
 
-        dt_rows = await self.store.query("""
-            SELECT DISTINCT ?dt WHERE { ?s ?p ?o . FILTER(isLiteral(?o))
-            BIND(DATATYPE(?o) AS ?dt) FILTER(?dt != "") }""")
-        for r in dt_rows:
-            if r["dt"] in SYSTEM_DATATYPES:
-                try:
-                    await self.add_datatype(r["dt"])
-                except Exception:
-                    pass
+                class_shape_uri = _sparql_iri(
+                    shape_uri_for_entity(
+                        class_uri,
+                        "class",
+                        state["prefix_map"],
+                    ),
+                    "class shape URI",
+                )
 
-        prop_rows = await self.store.query("SELECT DISTINCT ?prop WHERE { ?s ?prop ?o . }")
-        for r in prop_rows:
-            if r["prop"] in SYSTEM_ANNOTATION_PROPERTIES:
-                try:
-                    await self.add_property_global(r["prop"])
-                except Exception:
-                    pass
+                property_shape_uri = _sparql_iri(
+                    shape_uri_for_entity(
+                        prop_uri,
+                        "property",
+                        state["prefix_map"],
+                    ),
+                    "property shape URI",
+                )
+
+                shape_triples.append(
+                    f"{class_shape_uri} sh:property "
+                    f"{property_shape_uri} ."
+                )
+
+        if shape_triples:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                INSERT DATA {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {" ".join(shape_triples)}
+                    }}
+                }}
+            """)
+
+        # Add default constraints only where they do not already exist.
+        for prop_uri in sorted(property_uris):
+            await self._set_default_constraints(prop_uri)
+
+        # Preserve existing property order. Restore the default order only
+        # when the property shape does not already have an order.
+        order_map = await get_global_property_order()
+        order_values = []
+
+        for prop_uri in sorted(property_uris):
+            if prop_uri not in order_map:
+                continue
+
+            property_shape_uri = _sparql_iri(
+                shape_uri_for_entity(
+                    prop_uri,
+                    "property",
+                    state["prefix_map"],
+                ),
+                "property shape URI",
+            )
+
+            order_value = _format_constraint_value(
+                str(SH.order),
+                order_map[prop_uri],
+            )
+
+            order_values.append(
+                f"({property_shape_uri} {order_value})"
+            )
+
+        if order_values:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                INSERT {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:order ?ord
+                    }}
+                }}
+                WHERE {{
+                    VALUES (?shape ?ord) {{
+                        {" ".join(order_values)}
+                    }}
+
+                    FILTER NOT EXISTS {{
+                        GRAPH <{SHAPES_GRAPH}> {{
+                            ?shape sh:order ?existing
+                        }}
+                    }}
+                }}
+            """)
 
         self._changed()
 
