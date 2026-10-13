@@ -659,3 +659,149 @@ def test_load_saved_metadata_ignores_legacy_integration_sidecar(
         "graph_uri": main.metadata_graph_uri("records.ttl"),
     }
     assert not sidecar.exists()
+
+@pytest.mark.parametrize(
+    "integration_fails",
+    [False, True],
+)
+@pytest.mark.asyncio
+async def test_upload_integrates_after_commit(
+    tmp_path,
+    monkeypatch,
+    integration_fails,
+):
+    filename = "records.ttl"
+    graph_uri = main.metadata_graph_uri(filename)
+    store = WorkingStore()
+
+    monkeypatch.setattr(
+        main,
+        "METADATA_DIR",
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        main,
+        "store",
+        store,
+    )
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{"filename": "ontology.ttl", "entities": []}],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_files",
+        [],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_only_sources",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "created_instances",
+        set(),
+    )
+    monkeypatch.setitem(
+        main.state,
+        "created_instances_graph",
+        main.Graph(),
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_graph_stats",
+        {},
+    )
+
+    monkeypatch.setattr(
+        main,
+        "invalidate_instance_count",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "invalidate_caches",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "clear_metadata_graph_stats",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "rebuild_used_uris",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main.ap,
+        "invalidate",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None,
+    )
+
+    async def check_commit_before_integration(
+        graph_uris,
+        source,
+    ):
+        assert graph_uris == [graph_uri]
+        assert source == filename
+
+        # The metadata graph must already be committed.
+        assert any(
+            "MOVE GRAPH" in operation
+            and f"TO GRAPH <{graph_uri}>" in operation
+            for operation in store.update_calls
+        )
+        assert (tmp_path / filename).exists()
+        assert any(
+            item["filename"] == filename
+            for item in main.state["metadata_files"]
+        )
+
+        if integration_fails:
+            raise RuntimeError(
+                "Simulated vocabulary integration failure"
+            )
+
+        return {
+            "class": set(),
+            "property": set(),
+            "datatype": set(),
+            "individual": set(),
+        }
+
+    integration = AsyncMock(
+        side_effect=check_commit_before_integration,
+    )
+    monkeypatch.setattr(
+        main.shacl,
+        "integrate_metadata_graphs",
+        integration,
+    )
+
+    result = await main.upload_metadata(
+        file=_upload(filename),
+        integrate_vocab=True,
+    )
+
+    assert result == {
+        "status": "ok",
+        "filename": filename,
+    }
+    integration.assert_awaited_once_with(
+        [graph_uri],
+        source=filename,
+    )
+
+    # A profile-integration failure must not roll back an upload
+    # whose metadata transaction has already committed.
+    assert (tmp_path / filename).read_bytes() == RDF_CONTENT
+    assert main.state["metadata_files"][0]["filename"] == filename

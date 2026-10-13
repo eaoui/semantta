@@ -23,6 +23,42 @@ EX2 = Namespace("https://example.net/")
 GRAPH_ONE = main.metadata_graph_uri("catalog.ttl")
 GRAPH_TWO = main.metadata_graph_uri("inventory.ttl")
 
+SH = Namespace("http://www.w3.org/ns/shacl#")
+
+
+class DatasetBackedStore:
+    """Minimal RDF store backed by an RDFLib Dataset."""
+
+    def __init__(self, dataset: Dataset):
+        self.dataset = dataset
+        self.update_calls: list[str] = []
+
+    async def query(self, sparql: str) -> list[dict[str, str]]:
+        result = self.dataset.query(sparql)
+
+        assert isinstance(result, Result)
+
+        variables = [
+            str(variable)
+            for variable in (result.vars or [])
+        ]
+        rows = cast(
+            Iterable[tuple[object, ...]],
+            result,
+        )
+
+        return [
+            {
+                name: str(value)
+                for name, value in zip(variables, row)
+                if value is not None
+            }
+            for row in rows
+        ]
+
+    async def update(self, sparql: str) -> None:
+        self.update_calls.append(sparql)
+        self.dataset.update(sparql)
 
 def test_metadata_vocabulary_query_uses_uri_and_role():
     dataset = Dataset()
@@ -427,4 +463,174 @@ async def test_integration_status_is_batched_and_live(
     assert (
         "vocabulary_entities"
         in graph_stats[graph_catalog]
+    )
+
+@pytest.mark.asyncio
+async def test_metadata_integration_is_idempotent_and_preserves_custom_constraints(
+    monkeypatch,
+):
+    dataset = Dataset()
+    metadata_graph = dataset.graph(URIRef(GRAPH_ONE))
+    shapes_graph = dataset.graph(
+        URIRef(main.SHAPES_GRAPH)
+    )
+
+    # Metadata uses a class and property.
+    metadata_graph.add((
+        EX.book1,
+        RDF.type,
+        EX.Book,
+    ))
+    metadata_graph.add((
+        EX.book1,
+        EX.title,
+        Literal("Example book"),
+    ))
+    metadata_graph.add((
+        EX.Book,
+        RDF.type,
+        OWL.Class,
+    ))
+    metadata_graph.add((
+        EX.title,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+
+    class_shape = URIRef(
+        main.shape_uri_for_entity(
+            str(EX.Book),
+            "class",
+            {},
+        )
+    )
+    manual_property_shape = URIRef(
+        "urn:test:manual-property-shape"
+    )
+
+    # Existing manual constraints that integration must preserve.
+    shapes_graph.add((
+        class_shape,
+        SH.closed,
+        Literal(True),
+    ))
+    shapes_graph.add((
+        class_shape,
+        SH.property,
+        manual_property_shape,
+    ))
+    shapes_graph.add((
+        manual_property_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        manual_property_shape,
+        SH.path,
+        EX.manualProperty,
+    ))
+
+    store = DatasetBackedStore(dataset)
+    profile = main.SHACLProfile(
+        cast(main.RDFStore, store)
+    )
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_only_sources",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "non_integrated_uris",
+        set(),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda _uri: [],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_global_property_order",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        profile,
+        "_set_default_constraints",
+        AsyncMock(),
+    )
+
+    expected_entities = {
+        "class": {str(EX.Book)},
+        "property": {str(EX.title)},
+    }
+
+    first_result = await profile.integrate_metadata_graphs(
+        [GRAPH_ONE],
+        source="catalog.ttl",
+    )
+    first_snapshot = set(shapes_graph)
+
+    second_result = await profile.integrate_metadata_graphs(
+        [GRAPH_ONE],
+        source="catalog.ttl",
+    )
+    second_snapshot = set(shapes_graph)
+
+    assert first_result["class"] == expected_entities["class"]
+    assert first_result["property"] == expected_entities["property"]
+    assert second_result == first_result
+
+    # Repeating integration must not change the RDF graph.
+    assert second_snapshot == first_snapshot
+
+    # Manually configured constraints and links survive.
+    assert (
+        class_shape,
+        SH.closed,
+        Literal(True),
+    ) in shapes_graph
+    assert (
+        class_shape,
+        SH.property,
+        manual_property_shape,
+    ) in shapes_graph
+    assert (
+        manual_property_shape,
+        SH.path,
+        EX.manualProperty,
+    ) in shapes_graph
+
+    # Integration adds the expected class-property link.
+    generated_property_shape = URIRef(
+        main.shape_uri_for_entity(
+            str(EX.title),
+            "property",
+            {},
+        )
+    )
+    assert (
+        class_shape,
+        SH.property,
+        generated_property_shape,
+    ) in shapes_graph
+
+    # Both runs issue the same additive update.
+    assert len(store.update_calls) == 2
+    assert store.update_calls[0] == store.update_calls[1]
+    assert all(
+        "DELETE" not in update.upper()
+        for update in store.update_calls
     )
