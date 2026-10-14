@@ -3,7 +3,7 @@
     <h2 class="text-2xl font-bold mb-4 text-gray-900 dark:text-gray-100">Metadata Imports</h2>
 
     <ImportBox title="Import Metadata File" accept=".nt,.txt,.ttl,.rdf,.xml,.jsonld,.json,.trig,.trix,.nq"
-      buttonText="Import" @upload="upload">
+      buttonText="Import" multiple :disabled="!!loadingMsg" @upload="upload" @upload-multiple="uploadMultiple">
       <div class="mt-3 space-y-2">
         <label class="flex items-center gap-2 cursor-pointer text-gray-700 dark:text-gray-300">
           <input type="checkbox" v-model="integrateVocab" class="h-4 w-4" />
@@ -130,18 +130,84 @@ const ontologyBaseNamespaces = computed(() =>
   })
 )
 
-async function upload(file: File) {
-  loadingMsg.value = 'Importing metadata…'
+function upload(file: File) {
+  void uploadFiles([file])
+}
+
+function uploadMultiple(files: File[]) {
+  void uploadFiles(files)
+}
+
+async function uploadFiles(files: File[]) {
+  if (!files.length || loadingMsg.value) return
+
+  const uploaded: string[] = []
+  const failures: string[] = []
+  let refreshError = ''
+
   startPolling()
+
   try {
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('integrate_vocab', String(integrateVocab.value))
-    await $fetch(`${apiBase}/api/metadata/upload`, { method: 'POST', body: formData })
-    await store.fetchState()
-    await loadIntegrationStatuses()
-  } catch (e: any) {
-    toast.error(e?.data?.detail || e.message)
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index]
+      if (!file) continue
+
+      loadingMsg.value = files.length === 1
+        ? `Importing ${file.name}…`
+        : `Importing ${index + 1} of ${files.length}: ${file.name}`
+
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append(
+        'integrate_vocab',
+        String(integrateVocab.value),
+      )
+
+      try {
+        await $fetch(`${apiBase}/api/metadata/upload`, {
+          method: 'POST',
+          body: formData,
+        })
+
+        uploaded.push(file.name)
+      } catch (e: any) {
+        failures.push(
+          `${file.name}: ${
+            e?.data?.detail ||
+            e?.message ||
+            'Upload failed'
+          }`,
+        )
+      }
+    }
+
+    if (uploaded.length > 0) {
+      try {
+        await store.fetchState()
+        await loadIntegrationStatuses()
+      } catch (e: any) {
+        refreshError =
+          e?.data?.detail ||
+          e?.message ||
+          'Could not refresh metadata state.'
+      }
+    }
+
+    if (failures.length > 0 || refreshError) {
+      const messages = [
+        `${uploaded.length} of ${files.length} files imported successfully.`,
+      ]
+
+      if (failures.length > 0) {
+        messages.push('Failed files:', ...failures)
+      }
+
+      if (refreshError) {
+        messages.push(`Refresh error: ${refreshError}`)
+      }
+
+      toast.error(messages.join('\n'))
+    }
   } finally {
     stopPolling()
     loadingMsg.value = ''
