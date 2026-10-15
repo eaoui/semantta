@@ -634,3 +634,30 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         "DELETE" not in update.upper()
         for update in store.update_calls
     )
+
+@pytest.mark.asyncio
+async def test_batch_entity_roles_skips_unsupported_uris():
+    store = AsyncMock()
+    store.query.return_value = []
+
+    profile = main.ApplicationProfile(
+        cast(main.RDFStore, store)
+    )
+
+    invalid_uri = (
+        "file:///tmp/semantta-metadata-test/lclang%20"
+    )
+    valid_uri = str(EX.Book)
+
+    result = await profile._batch_entity_roles([
+        invalid_uri,
+        valid_uri,
+    ])
+
+    assert result == {}
+    assert store.query.await_count == 4
+
+    for call in store.query.await_args_list:
+        query = call.args[0]
+        assert invalid_uri not in query
+        assert f"<{valid_uri}>" in query

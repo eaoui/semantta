@@ -11,6 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from urllib.parse import urlsplit
+from uuid import uuid4
+
 from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.plugins.stores.memory import Memory
 
@@ -87,6 +90,8 @@ def _term_to_ntriples(
 
     return term.n3()
 
+class RelativeIRIWithoutBaseError(ValueError):
+    """Raised when relative IRIs have no explicit absolute base."""
 
 def stream_rdf_to_ntriples(
     source_path: str | Path,
@@ -102,6 +107,9 @@ def stream_rdf_to_ntriples(
     """
     source_path = Path(source_path)
     target_path = Path(target_path)
+
+    fallback_host = f"{uuid4().hex}.semantta.invalid"
+    fallback_base = f"https://{fallback_host}/"
 
     if not source_path.is_file():
         raise FileNotFoundError(
@@ -129,6 +137,30 @@ def stream_rdf_to_ntriples(
 
             subject, predicate, object_ = triple
 
+            def uses_fallback_base(term) -> bool:
+                if isinstance(term, URIRef):
+                    return urlsplit(str(term)).hostname == fallback_host
+
+                if isinstance(term, Literal) and term.datatype:
+                    return (
+                        urlsplit(str(term.datatype)).hostname
+                        == fallback_host
+                    )
+
+                return False
+
+
+            if any(
+                uses_fallback_base(term)
+                for term in triple
+            ):
+                raise RelativeIRIWithoutBaseError(
+                    "The metadata contains relative IRIs without "
+                    "an explicit absolute base URI. Add an absolute "
+                    "base declaration or replace those IRIs with "
+                    "absolute IRIs. No metadata was imported."
+                )
+
             output.write(
                 f"{_term_to_ntriples(subject, bnode_map)} "
                 f"{_term_to_ntriples(predicate, bnode_map)} "
@@ -146,6 +178,7 @@ def stream_rdf_to_ntriples(
         graph.parse(
             source=str(source_path),
             format=fmt,
+            publicID=fallback_base,
         )
 
     return triple_count

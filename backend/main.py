@@ -64,7 +64,10 @@ from rdflib.namespace import OWL, RDF, RDFS, split_uri
 from config import FUSEKI_CONFIG, is_loopback_host
 from fuseki_store import FusekiStore, SHAPES_GRAPH
 from rdf_store import RDFStore
-from streaming_rdf import stream_rdf_to_ntriples
+from streaming_rdf import (
+    RelativeIRIWithoutBaseError,
+    stream_rdf_to_ntriples,
+)
 from utils import (
     atomic_write_json,
     shape_uri_for_entity,
@@ -2266,12 +2269,27 @@ class ApplicationProfile:
         self,
         uris: list[str],
     ) -> Dict[str, str]:
-        if not uris:
+        unique_uris = sorted(set(uris))
+        valid_uris = [
+            uri
+            for uri in unique_uris
+            if is_valid_uri(uri)
+        ]
+
+        if len(valid_uris) != len(unique_uris):
+            logger.warning(
+                "Skipping %d unsupported URI(s) during "
+                "Application Profile entity discovery. "
+                "The RDF data has not been modified.",
+                len(unique_uris) - len(valid_uris),
+            )
+
+        if not valid_uris:
             return {}
 
         values = " ".join(
             _sparql_iri(uri, "entity URI")
-            for uri in sorted(set(uris))
+            for uri in valid_uris
         )
 
         async def select_classes():
@@ -2326,7 +2344,7 @@ class ApplicationProfile:
 
         role_map = {}
 
-        for uri in uris:
+        for uri in valid_uris:
             if uri in classes_set:
                 role_map[uri] = "class"
             elif uri in individuals_set:
@@ -4411,6 +4429,12 @@ async def upload_metadata(
         )
 
         await rollback_upload()
+
+        if isinstance(exc, RelativeIRIWithoutBaseError):
+            raise HTTPException(
+                400,
+                detail=str(exc),
+            ) from exc
 
         raise HTTPException(
             400,
