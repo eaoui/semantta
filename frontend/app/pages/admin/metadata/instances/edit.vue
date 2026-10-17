@@ -74,6 +74,7 @@ async function updateInstance(payload: {
   classUris: string[]
   instanceUri: string
   properties: Record<string, string[]>
+  editablePropertyUris: string[]
 }) {
   loadingMsg.value = 'Updating metadata instance…'
   try {
@@ -85,6 +86,7 @@ async function updateInstance(payload: {
         body: JSON.stringify({
           class_uris: payload.classUris,
           properties: payload.properties,
+          editable_property_uris: payload.editablePropertyUris,
         }),
       }
     )

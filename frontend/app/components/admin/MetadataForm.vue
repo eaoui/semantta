@@ -144,7 +144,12 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  submit: [payload: { classUris: string[]; instanceUri: string; properties: Record<string, string[]> }]
+  submit: [payload: {
+    classUris: string[]
+    instanceUri: string
+    properties: Record<string, string[]>
+    editablePropertyUris: string[]
+  }]
   cancel: []
   'panel-state-changed': [open: boolean]
 }>()
@@ -412,7 +417,14 @@ function closePanel() {
   panelState.value = null
 }
 
-async function onPanelSubmit(payload: { classUris: string[]; instanceUri: string; properties: Record<string, string[]> }) {
+async function onPanelSubmit(
+  payload: {
+    classUris: string[]
+    instanceUri: string
+    properties: Record<string, string[]>
+    editablePropertyUris: string[]
+  }
+) {
   if (!panelState.value) return
   const { propUri, index, mode } = panelState.value
   try {
@@ -434,6 +446,7 @@ async function onPanelSubmit(payload: { classUris: string[]; instanceUri: string
         body: JSON.stringify({
           class_uris: payload.classUris,
           properties: payload.properties,
+          editable_property_uris: payload.editablePropertyUris,
         }),
       })
       getPropValues(propUri)[index] = payload.instanceUri
@@ -465,17 +478,22 @@ watch(selectedClasses, () => {
 
 function handleSubmit() {
   const cleanProps: Record<string, string[]> = {}
-  for (const pred of Object.keys(formData)) {
-    const vals = getPropValues(pred).filter(v => v.trim() !== '')
+  const editablePropertyUris = properties.value.map(prop => prop.uri)
+
+  for (const prop of properties.value) {
+    const vals = getPropValues(prop.uri).filter(v => v.trim() !== '')
     if (vals.length > 0) {
-      cleanProps[pred] = vals
+      cleanProps[prop.uri] = vals
     }
   }
+
   if (!validateAllFields()) return
+
   emit('submit', {
     classUris: selectedClasses.value,
     instanceUri: instanceUri.value,
     properties: cleanProps,
+    editablePropertyUris,
   })
 }
 </script>

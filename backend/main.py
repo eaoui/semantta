@@ -5034,6 +5034,43 @@ async def update_instance(uri: str, data: dict):
         properties,
     )
 
+    editable_property_uris = data.get(
+        "editable_property_uris",
+        list(properties.keys()),
+    )
+    if not isinstance(editable_property_uris, list) or any(
+        not isinstance(prop, str) for prop in editable_property_uris
+    ):
+        raise HTTPException(
+            400,
+            "editable_property_uris must be a list of property URIs",
+        )
+
+    editable_property_uris = sorted(set(editable_property_uris))
+    for prop in editable_property_uris:
+        _sparql_iri(prop, "editable property URI")
+
+    active_property_uris = set(
+        await shacl.get_active_properties()
+    )
+    inactive_editable_properties = [
+        prop
+        for prop in editable_property_uris
+        if prop not in active_property_uris
+    ]
+    if inactive_editable_properties:
+        raise HTTPException(
+            400,
+            "Only active Application Profile properties can be edited: "
+            + ", ".join(inactive_editable_properties),
+        )
+
+    if not set(properties).issubset(set(editable_property_uris)):
+        raise HTTPException(
+            400,
+            "Submitted values include properties not present in the edit form",
+        )
+
     # Validate the complete replacement before
     # modifying persistent RDF data.
     await shacl.validate_instance(
@@ -5093,41 +5130,40 @@ async def update_instance(uri: str, data: dict):
         )
 
     # Replace the instance in one SPARQL Update request.
-    # Fuseki executes the request transactionally on TDB2.
-    replacement_update = f"""
-DELETE {{
-    {uri_ref} ?p ?o
-}}
-WHERE {{
-    {uri_ref} ?p ?o
-}};
-INSERT DATA {{
-    {triples}
-}}
-"""
+    update_operations = [
+        f"DELETE WHERE {{ {uri_ref} <{RDF.type}> ?oldType }}"
+    ]
 
-    await store.update(
-        replacement_update
+    for pred in editable_property_uris:
+        pred_ref = _sparql_iri(pred, "editable property URI")
+        update_operations.append(
+            f"DELETE WHERE {{ {uri_ref} {pred_ref} ?oldValue }}"
+        )
+
+    update_operations.append(
+        f"INSERT DATA {{ {triples} }}"
     )
+
+    # Fuseki executes the update request transactionally on TDB2.
+    await store.update(";\n".join(update_operations))
 
     # Update local state only after persistent storage
     # has been successfully replaced.
     if updated_graph is not None:
         subject_uri = URIRef(uri)
+        editable_property_set = set(editable_property_uris)
 
         for triple in list(
             state["created_instances_graph"].triples(
                 (subject_uri, None, None)
             )
         ):
-            state["created_instances_graph"].remove(
-                triple
-            )
+            predicate_uri = str(triple[1])
+            if triple[1] == RDF.type or predicate_uri in editable_property_set:
+                state["created_instances_graph"].remove(triple)
 
         for triple in updated_graph:
-            state["created_instances_graph"].add(
-                triple
-            )
+            state["created_instances_graph"].add(triple)
 
     invalidate_profile()
 
