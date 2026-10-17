@@ -101,3 +101,62 @@ def test_relative_iris_without_a_base_are_rejected(
         "semantta.invalid"
         not in target.read_text(encoding="utf-8")
     )
+
+import re
+
+
+def _blank_node_ids(output: str) -> set[str]:
+    return set(
+        re.findall(r"<(urn:bnid:[^>]+)>", output)
+    )
+
+
+def test_identical_blank_nodes_with_same_context_merge(
+    tmp_path,
+):
+    source = tmp_path / "records.ttl"
+    target = tmp_path / "records.nt"
+
+    source.write_text(
+        '@prefix ex: <https://example.org/> .\n'
+        'ex:work ex:contribution [\n'
+        '  ex:agent ex:walsh ;\n'
+        '  ex:role ex:screenwriter\n'
+        '], [\n'
+        '  ex:agent ex:walsh ;\n'
+        '  ex:role ex:screenwriter\n'
+        '] .\n',
+        encoding="utf-8",
+    )
+
+    stream_rdf_to_ntriples(source, "turtle", target)
+
+    output = target.read_text(encoding="utf-8")
+
+    assert len(_blank_node_ids(output)) == 1
+
+
+def test_identical_blank_nodes_with_different_contexts_stay_distinct(
+    tmp_path,
+):
+    source = tmp_path / "records.ttl"
+    target = tmp_path / "records.nt"
+
+    source.write_text(
+        '@prefix ex: <https://example.org/> .\n'
+        'ex:work1 ex:contribution [\n'
+        '  ex:agent ex:walsh ;\n'
+        '  ex:role ex:screenwriter\n'
+        '] .\n'
+        'ex:work2 ex:contribution [\n'
+        '  ex:agent ex:walsh ;\n'
+        '  ex:role ex:screenwriter\n'
+        '] .\n',
+        encoding="utf-8",
+    )
+
+    stream_rdf_to_ntriples(source, "turtle", target)
+
+    output = target.read_text(encoding="utf-8")
+
+    assert len(_blank_node_ids(output)) == 2

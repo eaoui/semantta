@@ -69,9 +69,6 @@
                   <div v-else-if="isBlankNode(String(v))"
                     class="rounded p-2 mt-1 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300"> <template
                       v-if="bnodeData && bnodeData[String(v)]">
-                      <p v-if="bnodeData[String(v)].label" class="font-medium text-sm text-gray-800 dark:text-gray-200">
-                        {{ bnodeData[String(v)].label }}
-                      </p>
                       <p v-if="bnodeData[String(v)].types.length"
                         class="text-sm italic text-gray-600 dark:text-gray-400">
                         <template v-for="(typeUri, idx) in bnodeData[String(v)].types" :key="typeUri">

@@ -181,6 +181,88 @@ def _blank_node_fingerprints(
 
     return fingerprints
 
+def _blank_node_context_fingerprints(
+    connection: sqlite3.Connection,
+    structural_fingerprints: dict[str, str | None],
+) -> dict[str, str | None]:
+    """Fingerprint incoming relationships, anchored to named resources."""
+    context_fingerprints: dict[str, str | None] = {}
+    visiting: set[str] = set()
+
+    def encode(value: object) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def fingerprint(node_uri: str) -> str | None:
+        if node_uri in context_fingerprints:
+            return context_fingerprints[node_uri]
+
+        if node_uri in visiting:
+            return None
+
+        visiting.add(node_uri)
+        try:
+            incoming = connection.execute(
+                """
+                SELECT subject_kind, subject_value, predicate
+                FROM bnode_incoming
+                WHERE object_value = ?
+                """,
+                (node_uri,),
+            ).fetchall()
+
+            if not incoming:
+                context_fingerprints[node_uri] = None
+                return None
+
+            signatures = []
+
+            for subject_kind, subject_value, predicate in incoming:
+                if subject_kind == "iri":
+                    signatures.append(
+                        ["iri", subject_value, predicate]
+                    )
+                    continue
+
+                parent_structure = structural_fingerprints.get(
+                    subject_value
+                )
+                parent_context = fingerprint(subject_value)
+
+                if (
+                    parent_structure is None
+                    or parent_context is None
+                ):
+                    context_fingerprints[node_uri] = None
+                    return None
+
+                signatures.append(
+                    [
+                        "blank-node",
+                        parent_structure,
+                        parent_context,
+                        predicate,
+                    ]
+                )
+
+            signatures.sort(key=encode)
+            encoded = encode(signatures).encode("utf-8")
+
+            result = hashlib.sha256(encoded).hexdigest()
+            context_fingerprints[node_uri] = result
+            return result
+
+        finally:
+            visiting.discard(node_uri)
+
+    for node_uri in structural_fingerprints:
+        fingerprint(node_uri)
+
+    return context_fingerprints
+
 def _rewrite_blank_node_iris(
     line: str,
     replacements: dict[str, str],
@@ -292,6 +374,23 @@ def stream_rdf_to_ntriples(
         """
     )
 
+    connection.execute(
+        """
+        CREATE TABLE bnode_incoming (
+            object_value TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            subject_value TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            PRIMARY KEY (
+                object_value,
+                subject_kind,
+                subject_value,
+                predicate
+            )
+        )
+        """
+    )
+
     triple_count = 0
     bnode_map: dict[BNode, URIRef] = {}
 
@@ -383,9 +482,39 @@ def stream_rdf_to_ntriples(
                     ),
                 )
 
-            triple_count += 1
+            if isinstance(object_, BNode):
+                object_uri = str(bnode_map[object_])
 
-        
+                if isinstance(subject, URIRef):
+                    subject_kind = "iri"
+                    subject_value = str(subject)
+                elif isinstance(subject, BNode):
+                    subject_kind = "blank-node"
+                    subject_value = str(bnode_map[subject])
+                else:
+                    subject_kind = None
+                    subject_value = None
+
+                if subject_kind is not None:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO bnode_incoming (
+                            object_value,
+                            subject_kind,
+                            subject_value,
+                            predicate
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            object_uri,
+                            subject_kind,
+                            subject_value,
+                            str(predicate),
+                        ),
+                    )
+
+            triple_count += 1
 
         graph = Graph(
             store=StreamingStore(
@@ -406,15 +535,42 @@ def stream_rdf_to_ntriples(
             str(uri)
             for uri in bnode_map.values()
         }
-        fingerprints = _blank_node_fingerprints(
+
+        structural_fingerprints = _blank_node_fingerprints(
             connection,
             node_uris,
         )
-        replacements = {
-            node_uri: f"urn:bnid:{fingerprint}"
-            for node_uri, fingerprint in fingerprints.items()
-            if fingerprint is not None
-        }
+
+        context_fingerprints = _blank_node_context_fingerprints(
+            connection,
+            structural_fingerprints,
+        )
+
+        replacements: dict[str, str] = {}
+
+        for node_uri, structural_fingerprint in (
+            structural_fingerprints.items()
+        ):
+            context_fingerprint = context_fingerprints.get(node_uri)
+
+            # Do not merge nodes without reliable evidence.
+            if (
+                structural_fingerprint is None
+                or context_fingerprint is None
+            ):
+                continue
+
+            identity = hashlib.sha256(
+                json.dumps(
+                    [
+                        structural_fingerprint,
+                        context_fingerprint,
+                    ],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            replacements[node_uri] = f"urn:bnid:{identity}"
 
         if replacements:
             rewritten_path = target_path.with_suffix(
