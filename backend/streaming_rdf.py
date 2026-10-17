@@ -11,6 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+import hashlib
+import json
+import os
+import sqlite3
+import tempfile
+
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -90,6 +96,146 @@ def _term_to_ntriples(
 
     return term.n3()
 
+def _blank_node_fingerprints(
+    connection: sqlite3.Connection,
+    node_uris: set[str],
+) -> dict[str, str | None]:
+    """Fingerprint complete, acyclic blank-node structures from disk."""
+    fingerprints: dict[str, str | None] = {}
+    visiting: set[str] = set()
+
+    def fingerprint(node_uri: str) -> str | None:
+        if node_uri in fingerprints:
+            return fingerprints[node_uri]
+        if node_uri in visiting:
+            return None
+
+        statements = connection.execute(
+            """
+            SELECT predicate, object_kind, object_value, datatype, language
+            FROM bnode_triples
+            WHERE subject = ?
+            """,
+            (node_uri,),
+        ).fetchall()
+
+        # Empty nodes contain no evidence on which to base a safe merge.
+        if not statements:
+            fingerprints[node_uri] = None
+            return None
+
+        visiting.add(node_uri)
+        try:
+            signature = []
+
+            for predicate, object_kind, object_value, datatype, language in statements:
+                if object_kind == "blank-node":
+                    child_fingerprint = fingerprint(object_value)
+                    if child_fingerprint is None:
+                        raise ValueError("Unfingerprintable child blank node")
+
+                    object_signature = ["blank-node", child_fingerprint]
+
+                elif object_kind == "iri":
+                    object_signature = ["iri", object_value]
+
+                else:
+                    object_signature = [
+                        "literal",
+                        object_value,
+                        datatype,
+                        language,
+                    ]
+
+                signature.append([predicate, object_signature])
+
+            signature.sort(
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+            encoded = json.dumps(
+                signature,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+            value = hashlib.sha256(encoded).hexdigest()
+            fingerprints[node_uri] = value
+            return value
+
+        except (ValueError, RecursionError):
+            fingerprints[node_uri] = None
+            return None
+
+        finally:
+            visiting.discard(node_uri)
+
+    for node_uri in node_uris:
+        try:
+            fingerprint(node_uri)
+        except RecursionError:
+            fingerprints[node_uri] = None
+
+    return fingerprints
+
+def _rewrite_blank_node_iris(
+    line: str,
+    replacements: dict[str, str],
+) -> str:
+    """Replace generated IRI tokens without touching literal lexical values."""
+    if not replacements:
+        return line
+
+    output: list[str] = []
+    index = 0
+    in_literal = False
+    escaped = False
+
+    while index < len(line):
+        char = line[index]
+
+        if in_literal:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_literal = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_literal = True
+            output.append(char)
+            index += 1
+            continue
+
+        if char == "<":
+            end = line.find(">", index + 1)
+            if end < 0:
+                output.append(line[index:])
+                break
+
+            iri = line[index + 1:end]
+            preceding = "".join(output[-2:])
+            replacement = (
+                iri
+                if preceding.endswith("^^")
+                else replacements.get(iri, iri)
+            )
+            output.append(f"<{replacement}>")
+            index = end + 1
+            continue
+
+        output.append(char)
+        index += 1
+
+    return "".join(output)
+
 class RelativeIRIWithoutBaseError(ValueError):
     """Raised when relative IRIs have no explicit absolute base."""
 
@@ -119,6 +265,31 @@ def stream_rdf_to_ntriples(
     target_path.parent.mkdir(
         parents=True,
         exist_ok=True,
+    )
+
+    fd, database_name = tempfile.mkstemp(
+        prefix="semantta-bnode-index-",
+        suffix=".sqlite",
+        dir=target_path.parent,
+    )
+    os.close(fd)
+
+    database_path = Path(database_name)
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        CREATE TABLE bnode_triples (
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object_kind TEXT NOT NULL,
+            object_value TEXT NOT NULL,
+            datatype TEXT NOT NULL,
+            language TEXT NOT NULL,
+            PRIMARY KEY (
+                subject, predicate, object_kind, object_value, datatype, language
+            )
+        )
+        """
     )
 
     triple_count = 0
@@ -161,13 +332,60 @@ def stream_rdf_to_ntriples(
                     "absolute IRIs. No metadata was imported."
                 )
 
+            subject_nt = _term_to_ntriples(subject, bnode_map)
+            predicate_nt = _term_to_ntriples(predicate, bnode_map)
+            object_nt = _term_to_ntriples(object_, bnode_map)
+
             output.write(
-                f"{_term_to_ntriples(subject, bnode_map)} "
-                f"{_term_to_ntriples(predicate, bnode_map)} "
-                f"{_term_to_ntriples(object_, bnode_map)} .\n"
+                f"{subject_nt} {predicate_nt} {object_nt} .\n"
             )
 
+            if isinstance(subject, BNode):
+                subject_uri = str(bnode_map[subject])
+
+                if isinstance(object_, BNode):
+                    object_kind = "blank-node"
+                    object_value = str(bnode_map[object_])
+                    datatype = ""
+                    language = ""
+
+                elif isinstance(object_, URIRef):
+                    object_kind = "iri"
+                    object_value = str(object_)
+                    datatype = ""
+                    language = ""
+
+                elif isinstance(object_, Literal):
+                    object_kind = "literal"
+                    object_value = str(object_)
+                    datatype = str(object_.datatype or "")
+                    language = object_.language or ""
+
+                else:
+                    object_kind = "iri"
+                    object_value = str(object_)
+                    datatype = ""
+                    language = ""
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO bnode_triples
+                        (subject, predicate, object_kind, object_value, datatype, language)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        subject_uri,
+                        str(predicate),
+                        object_kind,
+                        object_value,
+                        datatype,
+                        language,
+                    ),
+                )
+
             triple_count += 1
+
+        
 
         graph = Graph(
             store=StreamingStore(
@@ -180,5 +398,38 @@ def stream_rdf_to_ntriples(
             format=fmt,
             publicID=fallback_base,
         )
+
+    connection.commit()
+
+    try:
+        node_uris = {
+            str(uri)
+            for uri in bnode_map.values()
+        }
+        fingerprints = _blank_node_fingerprints(
+            connection,
+            node_uris,
+        )
+        replacements = {
+            node_uri: f"urn:bnid:{fingerprint}"
+            for node_uri, fingerprint in fingerprints.items()
+            if fingerprint is not None
+        }
+
+        if replacements:
+            rewritten_path = target_path.with_suffix(
+                target_path.suffix + ".rewritten"
+            )
+
+            with target_path.open("r", encoding="utf-8") as source, rewritten_path.open(
+                "w", encoding="utf-8", newline="\n"
+            ) as output:
+                for line in source:
+                    output.write(_rewrite_blank_node_iris(line, replacements))
+
+            os.replace(rewritten_path, target_path)
+    finally:
+        connection.close()
+        database_path.unlink(missing_ok=True)
 
     return triple_count

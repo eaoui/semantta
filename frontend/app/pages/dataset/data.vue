@@ -69,6 +69,9 @@
                   <div v-else-if="isBlankNode(String(v))"
                     class="rounded p-2 mt-1 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300"> <template
                       v-if="bnodeData && bnodeData[String(v)]">
+                      <p v-if="bnodeData[String(v)].label" class="font-medium text-sm text-gray-800 dark:text-gray-200">
+                        {{ bnodeData[String(v)].label }}
+                      </p>
                       <p v-if="bnodeData[String(v)].types.length"
                         class="text-sm italic text-gray-600 dark:text-gray-400">
                         <template v-for="(typeUri, idx) in bnodeData[String(v)].types" :key="typeUri">
@@ -76,12 +79,13 @@
                             v-if="showSeparator(idx, bnodeData[String(v)].types.length)">, </span>
                         </template>
                       </p>
-                      <div v-for="(bvals, bpred) in bnodeData[String(v)].properties" :key="bpred" class="ml-2 text-sm">
-                        <a :href="String(bpred)" target="_blank"
-                          class="font-medium text-gray-600 dark:text-gray-400 hover:underline">{{
-                            formatUri(String(bpred)) || bpred }}</a>:
+                      <div v-for="entry in getActiveBnodeProperties(String(v))" :key="entry[0]" class="ml-2 text-sm">
+                        <a :href="entry[0]" target="_blank"
+                          class="font-medium text-gray-600 dark:text-gray-400 hover:underline">
+                          {{ formatUri(entry[0]) || entry[0] }}
+                        </a>:
                         <span>
-                          <template v-for="bv in bvals" :key="bv">
+                          <template v-for="bv in entry[1]" :key="bv">
                             <div>
                               <NuxtLink v-if="getBnodeValueDisplay(String(bv)).isInstance"
                                 :to="`/dataset/data?uri=${encodeURIComponent(String(bv))}`"
@@ -183,11 +187,17 @@ const loadingDesc = ref(true)
 const descError = ref('')
 const bnodeData = ref<Record<string, any>>({})
 
-const instanceData =
-  ref<Instance | null>(null)
+const instanceData = ref<(Instance & {
+  bnodes?: Record<string, any>
+  linked_instance_uris?: string[]
+  value_labels?: Record<string, string>
+}) | null>(null)
 
-const storeInstance =
-  computed(() => instanceData.value)
+const storeInstance = computed(() => instanceData.value)
+
+const linkedInstanceUris = computed(
+  () => new Set(storeInstance.value?.linked_instance_uris || []),
+)
 
 const instanceTypes = computed(
   () => storeInstance.value?.types || [],
@@ -215,37 +225,37 @@ const formatMime: Record<string, string> = {
 const graphLoading = ref(false)
 const graphError = ref('')
 
-const orderedPropertyKeys = computed(() => {
-  // Build set of active property URIs from the profile
-  const activePropertyUris = new Set<string>()
-  for (const entity of store.profileEntities) {
-    if (
-      entity.active &&
-      (entity.type === 'object_property' ||
-        entity.type === 'datatype_property' ||
-        entity.type === 'annotation_property')
-    ) {
-      activePropertyUris.add(entity.uri)
-    }
-  }
+const activePropertyUris = computed(() => {
+  return new Set(
+    store.profileEntities
+      .filter((entity) =>
+        entity.active &&
+        (entity.type === 'object_property' ||
+          entity.type === 'datatype_property' ||
+          entity.type === 'annotation_property')
+      )
+      .map((entity) => entity.uri),
+  )
+})
 
-  // Build a map: property URI → order
+const propertyOrderMap = computed(() => {
   const orderMap: Record<string, number> = {}
+
   for (const entity of store.profileEntities) {
-    if (
-      entity.order != null &&
-      activePropertyUris.has(entity.uri)
-    ) {
+    if (entity.order != null && activePropertyUris.value.has(entity.uri)) {
       orderMap[entity.uri] = entity.order
     }
   }
 
-  // Filter, then sort by order (unordered properties come last)
+  return orderMap
+})
+
+const orderedPropertyKeys = computed(() => {
   return Object.keys(instanceProperties.value)
-    .filter((uri) => activePropertyUris.has(uri))
+    .filter((uri) => activePropertyUris.value.has(uri))
     .sort((a, b) => {
-      const oa = orderMap[a] ?? 9999
-      const ob = orderMap[b] ?? 9999
+      const oa = propertyOrderMap.value[a] ?? 9999
+      const ob = propertyOrderMap.value[b] ?? 9999
       return oa - ob
     })
 })
@@ -272,20 +282,53 @@ const pageTitle = computed(() => {
 useHead({ title: () => pageTitle.value })
 
 function isExistingInstance(uri: string): boolean {
-  return store.instances.some((i: any) => i.uri === uri)
+  return linkedInstanceUris.value.has(uri)
 }
 
 function displayValue(uri: string): string {
   if (storeInstance.value?.label && uri === instanceUri.value) {
-    return storeInstance.value.label as string
+    return storeInstance.value.label
   }
-  const inst = store.instances.find((i: any) => i.uri === uri)
+
+  const preferredLabel = storeInstance.value?.value_labels?.[uri]
+  if (preferredLabel) return preferredLabel
+
+  const inst = store.instances.find((item: any) => item.uri === uri)
   if (inst?.label) return inst.label as string
+
+  if (isBlankNode(uri)) {
+    const bnode = bnodeData.value?.[uri]
+    if (bnode?.label) return bnode.label
+    if (bnode?.types?.length) return formatUri(bnode.types[0]) as string
+    return 'Blank node'
+  }
+
   return formatUri(uri) as string
 }
 
 function isBlankNode(uri: string): boolean {
   return uri.startsWith('urn:bnid:')
+}
+
+function getActiveBnodeProperties(
+  uri: string,
+): Array<[string, string[]]> {
+  const properties = bnodeData.value?.[uri]?.properties || {}
+
+  return Object.entries(properties)
+    .filter(([propertyUri]) => activePropertyUris.value.has(propertyUri))
+    .map(
+      ([propertyUri, values]) =>
+        [propertyUri, values as string[]] as [string, string[]],
+    )
+    .sort(([a], [b]) =>
+      (propertyOrderMap.value[a] ?? 9999) -
+      (propertyOrderMap.value[b] ?? 9999),
+    )
+}
+
+function getValueDisplayLabel(uri: string): string {
+  return displayValue(uri)
 }
 
 function showSeparator(index: number | string, length: number): boolean {
@@ -311,12 +354,6 @@ function isPassThroughBlankNode(bnodeUri: string, propertyUri: string): boolean 
   const props = bnode.properties || {}
   const propKeys = Object.keys(props)
   return propKeys.length === 1 && propKeys[0] === propertyUri
-}
-
-/** Get the display label for a value that is a URI (not a blank node). */
-function getValueDisplayLabel(uri: string): string {
-  const inst = store.instances.find((i: any) => i.uri === uri)
-  return inst?.label || formatUri(uri)
 }
 
 async function refreshView() {

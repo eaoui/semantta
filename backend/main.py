@@ -4841,53 +4841,144 @@ async def get_instance(uri: str):
     for pred in props:
         props[pred] = list(set(props[pred]))
 
-    # (blank‑node handling unchanged – keep as is)
+    # Expand blank-node descriptions recursively. Semantta represents blank
+    # nodes as urn:bnid: IRIs, so each batch can reveal another level of nodes.
     bnodes: Dict[str, dict] = {}
-    blank_node_uris = [val for vals in props.values() for val in vals if val.startswith("urn:bnid:")]
-    if blank_node_uris:
-        values = " ".join(
-            _sparql_iri(
-                u,
-                "blank-node URI",
+    blank_node_uris = {
+        value
+        for values in props.values()
+        for value in values
+        if value.startswith("urn:bnid:")
+    }
+    pending_bnodes = set(blank_node_uris)
+    visited_bnodes: Set[str] = set()
+
+    while pending_bnodes:
+        current_batch = sorted(pending_bnodes - visited_bnodes)
+        if not current_batch:
+            break
+
+        visited_bnodes.update(current_batch)
+        next_bnodes: Set[str] = set()
+
+        for offset in range(0, len(current_batch), 250):
+            batch = current_batch[offset:offset + 250]
+            values = " ".join(
+                _sparql_iri(bnode_uri, "blank-node URI")
+                for bnode_uri in batch
             )
-            for u in blank_node_uris
+            bnode_rows = await store.query(f"""
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                SELECT ?bnode ?type ?prop ?value WHERE {{
+                    VALUES ?bnode {{ {values} }}
+                    OPTIONAL {{ ?bnode a ?type . }}
+                    OPTIONAL {{ ?bnode ?prop ?value . FILTER(?prop != rdf:type) }}
+                }}
+            """)
+
+            for row in bnode_rows:
+                bnode_uri = row["bnode"]
+                if bnode_uri not in bnodes:
+                    bnodes[bnode_uri] = {
+                        "types": [],
+                        "properties": {},
+                        "label": None,
+                    }
+
+                type_uri = row.get("type")
+                if type_uri and type_uri not in bnodes[bnode_uri]["types"]:
+                    bnodes[bnode_uri]["types"].append(type_uri)
+
+                predicate = row.get("prop")
+                value = row.get("value")
+                if predicate and value:
+                    bnodes[bnode_uri]["properties"].setdefault(
+                        predicate, []
+                    ).append(value)
+
+                    if (
+                        value.startswith("urn:bnid:")
+                        and value not in visited_bnodes
+                    ):
+                        next_bnodes.add(value)
+
+        pending_bnodes = next_bnodes
+
+    for bnode in bnodes.values():
+        bnode["types"].sort()
+        for predicate, values in bnode["properties"].items():
+            bnode["properties"][predicate] = sorted(set(values))
+
+        label_values = bnode["properties"].get(str(RDFS.label), [])
+        if label_values:
+            bnode["label"] = label_values[0]
+
+    # Identify typed resource values without relying on the frontend's
+    # paginated instance list.
+    lookup_subjects = sorted({uri, *bnodes.keys()})
+    linked_instance_uris_set: Set[str] = set()
+
+    for offset in range(0, len(lookup_subjects), 250):
+        subjects = lookup_subjects[offset:offset + 250]
+        subject_values = " ".join(
+            _sparql_iri(subject, "instance URI")
+            for subject in subjects
         )
-        bnode_rows = await store.query(f"""
+        linked_rows = await store.query(f"""
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-            SELECT ?bnode ?type ?prop ?value WHERE {{
-                VALUES ?bnode {{ {values} }}
-                OPTIONAL {{ ?bnode a ?type . }}
-                OPTIONAL {{ ?bnode ?prop ?value . FILTER(?prop != rdf:type) }}
+            SELECT DISTINCT ?value WHERE {{
+                VALUES ?source {{ {subject_values} }}
+                ?source ?property ?value .
+                FILTER(?property != rdf:type && isIRI(?value))
+                ?value a ?valueType .
             }}
         """)
-        for r in bnode_rows:
-            bnode = r["bnode"]
-            if bnode not in bnodes:
-                bnodes[bnode] = {"types": [], "properties": {}, "label": None}
-            t = r.get("type")
-            if t and t not in bnodes[bnode]["types"]:
-                bnodes[bnode]["types"].append(t)
-            p = r.get("prop")
-            v = r.get("value")
-            if p and v:
-                if p == str(RDFS.label) and bnodes[bnode]["label"] is None:
-                    bnodes[bnode]["label"] = v
-                bnodes[bnode]["properties"].setdefault(p, []).append(v)
-        for bnode in bnodes:
-            for pred in bnodes[bnode]["properties"]:
-                bnodes[bnode]["properties"][pred] = list(set(bnodes[bnode]["properties"][pred]))
 
-    label_map = await store.get_instance_labels(
-        [uri],
-    )
+        linked_instance_uris_set.update(
+            row["value"]
+            for row in linked_rows
+            if row.get("value")
+            and is_valid_uri(row["value"])
+            and not row["value"].startswith("urn:bnid:")
+        )
+
+    linked_instance_uris = sorted(linked_instance_uris_set)
+
+    nested_bnode_uris = {
+        value
+        for bnode in bnodes.values()
+        for values in bnode["properties"].values()
+        for value in values
+        if value.startswith("urn:bnid:")
+    }
+    label_uris = sorted({
+        uri,
+        *linked_instance_uris,
+        *bnodes.keys(),
+        *nested_bnode_uris,
+    })
+
+    value_labels: Dict[str, str] = {}
+    for offset in range(0, len(label_uris), 250):
+        value_labels.update(
+            await store.get_instance_labels(
+                label_uris[offset:offset + 250]
+            )
+        )
+
+    for bnode_uri, bnode in bnodes.items():
+        preferred_label = value_labels.get(bnode_uri)
+        if preferred_label:
+            bnode["label"] = preferred_label
 
     return {
         "uri": uri,
         "types": types,
         "properties": props,
         "bnodes": bnodes,
-        "label": label_map.get(uri),
+        "label": value_labels.get(uri),
+        "linked_instance_uris": linked_instance_uris,
+        "value_labels": value_labels,
     }
 
 @app.put("/api/instances/{uri:path}")

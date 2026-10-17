@@ -77,11 +77,17 @@ function isPassThroughBlankNode(bnodeUri: string, propertyUri: string): boolean 
 }
 
 function getBlankNodeLabel(uri: string): string {
+    const preferredLabel = props.getDisplayLabel(uri)
+    if (preferredLabel && preferredLabel !== 'Blank node') {
+        return preferredLabel
+    }
+
     const bnode = props.bnodeData?.[uri]
     if (bnode?.types?.length) {
         return bnode.types.map((t: string) => props.formatUri(t)).join(', ')
     }
-    return 'Blank Node'
+
+    return 'Blank node'
 }
 
 // ---------- graph building ----------
