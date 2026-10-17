@@ -905,22 +905,190 @@ def process_ontology(g: Graph, filename: str) -> list:
 
     return entities
 
+def _ontology_literal(
+    graph: Graph,
+    subject,
+    predicate,
+) -> str:
+    """Return a deterministic literal value for an ontology annotation."""
+    values = [
+        value
+        for value in graph.objects(subject, predicate)
+        if isinstance(value, Literal)
+    ]
+
+    if not values:
+        return ""
+
+    values.sort(
+        key=lambda value: (
+            value.language is not None,
+            (value.language or "").casefold(),
+            str(value).casefold(),
+            str(value),
+            str(value.datatype or ""),
+        )
+    )
+
+    return str(values[0])
+
 def extract_ontology_metadata(g: Graph) -> dict:
-    meta = {"title": "", "version": "", "iri": ""}
-    for onto in g.subjects(RDF.type, OWL.Ontology):
+    """Extract metadata for the canonical ontology IRI, not its version IRI."""
+    meta = {
+        "title": "",
+        "version": "",
+        "iri": "",
+    }
+
+    ontology_nodes = {
+        subject
+        for subject in g.subjects(RDF.type, OWL.Ontology)
+        if isinstance(subject, URIRef)
+    }
+
+    # A version IRI is not the canonical ontology IRI of the ontology
+    # that declares it.
+    version_iri_targets = {
+        version_iri
+        for version_iri in g.objects(None, OWL.versionIRI)
+        if isinstance(version_iri, URIRef)
+    }
+
+    candidates = ontology_nodes - version_iri_targets
+
+    # Prefer an ontology that explicitly declares its version IRI.
+    versioned_candidates = {
+        subject
+        for subject in candidates
+        if any(
+            isinstance(value, URIRef)
+            for value in g.objects(subject, OWL.versionIRI)
+        )
+    }
+
+    if versioned_candidates:
+        candidates = versioned_candidates
+    elif not candidates:
+        candidates = ontology_nodes
+
+    if candidates:
+        # Prefer candidates with descriptive metadata. URI is the final
+        # tie-breaker so selection does not depend on RDF graph iteration.
+        def candidate_score(subject):
+            title = _ontology_literal(
+                g, subject, RDFS.label
+            )
+            version = _ontology_literal(
+                g, subject, OWL.versionInfo
+            )
+            label_count = sum(
+                1 for _ in g.objects(subject, RDFS.label)
+            )
+            version_count = sum(
+                1 for _ in g.objects(subject, OWL.versionInfo)
+            )
+
+            return (
+                bool(title),
+                bool(version),
+                label_count,
+                version_count,
+                str(subject),
+            )
+
+        onto = max(candidates, key=candidate_score)
+
         meta["iri"] = str(onto)
-        if label := g.value(onto, RDFS.label):
-            meta["title"] = str(label)
-        if ver := g.value(onto, OWL.versionInfo):
-            meta["version"] = str(ver)
-        break
-    if not meta["iri"]:
-        for s in g.subjects(RDFS.label, None):
-            if isinstance(s, URIRef):
-                meta["iri"] = str(s)
-                meta["title"] = str(g.value(s, RDFS.label))
-                break
+        meta["title"] = _ontology_literal(
+            g, onto, RDFS.label
+        )
+        meta["version"] = _ontology_literal(
+            g, onto, OWL.versionInfo
+        )
+
+        return meta
+
+    # Retain the legacy fallback for files that do not declare owl:Ontology,
+    # but make its selection deterministic and avoid choosing a version IRI.
+    labelled_subjects = sorted(
+        {
+            subject
+            for subject in g.subjects(RDFS.label, None)
+            if isinstance(subject, URIRef)
+        } - version_iri_targets,
+        key=str,
+    )
+
+    if not labelled_subjects:
+        labelled_subjects = sorted(
+            {
+                subject
+                for subject in g.subjects(RDFS.label, None)
+                if isinstance(subject, URIRef)
+            },
+            key=str,
+        )
+
+    if labelled_subjects:
+        subject = labelled_subjects[0]
+        meta["iri"] = str(subject)
+        meta["title"] = _ontology_literal(
+            g, subject, RDFS.label
+        )
+
     return meta
+
+def _load_ontology_metadata(
+    filename: str,
+    source_graph: Graph,
+) -> dict:
+    """Load saved ontology metadata or derive it from the original graph."""
+    source_path = os.path.join(ONTOLOGY_DIR, filename)
+    metadata_path = reasoned_cache_metadata_path(filename)
+    source_signature = _file_signature(source_path)
+
+    cache_metadata = {}
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as file:
+            cache_metadata = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        cache_metadata = {}
+
+    saved_metadata = cache_metadata.get("ontology_metadata")
+
+    if (
+        cache_metadata.get("source_signature") == source_signature
+        and isinstance(saved_metadata, dict)
+        and all(
+            isinstance(saved_metadata.get(key), str)
+            for key in ("title", "version", "iri")
+        )
+    ):
+        return {
+            "title": saved_metadata["title"],
+            "version": saved_metadata["version"],
+            "iri": saved_metadata["iri"],
+        }
+
+    # Legacy cache files have no persisted ontology metadata. Reconstruct it
+    # from the original graph, then save it for future startups.
+    metadata = extract_ontology_metadata(source_graph)
+
+    cache_metadata.setdefault(
+        "cache_version",
+        REASONED_CACHE_VERSION,
+    )
+    cache_metadata.setdefault(
+        "owl_vocabulary_signature",
+        _file_signature(OWL_FILE),
+    )
+    cache_metadata["source_signature"] = source_signature
+    cache_metadata["ontology_metadata"] = metadata
+
+    atomic_write_json(metadata_path, cache_metadata)
+
+    return metadata
 
 def get_property_cardinality(class_uri: str, prop_uri: str) -> dict:
     minc, maxc = _property_cardinalities.get((class_uri, prop_uri), (None, None))
@@ -3337,7 +3505,7 @@ def load_saved_ontologies():
             fmt = RDF_FORMAT_MAP.get(ext, "xml")
             unreasoned_g, g = get_reasoned_graph(path, fmt)
             entities = process_ontology(g, f)
-            meta = extract_ontology_metadata(g)
+            meta = _load_ontology_metadata(f, unreasoned_g)
             onto = {
                 "filename": f,
                 "graph": g,
@@ -3880,7 +4048,7 @@ async def upload_ontology(file: UploadFile = File(...)):
         apply_reasoning(g)
         progress["phase"] = "Extracting entities…"
         entities = process_ontology(g, "")
-        meta = extract_ontology_metadata(g)
+        meta = extract_ontology_metadata(unreasoned)
         progress["phase"] = "Saving to disk…"
         os.makedirs(ONTOLOGY_DIR, exist_ok=True)
         with open(os.path.join(ONTOLOGY_DIR, filename), 'wb') as f:
@@ -3901,6 +4069,7 @@ async def upload_ontology(file: UploadFile = File(...)):
                         os.path.join(ONTOLOGY_DIR, filename)
                     ),
                     "owl_vocabulary_signature": _file_signature(OWL_FILE),
+                    "ontology_metadata": meta,
                 },
                 mf,
                 indent=2,
