@@ -93,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import type { MetadataIntegrationStatus } from '@/types'
 import { useAppStore } from '@/stores/app'
 import ImportBox from '@/components/admin/ImportBox.vue'
@@ -102,6 +102,7 @@ import ConfirmDialog from '@/components/admin/ConfirmDialog.vue'
 import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 import { useProgress } from '@/composables/useProgress'
 import { useToast } from '@/composables/useToast'
+import { useOntologyNamespaceMatching } from '@/composables/useOntologyNamespaceMatching'
 
 const store = useAppStore()
 const api = useApi()
@@ -122,46 +123,8 @@ const loadingMsg = ref('')
 const selectedFile = ref('')
 const confirmDelete = ref(false)
 
-// Normalize only scheme and trailing namespace delimiters.
-// HTTP and HTTPS are considered equivalent for this comparison.
-function normalizeNamespaceForMatch(uri: string): string {
-  return uri
-    .replace(/^https?:\/\//i, 'http://')
-    .replace(/[\/#]+$/, '')
-}
-
-// Retain the existing base-namespace derivation and also consider the
-// ontology IRI itself, including when it omits its trailing delimiter.
-const ontologyBaseNamespaces = computed(() => {
-  const namespaces = new Set<string>()
-
-  for (const ontology of store.ontologies) {
-    const iri = ontology.iri
-    if (!iri) continue
-
-    namespaces.add(normalizeNamespaceForMatch(iri))
-
-    const idx = Math.max(
-      iri.lastIndexOf('/'),
-      iri.lastIndexOf('#'),
-    )
-
-    const baseNamespace =
-      idx >= 0 ? iri.substring(0, idx + 1) : iri
-
-    namespaces.add(
-      normalizeNamespaceForMatch(baseNamespace),
-    )
-  }
-
-  return namespaces
-})
-
-function isOntologyNamespaceMatch(namespace: string): boolean {
-  return ontologyBaseNamespaces.value.has(
-    normalizeNamespaceForMatch(namespace),
-  )
-}
+const { isOntologyNamespaceMatch } =
+  useOntologyNamespaceMatching()
 
 function upload(file: File) {
   void uploadFiles([file])

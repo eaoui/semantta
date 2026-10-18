@@ -13,8 +13,9 @@
         :version="onto.version" :description="onto.iri">
         <!-- Namespaces -->
         <div v-if="onto.namespaces.length" class="flex flex-wrap gap-1 mt-2">
-          <span v-for="ns in onto.namespaces" :key="ns"
-            class="text-xs bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-1.5 py-0.5 rounded border border-gray-300 dark:border-gray-600"
+          <span v-for="ns in onto.namespaces" :key="ns" class="text-xs px-1.5 py-0.5 rounded border" :class="isOntologyNamespaceMatch(ns)
+            ? 'bg-blue-100 dark:bg-blue-900 border-blue-400 dark:border-blue-700 text-blue-800 dark:text-blue-200'
+            : 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300'"
             :title="ns">{{ ns }}</span>
         </div>
 
@@ -48,6 +49,7 @@ import ConfirmDialog from '@/components/admin/ConfirmDialog.vue'
 import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 import { useProgress } from '@/composables/useProgress'
 import { useToast } from '@/composables/useToast'
+import { useOntologyNamespaceMatching } from '@/composables/useOntologyNamespaceMatching'
 
 const store = useAppStore()
 const apiBase = useRuntimeConfig().public.apiBase
@@ -58,6 +60,9 @@ const loadingMsg = ref('')
 const isLoading = ref(true)
 const selectedFile = ref('')
 const confirmDelete = ref(false)
+
+const { isOntologyNamespaceMatch } =
+  useOntologyNamespaceMatching()
 
 onMounted(async () => {
   if (!store.isReady) await store.fetchState()
