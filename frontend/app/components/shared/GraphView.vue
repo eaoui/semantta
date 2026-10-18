@@ -265,7 +265,7 @@ function reconcileFilterSelection(
     return next
 }
 
-function truncateLabel(label: string, maxLength = 48): string {
+function truncateLabel(label: string, maxLength = 32): string {
     if (label.length <= maxLength) return label
     return `${label.slice(0, maxLength - 3)}...`
 }
@@ -755,10 +755,6 @@ function setAllClasses(checked: boolean) {
         : new Set()
 
     applyGraphFilters()
-}
-
-function sidebarPropertyUri(uri: string): string {
-    return truncateLabel(uri, 48)
 }
 
 function rebuildGraph() {
