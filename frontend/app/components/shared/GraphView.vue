@@ -10,8 +10,8 @@
 
                 <!-- Graph toolbar -->
                 <div class="absolute top-3 right-3 z-20 flex items-center gap-2">
-                    <!-- Reset view -->
-                    <button type="button" @click="fitGraph" title="Reset view" aria-label="Reset view"
+                    <!-- Fit -->
+                    <button type="button" @click="fitGraph" title="Fit to container" aria-label="Reset view"
                         class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border border-gray-300 dark:border-gray-600 bg-white/95 dark:bg-gray-800/95 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 shadow-sm">
                         <PhosphorIcon name="frame-corners" class="h-5 w-5" aria-hidden="true" />
                     </button>
@@ -106,6 +106,44 @@
                         <span>Show blank nodes</span>
                     </label>
 
+                    <!-- Class filters -->
+                    <section class="border-t border-gray-200 dark:border-gray-700 pt-3">
+                        <div class="flex items-start justify-between gap-1 mb-2">
+                            <h3 class="text-xs font-semibold text-gray-800 dark:text-gray-100">
+                                Classes
+                            </h3>
+
+                            <div class="flex shrink-0 gap-1">
+                                <button type="button" @click="setAllClasses(true)"
+                                    class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                                    All
+                                </button>
+
+                                <button type="button" @click="setAllClasses(false)"
+                                    class="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                                    None
+                                </button>
+                            </div>
+                        </div>
+
+                        <p v-if="classFilters.length === 0" class="text-xs text-gray-500 dark:text-gray-400">
+                            No classes available.
+                        </p>
+
+                        <div v-else class="space-y-2">
+                            <label v-for="classItem in classFilters" :key="classItem.uri" :title="classItem.uri"
+                                class="flex items-start gap-2 min-w-0 cursor-pointer">
+                                <input type="checkbox" class="mt-0.5 shrink-0"
+                                    :checked="selectedClassUris.has(classItem.uri)"
+                                    @change="onClassFilterChange(classItem.uri, $event)" />
+
+                                <span class="min-w-0 break-words text-xs text-gray-700 dark:text-gray-200">
+                                    {{ classItem.label }}
+                                </span>
+                            </label>
+                        </div>
+                    </section>
+
                     <!-- Edge/property filters -->
                     <section class="border-t border-gray-200 dark:border-gray-700 pt-3">
                         <div class="flex items-start justify-between gap-1 mb-2">
@@ -165,6 +203,7 @@ const props = defineProps<{
     isBlankNode: (uri: string) => boolean
     getDisplayLabel: (uri: string) => string
     visible: boolean
+    instanceTypes: string[]
 }>()
 
 const emit = defineEmits<{
@@ -186,6 +225,17 @@ const filtersVisible = ref(true)
 const edgeProperties = ref<Array<{ uri: string; label: string }>>([])
 const selectedEdgePropertyUris = ref<Set<string>>(new Set())
 
+const graphRuntimeConfig = useRuntimeConfig()
+
+const classFilters = ref<Array<{ uri: string; label: string }>>([])
+const selectedClassUris = ref<Set<string>>(new Set())
+
+const knownEdgePropertyUris = ref<Set<string>>(new Set())
+const knownClassUris = ref<Set<string>>(new Set())
+const filterOptionsInitialized = ref(false)
+
+let filterTargetUri: string | null = null
+
 let network: Network | null = null
 let allGraphNodes: any[] = []
 let allGraphEdges: any[] = []
@@ -196,6 +246,25 @@ const nodePositions = new Map<string, { x: number; y: number }>()
 const initialized = ref(false)
 
 // ---------- helpers ----------
+function reconcileFilterSelection(
+    selected: Set<string>,
+    previouslyAvailable: Set<string>,
+    currentlyAvailable: Set<string>,
+): Set<string> {
+    const next = new Set(
+        [...selected].filter(uri => currentlyAvailable.has(uri)),
+    )
+
+    // New options start enabled; previous choices are preserved.
+    for (const uri of currentlyAvailable) {
+        if (!previouslyAvailable.has(uri)) {
+            next.add(uri)
+        }
+    }
+
+    return next
+}
+
 function truncateLabel(label: string, maxLength = 48): string {
     if (label.length <= maxLength) return label
     return `${label.slice(0, maxLength - 3)}...`
@@ -364,6 +433,47 @@ async function buildGraph() {
             }
         }
 
+        // Start with fresh filter defaults only when the graph's root changes.
+        // Rebuilding the same graph preserves the user's filter selections.
+        if (filterTargetUri !== props.instanceUri) {
+            filterTargetUri = props.instanceUri
+            filterOptionsInitialized.value = false
+
+            selectedEdgePropertyUris.value = new Set()
+            selectedClassUris.value = new Set()
+            knownEdgePropertyUris.value = new Set()
+            knownClassUris.value = new Set()
+
+            graphSearchQuery.value = ''
+        }
+
+        // Retrieve RDF types for graph nodes in batches.
+        const typesByUri: Record<string, string[]> = {}
+
+        const graphUris = Array.from(allUris)
+
+        const apiBase = String(
+            graphRuntimeConfig.public.apiBase,
+        ).replace(/\/$/, '')
+
+        try {
+            for (let offset = 0; offset < graphUris.length; offset += 250) {
+                const response = await $fetch<{
+                    types_by_uri: Record<string, string[]>
+                }>(`${apiBase}/api/instances/types-by-uri`, {
+                    method: 'POST',
+                    body: {
+                        uris: graphUris.slice(offset, offset + 250),
+                    },
+                })
+
+                Object.assign(typesByUri, response.types_by_uri)
+            }
+        } catch (error) {
+            // The graph should remain usable even if type lookup fails.
+            console.warn('Could not retrieve graph-node types:', error)
+        }
+
         // ---- nodes ----
         const nodes: any[] = []
         nodeSearchLabels.clear()
@@ -392,6 +502,11 @@ async function buildGraph() {
                         : { background: '#E5E7EB', border: '#9CA3AF' },
                 shape: isMain ? 'box' : 'ellipse',
                 size: isMain ? 30 : isBlank ? 18 : 20,
+                classes: Array.from(new Set<string>([
+                    ...(typesByUri[uri] || []),
+                    ...(uri === props.instanceUri ? props.instanceTypes || [] : []),
+                    ...(props.bnodeData?.[uri]?.types || []),
+                ])),
             })
         }
 
@@ -413,10 +528,53 @@ async function buildGraph() {
             a.label.localeCompare(b.label) || a.uri.localeCompare(b.uri),
         )
 
-        // All edge properties are enabled by default.
-        selectedEdgePropertyUris.value = new Set(
+        const classLabels = new Map<string, string>()
+
+        for (const node of nodes) {
+            for (const classUri of node.classes as string[]) {
+                classLabels.set(
+                    classUri,
+                    props.formatUri(classUri) || classUri,
+                )
+            }
+        }
+
+        classFilters.value = Array.from(
+            classLabels,
+            ([uri, label]) => ({ uri, label }),
+        ).sort((a, b) =>
+            a.label.localeCompare(b.label) ||
+            a.uri.localeCompare(b.uri),
+        )
+
+        const nextEdgeUris = new Set(
             edgeProperties.value.map(property => property.uri),
         )
+
+        const nextClassUris = new Set(
+            classFilters.value.map(item => item.uri),
+        )
+
+        if (!filterOptionsInitialized.value) {
+            selectedEdgePropertyUris.value = new Set(nextEdgeUris)
+            selectedClassUris.value = new Set(nextClassUris)
+        } else {
+            selectedEdgePropertyUris.value = reconcileFilterSelection(
+                selectedEdgePropertyUris.value,
+                knownEdgePropertyUris.value,
+                nextEdgeUris,
+            )
+
+            selectedClassUris.value = reconcileFilterSelection(
+                selectedClassUris.value,
+                knownClassUris.value,
+                nextClassUris,
+            )
+        }
+
+        knownEdgePropertyUris.value = nextEdgeUris
+        knownClassUris.value = nextClassUris
+        filterOptionsInitialized.value = true
 
         const edges: any[] = edgeDefinitions.map(edge => ({
             ...edge,
@@ -460,6 +618,7 @@ async function buildGraph() {
         }
 
         network = new Network(container, data, options)
+        applyGraphFilters()
     } catch (e: any) {
         emit('error', e.message || 'Graph creation failed')
     } finally {
@@ -467,11 +626,10 @@ async function buildGraph() {
     }
 }
 
-function applyEdgeFilters() {
+function applyGraphFilters() {
     if (!network) return
 
-    // Cache positions so hiding and restoring edges does not unnecessarily
-    // reposition nodes.
+    // Preserve positions for currently visible nodes.
     const currentPositions = network.getPositions()
 
     for (const [uri, position] of Object.entries(currentPositions)) {
@@ -481,11 +639,31 @@ function applyEdgeFilters() {
         })
     }
 
-    const visibleEdges = allGraphEdges.filter(
-        edge => selectedEdgePropertyUris.value.has(edge.propertyUri),
+    // Class filtering is applied independently of edge filtering.
+    const classEligibleUris = new Set(
+        allGraphNodes
+            .filter(node => {
+                if (node.id === props.instanceUri) return true
+
+                const classes = node.classes as string[] || []
+
+                // Untyped nodes (including blank nodes) remain visible.
+                if (classes.length === 0) return true
+
+                return classes.some(
+                    classUri => selectedClassUris.value.has(classUri),
+                )
+            })
+            .map(node => node.id),
     )
 
-    // Keep the main instance and nodes connected by currently visible edges.
+    const visibleEdges = allGraphEdges.filter(edge =>
+        selectedEdgePropertyUris.value.has(edge.propertyUri) &&
+        classEligibleUris.has(edge.from) &&
+        classEligibleUris.has(edge.to),
+    )
+
+    // Keep the root and nodes connected by the remaining edges.
     const visibleNodeUris = new Set<string>([props.instanceUri])
 
     for (const edge of visibleEdges) {
@@ -494,7 +672,13 @@ function applyEdgeFilters() {
     }
 
     const visibleNodes = allGraphNodes
-        .filter(node => visibleNodeUris.has(node.id))
+        .filter(node =>
+            node.id === props.instanceUri ||
+            (
+                classEligibleUris.has(node.id) &&
+                visibleNodeUris.has(node.id)
+            ),
+        )
         .map(node => {
             const position = nodePositions.get(node.id)
 
@@ -507,6 +691,12 @@ function applyEdgeFilters() {
         nodes: visibleNodes,
         edges: visibleEdges,
     })
+
+    // Reapply search highlighting to the filtered nodes, without changing
+    // either filter selection or the current viewport.
+    if (graphSearchQuery.value.trim()) {
+        applySearchHighlights(false)
+    }
 
     network.redraw()
 }
@@ -528,7 +718,7 @@ function onEdgePropertyChange(
     }
 
     selectedEdgePropertyUris.value = nextSelection
-    applyEdgeFilters()
+    applyGraphFilters()
 }
 
 function setAllEdgeProperties(checked: boolean) {
@@ -536,7 +726,35 @@ function setAllEdgeProperties(checked: boolean) {
         ? new Set(edgeProperties.value.map(property => property.uri))
         : new Set()
 
-    applyEdgeFilters()
+    applyGraphFilters()
+}
+
+function onClassFilterChange(
+    classUri: string,
+    event: Event,
+) {
+    const input = event.target
+
+    if (!(input instanceof HTMLInputElement)) return
+
+    const next = new Set(selectedClassUris.value)
+
+    if (input.checked) {
+        next.add(classUri)
+    } else {
+        next.delete(classUri)
+    }
+
+    selectedClassUris.value = next
+    applyGraphFilters()
+}
+
+function setAllClasses(checked: boolean) {
+    selectedClassUris.value = checked
+        ? new Set(classFilters.value.map(item => item.uri))
+        : new Set()
+
+    applyGraphFilters()
 }
 
 function sidebarPropertyUri(uri: string): string {
@@ -549,26 +767,46 @@ function rebuildGraph() {
 }
 
 // ---------- control functions ----------
-function handleGraphSearch() {
+function applySearchHighlights(fitMatches: boolean) {
     if (!network) return
-    const q = graphSearchQuery.value.toLowerCase().trim()
-    if (!q) {
+
+    const query = graphSearchQuery.value.toLowerCase().trim()
+
+    if (!query) {
         network.selectNodes([])
-        network.fit({ animation: true })
+
+        if (fitMatches) {
+            network.fit({ animation: true })
+        }
+
         return
     }
-    const visibleNodes = (network as any).body.data.nodes.get()
 
-    const found = visibleNodes.find((node: any) => {
-        const label = nodeSearchLabels.get(node.id) || node.label || ''
-        return label.toLowerCase().includes(q)
-    })
-    if (found) {
-        network.selectNodes([found.id])
-        network.focus(found.id, { scale: 1.2, animation: true })
-    } else {
-        network.selectNodes([])
+    // Search full labels, not the labels shortened for display.
+    const visibleNodes = (
+        network as any
+    ).body.data.nodes.get() as Array<{ id: string; label?: string }>
+
+    const matchingIds = visibleNodes
+        .filter(node => {
+            const fullLabel = nodeSearchLabels.get(node.id) || node.label || ''
+            return fullLabel.toLowerCase().includes(query)
+        })
+        .map(node => node.id)
+
+    // Select all matches, not just the first result.
+    network.selectNodes(matchingIds)
+
+    if (fitMatches && matchingIds.length > 0) {
+        network.fit({
+            nodes: matchingIds,
+            animation: true,
+        })
     }
+}
+
+function handleGraphSearch() {
+    applySearchHighlights(true)
 }
 
 function togglePhysics() {

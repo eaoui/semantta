@@ -116,8 +116,9 @@
       <div v-if="graphLoading" class="text-gray-500 dark:text-gray-400">Building graph…</div>
       <div v-else-if="graphError" class="text-red-600 dark:text-red-400">{{ graphError }}</div>
       <GraphView v-show="activeTab === 'graph'" :visible="activeTab === 'graph'" :instanceUri="instanceUri"
-        :instanceProperties="instanceProperties" :bnodeData="bnodeData" :formatUri="formatUri"
-        :isBlankNode="isBlankNode" :getDisplayLabel="displayValue" @loading="onGraphLoading" @error="onGraphError" />
+        :instanceTypes="instanceTypes" :instanceProperties="instanceProperties" :bnodeData="bnodeData"
+        :formatUri="formatUri" :isBlankNode="isBlankNode" :getDisplayLabel="displayValue" @loading="onGraphLoading"
+        @error="onGraphError" />
     </div>
 
     <!-- Syntax tab -->

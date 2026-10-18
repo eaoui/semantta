@@ -4925,6 +4925,73 @@ async def list_instance_types():
         "types": await store.get_instance_types()
     }
 
+@app.post("/api/instances/types-by-uri")
+async def list_instance_types_by_uri(
+    data: Dict[str, List[str]],
+):
+    """Return RDF types for a batch of graph-node URIs."""
+    raw_uris = data.get("uris")
+
+    if raw_uris is None:
+        raise HTTPException(
+            400,
+            "The request must contain a list of URIs.",
+        )
+
+    if len(raw_uris) > 5000:
+        raise HTTPException(
+            400,
+            "A maximum of 5000 URIs may be queried at once.",
+        )
+
+    uris = list(dict.fromkeys(raw_uris))
+
+    for uri in uris:
+        if not is_valid_uri(uri):
+            raise HTTPException(
+                400,
+                f"Invalid instance URI: {uri}",
+            )
+
+    types_by_uri: Dict[str, List[str]] = {
+        uri: [] for uri in uris
+    }
+
+    # Keep each SPARQL VALUES clause reasonably small.
+    for offset in range(0, len(uris), 250):
+        batch = uris[offset:offset + 250]
+        values = " ".join(
+            _sparql_iri(uri, "instance URI")
+            for uri in batch
+        )
+
+        rows = await store.query(f"""
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+            SELECT DISTINCT ?instance ?type
+            WHERE {{
+                VALUES ?instance {{ {values} }}
+                ?instance rdf:type ?type .
+                FILTER(ISIRI(?type))
+            }}
+        """)
+
+        for row in rows:
+            instance_uri = row.get("instance")
+            type_uri = row.get("type")
+
+            if (
+                instance_uri in types_by_uri
+                and type_uri
+                and type_uri not in types_by_uri[instance_uri]
+            ):
+                types_by_uri[instance_uri].append(type_uri)
+
+    for types in types_by_uri.values():
+        types.sort()
+
+    return {"types_by_uri": types_by_uri}
+
 @app.get("/api/instances/{uri:path}/syntax")
 async def get_instance_syntax(uri: str, format: str = "turtle"):
     uri_ref = _sparql_iri(
