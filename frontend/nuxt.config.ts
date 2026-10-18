@@ -4,6 +4,13 @@ import path from 'path'
 
 // ── Development-time active theme detection ───────────────────────────
 
+const packageMetadata = JSON.parse(
+  fs.readFileSync(
+    path.resolve(__dirname, 'package.json'),
+    'utf-8',
+  ),
+) as { version?: string }
+
 const dataDir = path.resolve(__dirname, '..', 'data')
 
 const activeThemeFile = path.join(
@@ -60,6 +67,7 @@ export default defineNuxtConfig({
       apiBase: (
         process.env.NUXT_PUBLIC_API_BASE || 'http://localhost:8000'
       ).replace(/\/+$/, ''),
+      appVersion: packageMetadata.version ?? 'unknown',
     },
   },
 
