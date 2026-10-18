@@ -95,3 +95,63 @@ def test_saved_ontology_metadata_is_reused_after_reload(
     )
 
     assert reloaded_metadata == original_metadata
+
+
+def test_dc_title_is_used_when_rdfs_label_is_missing():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((
+        ontology_iri,
+        main.DC_TITLE,
+        Literal("Example Catalog"),
+    ))
+
+    metadata = main.extract_ontology_metadata(graph)
+
+    assert metadata["title"] == "Example Catalog"
+
+
+def test_rdfs_label_is_preferred_over_dc_title():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((
+        ontology_iri,
+        RDFS.label,
+        Literal("Preferred RDFS label"),
+    ))
+    graph.add((
+        ontology_iri,
+        main.DC_TITLE,
+        Literal("Alternative DC title"),
+    ))
+
+    metadata = main.extract_ontology_metadata(graph)
+
+    assert metadata["title"] == "Preferred RDFS label"
+
+
+def test_rdfs_label_subproperty_is_preferred_over_dc_title():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+    custom_label = URIRef("https://example.org/vocab/displayLabel")
+
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((custom_label, RDFS.subPropertyOf, RDFS.label))
+    graph.add((
+        ontology_iri,
+        custom_label,
+        Literal("Custom label"),
+    ))
+    graph.add((
+        ontology_iri,
+        main.DC_TITLE,
+        Literal("Alternative DC title"),
+    ))
+
+    metadata = main.extract_ontology_metadata(graph)
+
+    assert metadata["title"] == "Custom label"

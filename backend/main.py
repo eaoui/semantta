@@ -975,20 +975,26 @@ def extract_ontology_metadata(g: Graph) -> dict:
         # Prefer candidates with descriptive metadata. URI is the final
         # tie-breaker so selection does not depend on RDF graph iteration.
         def candidate_score(subject):
-            title = _ontology_literal(
-                g, subject, RDFS.label
+            rdfs_title = _ontology_rdfs_label(g, subject)
+            title = rdfs_title or _ontology_literal(
+                g, subject, DC_TITLE
             )
             version = _ontology_literal(
                 g, subject, OWL.versionInfo
             )
+
+            label_predicates = _ontology_rdfs_label_predicates(g)
             label_count = sum(
-                1 for _ in g.objects(subject, RDFS.label)
+                1
+                for predicate in label_predicates
+                for _ in g.objects(subject, predicate)
             )
             version_count = sum(
                 1 for _ in g.objects(subject, OWL.versionInfo)
             )
 
             return (
+                bool(rdfs_title),
                 bool(title),
                 bool(version),
                 label_count,
@@ -999,9 +1005,7 @@ def extract_ontology_metadata(g: Graph) -> dict:
         onto = max(candidates, key=candidate_score)
 
         meta["iri"] = str(onto)
-        meta["title"] = _ontology_literal(
-            g, onto, RDFS.label
-        )
+        meta["title"] = _preferred_ontology_title(g, onto)
         meta["version"] = _ontology_literal(
             g, onto, OWL.versionInfo
         )
@@ -1037,6 +1041,62 @@ def extract_ontology_metadata(g: Graph) -> dict:
         )
 
     return meta
+
+DC_TITLE = URIRef(
+    "http://purl.org/dc/elements/1.1/title"
+)
+
+ONTOLOGY_METADATA_VERSION = 2
+
+
+def _ontology_rdfs_label_predicates(g: Graph) -> set[URIRef]:
+    """Return rdfs:label and all declared transitive subproperties."""
+    predicates: set[URIRef] = {RDFS.label}
+
+    changed = True
+    while changed:
+        changed = False
+
+        for subproperty, superproperty in g.subject_objects(
+            RDFS.subPropertyOf
+        ):
+            if (
+                isinstance(subproperty, URIRef)
+                and superproperty in predicates
+                and subproperty not in predicates
+            ):
+                predicates.add(subproperty)
+                changed = True
+
+    return predicates
+
+
+def _ontology_rdfs_label(g: Graph, subject) -> str:
+    """Prefer rdfs:label, then a declared subproperty of rdfs:label."""
+    direct_label = _ontology_literal(g, subject, RDFS.label)
+    if direct_label:
+        return direct_label
+
+    subproperties = sorted(
+        _ontology_rdfs_label_predicates(g) - {RDFS.label},
+        key=str,
+    )
+
+    for predicate in subproperties:
+        label = _ontology_literal(g, subject, predicate)
+        if label:
+            return label
+
+    return ""
+
+
+def _preferred_ontology_title(g: Graph, subject) -> str:
+    """Prefer an RDFS-derived label; otherwise use dc:title."""
+    label = _ontology_rdfs_label(g, subject)
+    if label:
+        return label
+
+    return _ontology_literal(g, subject, DC_TITLE)
 
 def _load_ontology_metadata(
     filename: str,
