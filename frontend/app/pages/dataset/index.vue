@@ -4,76 +4,68 @@
       Dataset
     </h2>
 
-    <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-      Showing
-      <template v-if="store.instanceTotal">
-        {{ pageStart }}–{{ pageEnd }}
-        of {{ store.instanceTotal }}
-      </template>
-      <template v-else>
-        0
-      </template>
-      instance(s).
-    </p>
+    <div class="flex flex-col md:flex-row gap-6 items-start">
+      <main class="w-full min-w-0 flex-1">
 
-    <div class="mb-4 max-w-md">
-      <SearchBox v-model="searchQuery" placeholder="Search dataset…" />
+        <div v-if="store.instancesLoading" class="text-gray-500 dark:text-gray-400">
+          Loading…
+        </div>
+
+        <p v-else-if="store.instancesError" class="text-red-600 dark:text-red-400">
+          {{ store.instancesError }}
+        </p>
+
+        <div v-else-if="store.instances.length">
+          <table class="w-full border-collapse border border-gray-300 dark:border-gray-600">
+            <thead>
+              <tr class="bg-gray-50 dark:bg-gray-700">
+                <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
+                  Name
+                </th>
+
+                <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
+                  Types
+                </th>
+              </tr>
+            </thead>
+
+            <tbody>
+              <tr v-for="inst in store.instances" :key="inst.uri" class="hover:bg-gray-50 dark:hover:bg-gray-800">
+                <td class="border border-gray-300 dark:border-gray-600 p-2 text-sm">
+                  <NuxtLink v-if="inst.uri && inst.uri !== 'undefined'"
+                    :to="`/dataset/data?uri=${encodeURIComponent(inst.uri)}`"
+                    class="text-blue-600 dark:text-blue-400 hover:underline block leading-6">
+                    {{ instanceDisplayName(inst) }}
+                  </NuxtLink>
+                </td>
+
+                <td class="border border-gray-300 dark:border-gray-600 p-2 text-sm text-gray-700 dark:text-gray-300">
+                  <div class="flex flex-col items-start gap-1">
+                    <a v-for="typeUri in inst.types" :key="typeUri" :href="typeUri" target="_blank"
+                      rel="noopener noreferrer" class="block hover:underline">
+                      {{ formatUri(typeUri) }}
+                    </a>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <Pagination :current-page="currentPage" :has-next="store.instancesHasMore" :loading="store.instancesLoading"
+            @page-change="goToPage" />
+        </div>
+
+        <p v-else class="text-gray-500 dark:text-gray-400">
+          No instances available.
+        </p>
+      </main>
+
+      <InstanceFilterSidebar mode="dataset" v-model:search="searchQuery" v-model:selected-type="selectedType"
+        :search-placeholder="'Search dataset…'" :type-options="typeOptions" :page-start="pageStart" :page-end="pageEnd"
+        :total="store.instanceTotal" :has-non-countable-filters="hasNonCountableFilters"
+        :show-count="!store.instancesLoading && !store.instancesError && store.instances.length > 0" />
+
     </div>
-
-    <div v-if="store.instancesLoading" class="text-gray-500 dark:text-gray-400">
-      Loading…
-    </div>
-
-    <p v-else-if="store.instancesError" class="text-red-600 dark:text-red-400">
-      {{ store.instancesError }}
-    </p>
-
-    <div v-else-if="store.instances.length">
-      <table class="w-full border-collapse border border-gray-300 dark:border-gray-600">
-        <thead>
-          <tr class="bg-gray-50 dark:bg-gray-700">
-            <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
-              Name
-            </th>
-
-            <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
-              Types
-            </th>
-          </tr>
-        </thead>
-
-        <tbody>
-          <tr v-for="inst in store.instances" :key="inst.uri" class="hover:bg-gray-50 dark:hover:bg-gray-800">
-            <td class="border border-gray-300 dark:border-gray-600 p-2 text-sm">
-              <NuxtLink v-if="inst.uri && inst.uri !== 'undefined'"
-                :to="`/dataset/data?uri=${encodeURIComponent(inst.uri)}`"
-                class="text-blue-600 dark:text-blue-400 hover:underline block leading-6">
-                {{ instanceDisplayName(inst) }}
-              </NuxtLink>
-            </td>
-
-            <td class="border border-gray-300 dark:border-gray-600 p-2 text-sm text-gray-700 dark:text-gray-300">
-              <template v-for="(t, idx) in inst.types" :key="t">
-                <a :href="t" target="_blank" rel="noopener noreferrer" class="hover:underline">
-                  {{ formatUri(t) }}
-                </a>
-
-                <span v-if="idx < inst.types.length - 1">
-                  ,
-                </span>
-              </template>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <Pagination :current-page="currentPage" :has-next="store.instancesHasMore" :loading="store.instancesLoading"
-        @page-change="goToPage" />
-    </div>
-
-    <p v-else class="text-gray-500 dark:text-gray-400">
-      No instances available.
-    </p>
   </div>
 </template>
 
@@ -87,13 +79,28 @@ import {
 
 import { useAppStore } from '@/stores/app'
 import { usePublicDisplay } from '@/composables/usePublicDisplay'
-import SearchBox from '@/components/shared/SearchBox.vue'
+import InstanceFilterSidebar from '@/components/shared/InstanceFilterSidebar.vue'
 import Pagination from '@/components/shared/Pagination.vue'
 
 const store = useAppStore()
 const { formatUri } = usePublicDisplay()
+const { fetchInstanceTypes } = useApi()
 
-const pageSize = 50
+const uniqueTypes = ref<string[]>([])
+const selectedType = ref('')
+
+const typeOptions = computed(() =>
+  uniqueTypes.value.map(uri => ({
+    uri,
+    label: formatUri(uri) || uri,
+  })),
+)
+
+const hasNonCountableFilters = computed(() =>
+  Boolean(searchQuery.value.trim() || selectedType.value),
+)
+
+const pageSize = 32
 const currentPage = ref(1)
 const pageCursors = ref<(string | null)[]>([null])
 const searchQuery = ref('')
@@ -127,6 +134,7 @@ async function loadInstances() {
     limit: pageSize,
     cursor: cursor || undefined,
     search: searchQuery.value,
+    typeUri: selectedType.value || undefined,
     includeBlankNodes:
       store.publicShowBlankNodes,
   })
@@ -153,15 +161,27 @@ async function goToPage(page: number) {
   await loadInstances()
 }
 
-watch(searchQuery, async () => {
-  pageCursors.value = [null]
+watch(
+  [searchQuery, selectedType],
+  async () => {
+    pageCursors.value = [null]
 
-  if (currentPage.value !== 1) {
-    currentPage.value = 1
+    if (currentPage.value !== 1) {
+      currentPage.value = 1
+    }
+
+    await loadInstances()
+  },
+)
+
+async function loadTypes() {
+  try {
+    const data = await fetchInstanceTypes()
+    uniqueTypes.value = data.types
+  } catch (error) {
+    console.error('Failed to load instance types:', error)
   }
-
-  await loadInstances()
-})
+}
 
 onMounted(async () => {
   if (!store.isReady) {
@@ -169,6 +189,7 @@ onMounted(async () => {
   }
 
   await Promise.all([
+    loadTypes(),
     store.refreshInstanceCount(
       store.publicShowBlankNodes,
     ),
