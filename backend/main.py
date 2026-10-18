@@ -6223,6 +6223,39 @@ async def get_raw_ontology(filename: str):
 
     return FileResponse(filepath)
 
+@app.post("/api/admin/cache/clear")
+async def clear_all_caches():
+    """Clear persistent cache files and invalidate derived in-memory caches."""
+    try:
+        if CACHE_DIR.exists():
+            for entry in CACHE_DIR.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        clear_metadata_graph_stats()
+        invalidate_instance_count()
+        invalidate_everything()
+
+        logger.info("Application caches cleared successfully")
+
+        return {
+            "status": "ok",
+            "message": (
+                "Cache files cleared and derived ontology indexes rebuilt."
+            ),
+        }
+
+    except Exception as exc:
+        logger.exception("Failed to clear application caches")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clear caches.",
+        ) from exc
+
 @app.post("/api/admin/purge")
 async def purge_all_data():
     try: await store.update("CLEAR ALL")
