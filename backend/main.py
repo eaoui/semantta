@@ -1012,34 +1012,6 @@ def extract_ontology_metadata(g: Graph) -> dict:
 
         return meta
 
-    # Retain the legacy fallback for files that do not declare owl:Ontology,
-    # but make its selection deterministic and avoid choosing a version IRI.
-    labelled_subjects = sorted(
-        {
-            subject
-            for subject in g.subjects(RDFS.label, None)
-            if isinstance(subject, URIRef)
-        } - version_iri_targets,
-        key=str,
-    )
-
-    if not labelled_subjects:
-        labelled_subjects = sorted(
-            {
-                subject
-                for subject in g.subjects(RDFS.label, None)
-                if isinstance(subject, URIRef)
-            },
-            key=str,
-        )
-
-    if labelled_subjects:
-        subject = labelled_subjects[0]
-        meta["iri"] = str(subject)
-        meta["title"] = _ontology_literal(
-            g, subject, RDFS.label
-        )
-
     return meta
 
 DC_TITLE = URIRef(
@@ -1131,19 +1103,12 @@ def _load_ontology_metadata(
             "iri": saved_metadata["iri"],
         }
 
-    # Legacy cache files have no persisted ontology metadata. Reconstruct it
-    # from the original graph, then save it for future startups.
     metadata = extract_ontology_metadata(source_graph)
 
-    cache_metadata.setdefault(
-        "cache_version",
-        REASONED_CACHE_VERSION,
-    )
-    cache_metadata.setdefault(
-        "owl_vocabulary_signature",
-        _file_signature(OWL_FILE),
-    )
+    cache_metadata["cache_version"] = REASONED_CACHE_VERSION
+    cache_metadata["owl_vocabulary_signature"] = _file_signature(OWL_FILE)
     cache_metadata["source_signature"] = source_signature
+    cache_metadata["ontology_metadata_version"] = ONTOLOGY_METADATA_VERSION
     cache_metadata["ontology_metadata"] = metadata
 
     atomic_write_json(metadata_path, cache_metadata)
