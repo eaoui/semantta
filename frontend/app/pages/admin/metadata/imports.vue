@@ -29,7 +29,7 @@
             Instances: {{ mf.instances_count }} · Triples: {{ mf.triples_count }}
           </p>
           <div class="flex flex-wrap gap-1 mt-2">
-            <span v-for="ns in mf.namespaces" :key="ns" class="text-xs px-1.5 py-0.5 rounded border" :class="ontologyBaseNamespaces.includes(ns)
+            <span v-for="ns in mf.namespaces" :key="ns" class="text-xs px-1.5 py-0.5 rounded border" :class="isOntologyNamespaceMatch(ns)
               ? 'bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700 text-green-800 dark:text-green-200'
               : 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300'"
               :title="ns">{{ ns }}</span>
@@ -122,13 +122,46 @@ const loadingMsg = ref('')
 const selectedFile = ref('')
 const confirmDelete = ref(false)
 
-// Ontology base namespaces (derived from each ontology's IRI)
-const ontologyBaseNamespaces = computed(() =>
-  store.ontologies.map((onto) => {
-    const idx = Math.max(onto.iri.lastIndexOf('/'), onto.iri.lastIndexOf('#'))
-    return idx >= 0 ? onto.iri.substring(0, idx + 1) : onto.iri
-  })
-)
+// Normalize only scheme and trailing namespace delimiters.
+// HTTP and HTTPS are considered equivalent for this comparison.
+function normalizeNamespaceForMatch(uri: string): string {
+  return uri
+    .replace(/^https?:\/\//i, 'http://')
+    .replace(/[\/#]+$/, '')
+}
+
+// Retain the existing base-namespace derivation and also consider the
+// ontology IRI itself, including when it omits its trailing delimiter.
+const ontologyBaseNamespaces = computed(() => {
+  const namespaces = new Set<string>()
+
+  for (const ontology of store.ontologies) {
+    const iri = ontology.iri
+    if (!iri) continue
+
+    namespaces.add(normalizeNamespaceForMatch(iri))
+
+    const idx = Math.max(
+      iri.lastIndexOf('/'),
+      iri.lastIndexOf('#'),
+    )
+
+    const baseNamespace =
+      idx >= 0 ? iri.substring(0, idx + 1) : iri
+
+    namespaces.add(
+      normalizeNamespaceForMatch(baseNamespace),
+    )
+  }
+
+  return namespaces
+})
+
+function isOntologyNamespaceMatch(namespace: string): boolean {
+  return ontologyBaseNamespaces.value.has(
+    normalizeNamespaceForMatch(namespace),
+  )
+}
 
 function upload(file: File) {
   void uploadFiles([file])
