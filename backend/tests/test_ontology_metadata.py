@@ -155,3 +155,60 @@ def test_rdfs_label_subproperty_is_preferred_over_dc_title():
     metadata = main.extract_ontology_metadata(graph)
 
     assert metadata["title"] == "Custom label"
+
+def test_dcterms_title_is_used_when_dc_title_is_missing():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((
+        ontology_iri,
+        main.DCTERMS_TITLE,
+        Literal("Example Catalog"),
+    ))
+
+    metadata = main.extract_ontology_metadata(graph)
+
+    assert metadata["title"] == "Example Catalog"
+
+
+def test_dc_title_is_preferred_over_dcterms_title():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((
+        ontology_iri,
+        main.DC_TITLE,
+        Literal("DC Elements title"),
+    ))
+    graph.add((
+        ontology_iri,
+        main.DCTERMS_TITLE,
+        Literal("DC Terms title"),
+    ))
+
+    metadata = main.extract_ontology_metadata(graph)
+
+    assert metadata["title"] == "DC Elements title"
+
+
+def test_ontology_iri_namespace_is_excluded():
+    graph = Graph()
+    ontology_iri = URIRef("https://example.org/catalog")
+
+    graph.bind("catalog", "https://example.org/catalog/")
+    graph.add((ontology_iri, RDF.type, OWL.Ontology))
+    graph.add((
+        URIRef("https://example.org/catalog/Book"),
+        RDF.type,
+        OWL.Class,
+    ))
+
+    namespaces = main.get_ontology_namespaces(graph)
+
+    assert not any(
+        main._normalize_namespace_delimiters(namespace)
+        == main._normalize_namespace_delimiters(str(ontology_iri))
+        for namespace in namespaces
+    )

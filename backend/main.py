@@ -1135,9 +1135,9 @@ def extract_ontology_metadata(g: Graph) -> dict:
         # tie-breaker so selection does not depend on RDF graph iteration.
         def candidate_score(subject):
             rdfs_title = _ontology_rdfs_label(g, subject)
-            title = rdfs_title or _ontology_literal(
-                g, subject, DC_TITLE
-            )
+            dc_title = _ontology_literal(g, subject, DC_TITLE)
+            dcterms_title = _ontology_literal(g, subject, DCTERMS_TITLE)
+            title = rdfs_title or dc_title or dcterms_title
             version = _ontology_literal(
                 g, subject, OWL.versionInfo
             )
@@ -1177,7 +1177,9 @@ DC_TITLE = URIRef(
     "http://purl.org/dc/elements/1.1/title"
 )
 
-ONTOLOGY_METADATA_VERSION = 2
+DCTERMS_TITLE = URIRef(
+    "http://purl.org/dc/terms/title"
+)
 
 
 def _ontology_rdfs_label_predicates(g: Graph) -> set[URIRef]:
@@ -1222,12 +1224,16 @@ def _ontology_rdfs_label(g: Graph, subject) -> str:
 
 
 def _preferred_ontology_title(g: Graph, subject) -> str:
-    """Prefer an RDFS-derived label; otherwise use dc:title."""
+    """Prefer RDFS labels, then DC Elements title, then DCMI Terms title."""
     label = _ontology_rdfs_label(g, subject)
     if label:
         return label
 
-    return _ontology_literal(g, subject, DC_TITLE)
+    dc_title = _ontology_literal(g, subject, DC_TITLE)
+    if dc_title:
+        return dc_title
+
+    return _ontology_literal(g, subject, DCTERMS_TITLE)
 
 def _load_ontology_metadata(
     filename: str,
@@ -1264,11 +1270,12 @@ def _load_ontology_metadata(
 
     metadata = extract_ontology_metadata(source_graph)
 
-    cache_metadata["cache_version"] = REASONED_CACHE_VERSION
-    cache_metadata["owl_vocabulary_signature"] = _file_signature(OWL_FILE)
-    cache_metadata["source_signature"] = source_signature
-    cache_metadata["ontology_metadata_version"] = ONTOLOGY_METADATA_VERSION
-    cache_metadata["ontology_metadata"] = metadata
+    cache_metadata = {
+        "cache_version": REASONED_CACHE_VERSION,
+        "source_signature": source_signature,
+        "owl_vocabulary_signature": _file_signature(OWL_FILE),
+        "ontology_metadata": metadata,
+    }
 
     atomic_write_json(metadata_path, cache_metadata)
 
@@ -1290,6 +1297,10 @@ def _get_property_type(prop_uri: str) -> str:
             return "datatype"
     return "object"
 
+def _normalize_namespace_delimiters(uri: str) -> str:
+    """Remove trailing namespace delimiters for comparison only."""
+    return re.sub(r"[/#]+$", "", uri)
+
 def get_ontology_namespaces(g: Graph) -> List[str]:
     known_ns = {str(ns) for _, ns in g.namespace_manager.namespaces() if ns}
     used_ns = set()
@@ -1307,6 +1318,21 @@ def get_ontology_namespaces(g: Graph) -> List[str]:
                 if uri.startswith(ns):
                     used_ns.add(ns)
                     break
+                
+    ontology_iri = extract_ontology_metadata(g).get("iri", "")
+
+    if ontology_iri:
+        normalized_ontology_iri = _normalize_namespace_delimiters(
+            ontology_iri
+        )
+
+        used_ns = {
+            namespace
+            for namespace in used_ns
+            if _normalize_namespace_delimiters(namespace)
+            != normalized_ontology_iri
+        }
+
     return sorted(used_ns)
 
 
