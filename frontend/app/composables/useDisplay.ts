@@ -16,13 +16,18 @@ export const useDisplay = () => {
     }
 
     if (fmt === 'prefix') {
-      const pm = store.prefixMap
-      for (const ns in pm) {
-        if (uri.startsWith(ns)) {
-          const local = uri.slice(ns.length)
-          const prefix = pm[ns]!            // safe – we're iterating over defined keys
-          return local ? `${prefix}:${local}` : prefix
-        }
+      const entries = Object.entries(store.prefixMap)
+        .sort(([namespaceA], [namespaceB]) =>
+          namespaceB.length - namespaceA.length,
+        )
+
+      for (const [namespace, prefix] of entries) {
+        if (!namespace || !uri.startsWith(namespace)) continue
+
+        const local = uri.slice(namespace.length)
+
+        if (local) return `${prefix}:${local}`
+        return prefix
       }
     }
 

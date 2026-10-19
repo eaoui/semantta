@@ -330,6 +330,7 @@ state = {
     "ontologies": [],
     "combined_onto_graph": Graph(),
     "prefix_map": {},
+    "display_prefix_map": {},
     "instances": [],
     "instance_count_cache": {},
     "display_format": "iri",
@@ -703,6 +704,107 @@ def update_prefix_map(g: Graph, prefix_map: dict):
     for prefix, ns in g.namespace_manager.namespaces():
         if ns not in prefix_map:
             prefix_map[ns] = prefix
+
+def _generated_display_prefix(
+    namespace: str,
+    used_prefixes: set[str],
+) -> str:
+    """Generate a stable, valid display prefix for an unmapped namespace."""
+    base = namespace.rstrip("/#:")
+    segments = re.split(r"[/#:]", base)
+
+    candidate = next(
+        (
+            segment
+            for segment in reversed(segments)
+            if segment and not segment.isdigit()
+        ),
+        "ns",
+    )
+
+    candidate = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate)
+    candidate = candidate.strip("_-") or "ns"
+
+    if not re.match(r"^[A-Za-z_]", candidate):
+        candidate = f"ns_{candidate}"
+
+    candidate = candidate[:32]
+
+    if candidate in used_prefixes:
+        suffix = hashlib.sha256(
+            namespace.encode("utf-8")
+        ).hexdigest()[:6]
+        candidate = f"{candidate[:25]}_{suffix}"
+
+        counter = 2
+        while candidate in used_prefixes:
+            candidate = f"{candidate[:28]}_{counter}"
+            counter += 1
+
+    return candidate
+
+
+def build_display_prefix_map() -> dict[str, str]:
+    """
+    Extend declared namespace bindings with generated prefixes for ontology
+    namespaces that RDFLib could not match to an existing binding.
+
+    This mapping is for URI display only. It does not modify the internal
+    namespace map used by RDF and SHACL operations.
+    """
+    display_map = {
+        str(namespace): str(prefix)
+        for namespace, prefix in state["prefix_map"].items()
+    }
+    used_prefixes = set(display_map.values())
+    missing_namespaces: set[str] = set()
+
+    for ontology in state["ontologies"]:
+        graph = ontology.get("graph")
+
+        if not isinstance(graph, Graph):
+            continue
+
+        for subject, predicate, obj in graph:
+            for term in (subject, predicate, obj):
+                if not isinstance(term, URIRef):
+                    continue
+
+                uri = str(term)
+
+                # These are Semantta-generated identifiers, not ontology
+                # vocabulary terms that need display prefixes.
+                if uri.startswith(("urn:bnid:", "urn:shape:")):
+                    continue
+
+                try:
+                    namespace, local_name = split_uri(uri)
+                except ValueError:
+                    continue
+
+                namespace = str(namespace)
+
+                if namespace and local_name and namespace not in display_map:
+                    missing_namespaces.add(namespace)
+
+    # Stable ordering prevents upload order from affecting generated prefixes.
+    for namespace in sorted(missing_namespaces):
+        if namespace in display_map:
+            continue
+
+        prefix = _generated_display_prefix(
+            namespace,
+            used_prefixes,
+        )
+
+        display_map[namespace] = prefix
+        used_prefixes.add(prefix)
+
+    return display_map
+
+def refresh_display_prefix_map() -> None:
+    """Refresh display-only prefixes after ontology state changes."""
+    state["display_prefix_map"] = build_display_prefix_map()
 
 @lru_cache(maxsize=1024)
 def _cached_label(uri: str) -> str:
@@ -3577,6 +3679,7 @@ def get_reasoned_graph(original_path: str, fmt: str) -> tuple[Graph, Graph]:
 
 def load_saved_ontologies():
     if not os.path.isdir(ONTOLOGY_DIR):
+        refresh_display_prefix_map()
         return
     for f in os.listdir(ONTOLOGY_DIR):
         if not f.endswith(('.rdf','.owl','.xml','.ttl','.nt','.jsonld','.json','.trig','.trix')):
@@ -3603,6 +3706,8 @@ def load_saved_ontologies():
             update_prefix_map(g, state["prefix_map"])
         except Exception as e:
             logger.warning("Could not load ontology %s: %s", f, e, exc_info=True)
+
+    refresh_display_prefix_map()
 
 async def ensure_metadata_named_graphs():
     """
@@ -4087,7 +4192,7 @@ async def get_state():
         instances=[],
         instance_count=instance_count,
         display_format=state["display_format"],
-        prefix_map=state["prefix_map"],
+        prefix_map=state["display_prefix_map"],
         public_display_blank_nodes=public_display_blank_nodes,
         ontology_namespaces=sorted(
             state["all_ontology_namespaces"]
@@ -4199,6 +4304,7 @@ async def upload_ontology(file: UploadFile = File(...)):
     for t in g:
         state["combined_onto_graph"].add(t)
     update_prefix_map(g, state["prefix_map"])
+    refresh_display_prefix_map()
     for e in entities:
         await ap.resolve_entity_with_ontology(e["uri"])
     invalidate_caches()
@@ -4261,6 +4367,7 @@ async def delete_ontology(filename: str):
     for o in state["ontologies"]:
         for t in o["graph"]: state["combined_onto_graph"].add(t)
         update_prefix_map(o["graph"], state["prefix_map"])
+    refresh_display_prefix_map()
     state["all_ontology_namespaces"].clear()
     for o in state["ontologies"]:
         if "namespaces" in o: state["all_ontology_namespaces"].update(o["namespaces"])
@@ -6472,6 +6579,7 @@ async def purge_all_data():
     state["base_iri"] = ""
     await rebuild_used_uris()
     add_default_prefixes()
+    refresh_display_prefix_map()
     await seed_core_active_entities()
     return {"status": "ok", "message": "All data purged. System reset to factory mode."}
 
