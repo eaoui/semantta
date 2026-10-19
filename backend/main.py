@@ -413,36 +413,85 @@ def _is_iri_value(value: object) -> bool:
         ("http://", "https://", "urn:")
     )
 
-def _require_safe_path_component(name: str | None, label: str = "name") -> str:
-    """
-    Raise HTTP 400 if *name* contains characters that could be used
-    for path traversal (``..``, ``/``, ``\\``) or other unsafe chars.
-    Returns the sanitised string on success.
-    """
-    if not name or not name.strip():
-        raise HTTPException(400, f"{label} must not be empty")
-    if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or '..' in name:
-        raise HTTPException(400, f"{label} contains illegal characters")
-    return name.strip()
+def _require_safe_path_component(
+    name: str | None,
+    label: str = "name",
+) -> str:
+    """Validate and return a single safe filesystem path component."""
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(
+            400,
+            f"{label} must not be empty",
+        )
+
+    value = name.strip()
+
+    # Use a standard-library basename operation and reject, rather than
+    # silently strip, any input that is not already a single component.
+    basename = os.path.basename(value)
+    windows_basename = PureWindowsPath(value).name
+
+    if (
+        not basename
+        or basename != value
+        or windows_basename != value
+        or value in {".", ".."}
+        or ".." in value
+        or re.search(r'[<>:"/\\|?*\x00-\x1f]', value)
+    ):
+        raise HTTPException(
+            400,
+            f"{label} contains illegal characters",
+        )
+
+    return basename
 
 def _path_within_directory(
     base_dir: Path,
     name: str,
 ) -> Path:
-    base = base_dir.resolve()
-    candidate = (
-        base / name
-    ).resolve()
+    """Resolve one filename and ensure it remains within a managed directory."""
+    basename = os.path.basename(name)
+
+    if (
+        not basename
+        or basename != name
+        or basename in {".", ".."}
+        or ".." in basename
+        or PureWindowsPath(basename).name != basename
+    ):
+        raise HTTPException(
+            400,
+            "Invalid filename.",
+        )
+
+    base = os.path.realpath(os.fspath(base_dir))
+    candidate = os.path.realpath(
+        os.path.join(base, basename)
+    )
+
+    # Keep the explicit prefix guard alongside commonpath and realpath.
+    # The trailing separator prevents sibling paths such as /data-other
+    # from being treated as children of /data.
+    base_prefix = os.path.join(base, "")
 
     try:
-        candidate.relative_to(base)
-    except ValueError as exc:
+        is_within_base = (
+            os.path.commonpath((base, candidate)) == base
+        )
+    except ValueError:
+        is_within_base = False
+
+    if (
+        not candidate.startswith(base_prefix)
+        or not is_within_base
+    ):
         raise HTTPException(
             400,
             "Requested path is outside the managed data directory.",
-        ) from exc
+        )
 
-    return candidate
+    return Path(candidate)
 
 async def _read_upload_with_limit(
     file: UploadFile,
@@ -549,7 +598,15 @@ def _safe_extract_zip(
         destination = (
             target_dir / relative_path
         ).resolve()
+        destination_text = str(destination)
+        target_prefix = os.path.join(str(target_dir), "")
 
+        if not destination_text.startswith(target_prefix):
+            raise HTTPException(
+                400,
+                "Archive contains a path outside the extraction directory.",
+            )
+        
         try:
             destination.relative_to(target_dir)
         except ValueError as exc:
@@ -4076,27 +4133,38 @@ async def upload_ontology(file: UploadFile = File(...)):
         meta = extract_ontology_metadata(unreasoned)
         progress["phase"] = "Saving to disk…"
         os.makedirs(ONTOLOGY_DIR, exist_ok=True)
-        with open(os.path.join(ONTOLOGY_DIR, filename), 'wb') as f:
-            f.write(contents)
-        cache_path = reasoned_cache_path(filename)
-        metadata_path = reasoned_cache_metadata_path(filename)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+
+        ontology_path = _path_within_directory(
+            ONTOLOGY_DIR,
+            filename,
+        )
+
+        with ontology_path.open("wb") as file_handle:
+            file_handle.write(contents)
+
+        cache_path = _path_within_directory(
+            CACHE_DIR,
+            f"{filename}.reasoned.ttl",
+        )
+        metadata_path = _path_within_directory(
+            CACHE_DIR,
+            f"{filename}.reasoned.meta.json",
+        )
 
         g.serialize(
             destination=cache_path,
             format="turtle",
         )
 
-        with open(metadata_path, "w", encoding="utf-8") as mf:
+        with metadata_path.open("w", encoding="utf-8") as metadata_file:
             json.dump(
                 {
                     "cache_version": REASONED_CACHE_VERSION,
-                    "source_signature": _file_signature(
-                        os.path.join(ONTOLOGY_DIR, filename)
-                    ),
+                    "source_signature": _file_signature(ontology_path),
                     "owl_vocabulary_signature": _file_signature(OWL_FILE),
-                    "ontology_metadata": meta,
                 },
-                mf,
+                metadata_file,
                 indent=2,
             )
         return unreasoned, g, entities, meta
@@ -4139,16 +4207,48 @@ async def upload_ontology(file: UploadFile = File(...)):
 
 @app.delete("/api/ontology/{filename}")
 async def delete_ontology(filename: str):
-    filename = _require_safe_path_component(filename, "filename")
-    before = len(state["ontologies"])
-    state["ontologies"] = [o for o in state["ontologies"] if o["filename"] != filename]
-    if len(state["ontologies"]) == before:
+    requested_filename = _require_safe_path_component(
+        filename,
+        "filename",
+    )
+
+    ontology = next(
+        (
+            item
+            for item in state["ontologies"]
+            if item.get("filename") == requested_filename
+        ),
+        None,
+    )
+
+    if ontology is None:
         raise HTTPException(404, "Ontology not found")
-    filepath = os.path.join(ONTOLOGY_DIR, filename)
-    if os.path.exists(filepath): os.remove(filepath)
-    
-    cache_path = reasoned_cache_path(filename)
-    metadata_path = reasoned_cache_metadata_path(filename)
+
+    # Use the registered filename for every filesystem operation.
+    filename = _require_safe_path_component(
+        ontology["filename"],
+        "filename",
+    )
+
+    filepath = _path_within_directory(
+        ONTOLOGY_DIR,
+        filename,
+    )
+    cache_path = _path_within_directory(
+        CACHE_DIR,
+        f"{filename}.reasoned.ttl",
+    )
+    metadata_path = _path_within_directory(
+        CACHE_DIR,
+        f"{filename}.reasoned.meta.json",
+    )
+
+    # Validate all paths before changing application state or removing files.
+    state["ontologies"].remove(ontology)
+
+    for path in (filepath, cache_path, metadata_path):
+        if path.is_file():
+            path.unlink()
 
     if os.path.exists(cache_path):
         os.remove(cache_path)
@@ -4206,17 +4306,16 @@ async def upload_metadata(
             f"Unsupported extension: .{ext}",
         )
 
-    destination = Path(
+    destination = _path_within_directory(
         METADATA_DIR,
         filename,
     )
 
-    graph_uri = metadata_graph_uri(
-        filename,
-    )
+    graph_uri = metadata_graph_uri(filename)
 
-    meta_path = Path(
-        str(destination) + ".meta.json"
+    meta_path = _path_within_directory(
+        METADATA_DIR,
+        f"{filename}.meta.json",
     )
 
     old_metadata_files = list(
@@ -4245,16 +4344,19 @@ async def upload_metadata(
         )
     )
 
-    staged_source = (
-        work_dir / filename
+    staged_source = _path_within_directory(
+        work_dir,
+        filename,
     )
 
-    destination_backup = (
-        work_dir / f"{filename}.backup"
+    destination_backup = _path_within_directory(
+        work_dir,
+        f"{filename}.backup",
     )
 
-    nt_path = (
-        work_dir / f"{filename}.nt"
+    nt_path = _path_within_directory(
+        work_dir,
+        f"{filename}.nt",
     )
 
     default_stage_uri = None
@@ -5660,7 +5762,7 @@ async def get_metadata_integration_status():
 
     return {"statuses": statuses}
 
-@app.post("/api/metadata/file/{filename:path}/integrate-vocab")
+@app.post("/api/metadata/file/{filename}/integrate-vocab")
 async def integrate_file_vocab(filename: str):
     metadata_file = next(
         (
@@ -5699,16 +5801,38 @@ async def integrate_file_vocab(filename: str):
         "entities_integrated": len(integrated_uris),
     }
 
-@app.get("/api/metadata/raw/{filename:path}")
+@app.get("/api/metadata/raw/{filename}")
 async def get_raw_metadata(filename: str):
-    filename = _require_safe_path_component(
+    requested_filename = _require_safe_path_component(
         filename,
+        "filename",
+    )
+
+    # Only serve a metadata file registered by Semantta.
+    metadata_file = next(
+        (
+            item
+            for item in state["metadata_files"]
+            if item.get("filename") == requested_filename
+        ),
+        None,
+    )
+
+    if metadata_file is None:
+        raise HTTPException(
+            404,
+            "Metadata file not found",
+        )
+
+    # Construct the path from the registered filename, not the request.
+    managed_filename = _require_safe_path_component(
+        metadata_file["filename"],
         "filename",
     )
 
     filepath = _path_within_directory(
         METADATA_DIR,
-        filename,
+        managed_filename,
     )
 
     if not filepath.is_file():
@@ -5743,6 +5867,22 @@ async def delete_metadata(
             "Metadata file not found",
         )
 
+    # Use the filename from the registered metadata record.
+    filename = _require_safe_path_component(
+        mf["filename"],
+        "filename",
+    )
+
+    filepath = _path_within_directory(
+        METADATA_DIR,
+        filename,
+    )
+    meta_path = _path_within_directory(
+        METADATA_DIR,
+        f"{filename}.meta.json",
+    )
+
+    # Resolve and validate paths before changing graph/state data.
     state["metadata_files"].remove(mf)
 
     await store.update(
@@ -5753,18 +5893,11 @@ async def delete_metadata(
         mf["graph_uri"]
     )
 
-    filepath = os.path.join(
-        METADATA_DIR,
-        filename,
-    )
+    if filepath.is_file():
+        filepath.unlink()
 
-    if os.path.exists(filepath):
-        os.remove(filepath)
-
-    meta_path = filepath + ".meta.json"
-
-    if os.path.exists(meta_path):
-        os.remove(meta_path)
+    if meta_path.is_file():
+        meta_path.unlink()
 
     await rebuild_default_data_graph()
     await rebuild_used_uris()
@@ -6228,16 +6361,38 @@ async def apply_base_iri(data: dict):
         "base_iri": base_iri,
     }
 
-@app.get("/api/ontology/raw/{filename:path}")
+@app.get("/api/ontology/raw/{filename}")
 async def get_raw_ontology(filename: str):
-    filename = _require_safe_path_component(
+    requested_filename = _require_safe_path_component(
         filename,
+        "filename",
+    )
+
+    # Only serve an ontology registered by Semantta.
+    ontology = next(
+        (
+            item
+            for item in state["ontologies"]
+            if item.get("filename") == requested_filename
+        ),
+        None,
+    )
+
+    if ontology is None:
+        raise HTTPException(
+            404,
+            "Ontology file not found",
+        )
+
+    # Construct the path from the registered filename, not the request.
+    managed_filename = _require_safe_path_component(
+        ontology["filename"],
         "filename",
     )
 
     filepath = _path_within_directory(
         ONTOLOGY_DIR,
-        filename,
+        managed_filename,
     )
 
     if not filepath.is_file():
@@ -6341,13 +6496,31 @@ async def upload_plugin(file: UploadFile = File(...)):
                 Path(tmp_dir),
             )
         entries = os.listdir(tmp_dir)
-        if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
-            raise HTTPException(400, "Invalid plugin structure: must contain a single folder with plugin.json")
-        plugin_folder = _require_safe_path_component(entries[0], "plugin folder name")
-        src = os.path.join(tmp_dir, plugin_folder)
-        if not os.path.exists(os.path.join(src, "plugin.json")):
+        if len(entries) != 1:
+            raise HTTPException(
+                400,
+                "Invalid plugin structure: must contain a single folder with plugin.json",
+            )
+        plugin_folder = _require_safe_path_component(
+            entries[0],
+            "plugin folder name",
+        )
+        src = _path_within_directory(
+            Path(tmp_dir),
+            plugin_folder,
+        )
+        if not src.is_dir():
+            raise HTTPException(
+                400,
+                "Invalid plugin structure: must contain a single folder with plugin.json",
+            )
+        plugin_manifest = _path_within_directory(src, "plugin.json")
+        if not plugin_manifest.is_file():
             raise HTTPException(400, "Missing plugin.json")
-        dest = os.path.join(PLUGINS_DIR, plugin_folder)
+        dest = _path_within_directory(
+            PLUGINS_DIR,
+            plugin_folder,
+        )
         if os.path.exists(dest):
             raise HTTPException(400, f"Plugin '{plugin_folder}' already exists. Delete it first.")
         os.makedirs(PLUGINS_DIR, exist_ok=True)
@@ -6369,13 +6542,17 @@ async def toggle_plugin(data: dict):
     save_plugins_config(config)
     return {"status": "ok", "message": f"Plugin {'enabled' if enabled else 'disabled'}. Restart server to apply changes."}
 
-@app.delete("/api/plugins/{name:path}")
+@app.delete("/api/plugins/{name}")
 async def delete_plugin(name: str):
     name = _require_safe_path_component(name, "plugin name")
     config = load_plugins_config()
     if name not in config: raise HTTPException(404, "Plugin not found")
-    plugin_path = os.path.join(PLUGINS_DIR, name)
-    if os.path.exists(plugin_path): shutil.rmtree(plugin_path)
+    plugin_path = _path_within_directory(
+        PLUGINS_DIR,
+        name,
+    )
+    if plugin_path.is_dir():
+        shutil.rmtree(plugin_path)
     del config[name]
     save_plugins_config(config)
     return {"status": "ok"}
@@ -6401,13 +6578,31 @@ async def upload_theme(file: UploadFile = File(...)):
                 Path(tmp_dir),
             )
         entries = os.listdir(tmp_dir)
-        if len(entries) != 1 or not os.path.isdir(os.path.join(tmp_dir, entries[0])):
-            raise HTTPException(400, "Invalid theme structure: must contain a single folder with theme.json")
-        theme_folder = _require_safe_path_component(entries[0], "theme folder name")
-        src = os.path.join(tmp_dir, theme_folder)
-        if not os.path.exists(os.path.join(src, "theme.json")):
+        if len(entries) != 1:
+            raise HTTPException(
+                400,
+                "Invalid theme structure: must contain a single folder with theme.json",
+            )
+        theme_folder = _require_safe_path_component(
+            entries[0],
+            "theme folder name",
+        )
+        src = _path_within_directory(
+            Path(tmp_dir),
+            theme_folder,
+        )
+        if not src.is_dir():
+            raise HTTPException(
+                400,
+                "Invalid theme structure: must contain a single folder with theme.json",
+            )
+        theme_manifest = _path_within_directory(src, "theme.json")
+        if not theme_manifest.is_file():
             raise HTTPException(400, "Missing theme.json")
-        dest = theme_dir(theme_folder)
+        dest = _path_within_directory(
+            THEMES_DIR,
+            theme_folder,
+        )
         if os.path.exists(dest): raise HTTPException(400, f"Theme '{theme_folder}' already exists.")
         os.makedirs(THEMES_DIR, exist_ok=True)
         shutil.move(src, dest)
@@ -6429,14 +6624,18 @@ async def toggle_theme(data: dict):
     save_themes_config(config)
     return {"status": "ok", "message": f"Theme {'enabled' if enabled else 'disabled'}. Restart frontend to apply changes."}
 
-@app.delete("/api/themes/{name:path}")
+@app.delete("/api/themes/{name}")
 async def delete_theme(name: str):
     name = _require_safe_path_component(name, "theme name")
     if name == "default": raise HTTPException(400, "The default theme cannot be deleted.")
     config = load_themes_config()
     if name not in config: raise HTTPException(404, "Theme not found")
-    theme_path = theme_dir(name)
-    if os.path.exists(theme_path): shutil.rmtree(theme_path)
+    theme_path = _path_within_directory(
+        THEMES_DIR,
+        name,
+    )
+    if theme_path.is_dir():
+        shutil.rmtree(theme_path)
     del config[name]
     save_themes_config(config)
     return {"status": "ok"}
@@ -6444,23 +6643,48 @@ async def delete_theme(name: str):
 @app.post("/api/themes/set-active")
 async def set_active_theme_endpoint(data: dict):
     theme = data.get("theme", "default")
-    if theme != "default" and not theme_dir(theme).is_dir():
-        theme = _require_safe_path_component(theme, "theme name")
-        raise HTTPException(404, "Theme not found")
+
+    if not isinstance(theme, str):
+        raise HTTPException(
+            400,
+            "Theme name must be a string.",
+        )
+
+    if theme == "default":
+        pass
+    else:
+        theme = _require_safe_path_component(
+            theme,
+            "theme name",
+        )
+
+        theme_path = _path_within_directory(
+            THEMES_DIR,
+            theme,
+        )
+
+        if not theme_path.is_dir():
+            raise HTTPException(
+                404,
+                "Theme not found",
+            )
+
     set_active_theme(theme)
+
     settings = load_settings()
     settings["active_theme"] = theme
     save_settings(settings)
+
     return {
-    "status": "ok",
-    "theme": theme,
-    "requires_frontend_restart": True,
-    "requires_frontend_rebuild": theme != "default",
-    "message": (
-        f"Active theme set to '{theme}'. "
-        "The frontend must be rebuilt and restarted to apply the theme."
-    ),
-}
+        "status": "ok",
+        "theme": theme,
+        "requires_frontend_restart": True,
+        "requires_frontend_rebuild": theme != "default",
+        "message": (
+            f"Active theme set to '{theme}'. "
+            "The frontend must be rebuilt and restarted to apply the theme."
+        ),
+    }
 
 @app.get("/api/progress")
 async def get_progress():
