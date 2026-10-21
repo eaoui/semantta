@@ -50,6 +50,7 @@ class WorkingStore:
         self.existing_graphs = set(
             existing_graphs or []
         )
+        self.default_load_calls = []
 
     async def bulk_load_nt_file(self, file_path, graph_uri):
         self.bulk_calls.append((Path(file_path), graph_uri))
@@ -62,6 +63,9 @@ class WorkingStore:
 
     async def graph_exists(self, graph_uri):
         return graph_uri in self.existing_graphs
+
+    async def bulk_load_nt(self, nt_data):
+        self.default_load_calls.append(nt_data)
 
 
 def _upload(filename: str = "records.ttl"):
@@ -605,13 +609,34 @@ async def test_rebuild_default_graph_includes_all_metadata_sources(
         "metadata_files",
         metadata_files,
     )
+    
+    created_uri = main.URIRef("https://example.org/created/1")
+    created_type = main.URIRef("https://example.org/Book")
+
+    created_graph = main.Graph()
+    created_graph.add((created_uri, main.RDF.type, created_type))
+
     monkeypatch.setitem(
         main.state,
         "created_instances_graph",
-        main.Graph(),
+        created_graph,
     )
 
     await main.rebuild_default_data_graph()
+
+    assert len(store.default_load_calls) == 1
+
+    loaded_created_graph = main.Graph()
+    loaded_created_graph.parse(
+        data=store.default_load_calls[0],
+        format="nt",
+    )
+
+    assert (
+        created_uri,
+        main.RDF.type,
+        created_type,
+    ) in loaded_created_graph
 
     assert "CLEAR DEFAULT" in store.update_calls
 
