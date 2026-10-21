@@ -6,6 +6,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 from collections import defaultdict
 from unittest.mock import AsyncMock
+import pyshacl
+from typing import Any, cast
+
+from rdflib.collection import Collection
+from rdflib.namespace import RDF, XSD
 
 import pytest
 from fastapi import HTTPException, UploadFile
@@ -313,3 +318,327 @@ async def test_metadata_replacement_updates_named_and_default_graphs_without_los
         }
     """)
     assert staging_graphs == []
+
+@pytest.mark.asyncio
+async def test_persisted_shapes_graph_conforms_to_meta_shacl(
+    fuseki_store,
+):
+    await fuseki_store.insert_shapes(f"""
+        <urn:test:BookShape>
+            a sh:NodeShape ;
+            sh:targetClass <{EX.Book}> ;
+            sh:property <urn:test:TitleShape> .
+
+        <urn:test:TitleShape>
+            a sh:PropertyShape ;
+            sh:path <{EX.title}> ;
+            sh:datatype <{XSD.string}> ;
+            sh:minCount 1 .
+    """)
+
+    shapes = await fuseki_store.load_shapes_graph()
+
+    conforms, _, report_text = pyshacl.validate(
+        Graph(),
+        shacl_graph=shapes,
+        meta_shacl=True,
+        inference="none",
+    )
+
+    assert conforms, report_text
+
+@pytest.mark.asyncio
+async def test_object_property_uses_types_of_existing_references(
+    fuseki_store,
+    monkeypatch,
+):
+    node_shape = URIRef("urn:test:BookShape")
+    property_shape = URIRef("urn:test:AuthorShape")
+
+    await fuseki_store.insert_shapes(f"""
+        <{node_shape}>
+            a sh:NodeShape ;
+            sh:targetClass <{EX.Book}> ;
+            sh:property <{property_shape}> .
+
+        <{property_shape}>
+            a sh:PropertyShape ;
+            sh:path <{EX.author}> ;
+            sh:class <{EX.Person}> .
+    """)
+
+    person_uri = EX.person1
+
+    # The referenced resource exists in the actual Fuseki dataset.
+    await fuseki_store.update(f"""
+        INSERT DATA {{
+            <{person_uri}> a <{EX.Person}> .
+        }}
+    """)
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    profile = main.SHACLProfile(fuseki_store)
+
+    assert await profile.validate_instance(
+        [str(EX.Book)],
+        {str(EX.author): [str(person_uri)]},
+    ) is True
+
+@pytest.mark.asyncio
+async def test_sh_in_constraint_is_persisted_as_an_rdf_list(
+    fuseki_store,
+    monkeypatch,
+):
+    shape_uri = URIRef("urn:test:StatusShape")
+
+    await fuseki_store.insert_shapes(f"""
+        <{shape_uri}>
+            a sh:PropertyShape ;
+            sh:path <{EX.status}> .
+    """)
+
+    monkeypatch.setattr(main, "store", fuseki_store)
+
+    await main._apply_constraints(
+        str(shape_uri),
+        {
+            str(SH["in"]): [
+                str(EX.Draft),
+                str(EX.Published),
+            ],
+        },
+        keep_predicates={RDF.type, SH.path},
+    )
+
+    shapes = await fuseki_store.load_shapes_graph()
+
+    list_heads = list(
+        shapes.objects(shape_uri, SH["in"])
+    )
+
+    assert len(list_heads) == 1, (
+        "sh:in must have exactly one value: an RDF list head."
+    )
+
+    assert list(Collection(shapes, list_heads[0])) == [
+        EX.Draft,
+        EX.Published,
+    ]
+
+@pytest.mark.asyncio
+async def test_invalid_edit_preserves_persisted_metadata(
+    fuseki_store,
+    monkeypatch,
+):
+    instance_uri = EX.book1
+    class_uri = EX.Book
+    property_uri = EX.title
+
+    await fuseki_store.insert_shapes(f"""
+        <urn:test:BookShape>
+            a sh:NodeShape ;
+            sh:targetClass <{class_uri}> ;
+            sh:property <urn:test:TitleShape> .
+
+        <urn:test:TitleShape>
+            a sh:PropertyShape ;
+            sh:path <{property_uri}> ;
+            sh:minCount 1 .
+    """)
+
+    await fuseki_store.update(f"""
+        INSERT DATA {{
+            <{instance_uri}> a <{class_uri}> ;
+                <{property_uri}> "Original title" .
+        }}
+    """)
+
+    monkeypatch.setattr(main, "store", fuseki_store)
+    monkeypatch.setattr(
+        main,
+        "shacl",
+        main.SHACLProfile(fuseki_store),
+    )
+    monkeypatch.setattr(
+        main,
+        "check_disjoint_classes",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "created_instances",
+        set(),
+    )
+    monkeypatch.setitem(
+        main.state,
+        "created_instances_graph",
+        Graph(),
+    )
+
+    before = Graph()
+    before.parse(
+        data=await fuseki_store.construct(f"""
+            CONSTRUCT {{ <{instance_uri}> ?p ?o }}
+            WHERE {{ <{instance_uri}> ?p ?o }}
+        """),
+        format="turtle",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.update_instance(
+            str(instance_uri),
+            {
+                "class_uris": [str(class_uri)],
+                "properties": {},
+                "editable_property_uris": [str(property_uri)],
+            },
+        )
+
+    assert exc_info.value.status_code == 400
+
+    after = Graph()
+    after.parse(
+        data=await fuseki_store.construct(f"""
+            CONSTRUCT {{ <{instance_uri}> ?p ?o }}
+            WHERE {{ <{instance_uri}> ?p ?o }}
+        """),
+        format="turtle",
+    )
+
+    assert set(after) == set(before)
+
+@pytest.mark.asyncio
+async def test_create_form_exposes_saved_profile_constraints(
+    fuseki_store,
+    monkeypatch,
+):
+    class_uri = str(EX.Book)
+    property_uri = str(EX.title)
+
+    class_shape = main.shape_uri_for_entity(
+        class_uri, "class", {}
+    )
+    property_shape = main.shape_uri_for_entity(
+        property_uri, "property", {}
+    )
+
+    await fuseki_store.insert_shapes(f"""
+        <{class_shape}>
+            a sh:NodeShape ;
+            sh:targetClass <{class_uri}> ;
+            sh:property <{property_shape}> .
+
+        <{property_shape}>
+            a sh:PropertyShape ;
+            sh:path <{property_uri}> ;
+            sh:datatype <{XSD.string}> ;
+            sh:minCount 1 ;
+            sh:maxCount 1 .
+    """)
+
+    ontology = Graph()
+    ontology.add((EX.Book, RDF.type, OWL.Class))
+    ontology.add((
+        EX.title,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+    ontology.add((EX.title, RDFS.range, XSD.string))
+
+    ontology_entry = {
+        "filename": "test.ttl",
+        "graph": ontology,
+        "entities": [
+            {"uri": class_uri, "type": "class"},
+            {"uri": property_uri, "type": "datatype_property"},
+        ],
+    }
+
+    monkeypatch.setattr(main, "store", fuseki_store)
+    monkeypatch.setattr(
+        main,
+        "shacl",
+        main.SHACLProfile(fuseki_store),
+    )
+    monkeypatch.setattr(
+        main,
+        "ap",
+        main.ApplicationProfile(fuseki_store),
+    )
+    monkeypatch.setattr(
+        main,
+        "_used_uris_set",
+        {class_uri, property_uri},
+    )
+    monkeypatch.setattr(
+        main,
+        "get_property_ranges",
+        lambda uri: [str(XSD.string)] if uri == property_uri else [],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_property_cardinality",
+        lambda *_: {
+            "minCardinality": None,
+            "maxCardinality": None,
+        },
+    )
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [ontology_entry],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {},
+    )
+
+    classes = await main.get_active_classes()
+
+    assert any(item["uri"] == class_uri for item in classes)
+
+
+    response = cast(
+        dict[str, Any],
+        await main.get_properties_for_class(class_uri),
+    )
+    assert response["class_uri"] == class_uri
+
+    properties = cast(
+        list[dict[str, Any]],
+        response["properties"],
+    )
+
+    title = next(
+        (
+            item
+            for item in properties
+            if item["uri"] == property_uri
+        ),
+        None,
+    )
+
+    assert title is not None, (
+        f"Expected property {property_uri} in the form response."
+    )
+    assert title["datatype"] == str(XSD.string)
+    assert title["constraints"]["minCount"] == 1
+    assert title["constraints"]["maxCount"] == 1
+    assert title["allowMultiple"] is False
