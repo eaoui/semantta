@@ -3301,7 +3301,6 @@ class SHACLProfile:
                     data_g.add((inst_uri, URIRef(pred), Literal(val)))
 
         explicit_shapes = await self._get_shapes_graph()
-        combined = explicit_shapes + validation_ontology_graph
 
         if len(explicit_shapes) == 0:
             for class_uri in class_uris:
@@ -3314,8 +3313,12 @@ class SHACLProfile:
             return True
 
         conforms, raw_graph, _ = pyshacl.validate(
-            data_g, shacl_graph=combined,
-            do_owl_imports=False, inference='none', abort_on_first=False
+            data_g,
+            shacl_graph=explicit_shapes,
+            ont_graph=validation_ontology_graph,
+            do_owl_imports=False,
+            inference="owlrl",
+            abort_on_first=False,
         )
         report_graph = cast(Graph, raw_graph)
 

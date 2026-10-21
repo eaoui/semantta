@@ -107,6 +107,7 @@ async def test_superclass_constraints_apply_to_subclass_instances(
 
     profile = make_profile(shapes)
 
+    # A Child instance must satisfy the constraints targeting Parent.
     with pytest.raises(HTTPException) as exc_info:
         await profile.validate_instance(
             [str(EX.Child)],
@@ -115,6 +116,12 @@ async def test_superclass_constraints_apply_to_subclass_instances(
 
     assert exc_info.value.status_code == 400
     assert "SHACL validation failed" in exc_info.value.detail
+
+    # The same subclass instance passes when the required property is present.
+    assert await profile.validate_instance(
+        [str(EX.Child)],
+        {str(EX.title): ["A valid title"]},
+    ) is True
 
 
 @pytest.mark.asyncio
