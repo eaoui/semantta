@@ -155,3 +155,32 @@ async def test_form_integer_value_is_validated_as_xsd_integer(
         )
 
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_uri_looking_string_is_validated_as_literal(
+    monkeypatch,
+):
+    shapes = make_property_shape(
+        EX.Book,
+        EX.homepage,
+        [(SH.datatype, XSD.string)],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    profile = make_profile(shapes)
+
+    assert await profile.validate_instance(
+        [str(EX.Book)],
+        {
+            str(EX.homepage): [
+                "https://example.org/resource"
+            ]
+        },
+    ) is True
+

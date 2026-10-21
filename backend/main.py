@@ -414,6 +414,38 @@ def _is_iri_value(value: object) -> bool:
         ("http://", "https://", "urn:")
     )
 
+def _metadata_literal(
+    value: object,
+    prop_uri: str,
+    datatype_uri: Optional[str],
+) -> Literal:
+    """Construct a validated RDF literal using the declared datatype."""
+    if datatype_uri is None:
+        return Literal(str(value))
+
+    if (
+        datatype_uri == "http://www.w3.org/2001/XMLSchema#boolean"
+        and isinstance(value, bool)
+    ):
+        lexical_value = "true" if value else "false"
+    else:
+        lexical_value = str(value)
+
+    literal = Literal(
+        lexical_value,
+        datatype=URIRef(datatype_uri),
+        normalize=False,
+    )
+
+    if literal.ill_typed:
+        raise HTTPException(
+            400,
+            f"Invalid value for {prop_uri}: "
+            f"expected a valid value of datatype {datatype_uri}.",
+        )
+
+    return literal
+
 def _require_safe_path_component(
     name: str | None,
     label: str = "name",
@@ -2771,6 +2803,53 @@ class SHACLProfile:
             self._shapes_cache = await self.store.load_shapes_graph()
         return self._shapes_cache
 
+    def _property_datatype_from_shapes(
+        self,
+        shapes_graph: Graph,
+        prop_uri: str,
+    ) -> Optional[str]:
+        """Resolve a property's datatype from SHACL, then ontology ranges."""
+        datatype_uris = {
+            str(datatype)
+            for property_shape in shapes_graph.subjects(
+                SH.path,
+                URIRef(prop_uri),
+            )
+            for datatype in shapes_graph.objects(
+                property_shape,
+                SH.datatype,
+            )
+        }
+
+        if len(datatype_uris) > 1:
+            raise HTTPException(
+                500,
+                f"Conflicting SHACL datatype constraints for {prop_uri}.",
+            )
+
+        if datatype_uris:
+            return next(iter(datatype_uris))
+
+        # Preserve the ontology's declared range when the profile has
+        # not explicitly set a datatype constraint.
+        if _get_property_type(prop_uri) == "datatype":
+            ranges = get_property_ranges(prop_uri)
+            if ranges:
+                return ranges[0]
+
+        return None
+
+    async def get_property_datatype(
+        self,
+        prop_uri: str,
+    ) -> Optional[str]:
+        """Return the effective datatype for a metadata property."""
+        shapes_graph = await self._get_shapes_graph()
+        return self._property_datatype_from_shapes(
+            shapes_graph,
+            prop_uri,
+        )
+
     def invalidate_shapes_cache(self):
         self._shapes_cache = None
 
@@ -3287,18 +3366,39 @@ class SHACLProfile:
         )
 
     async def validate_instance(self, class_uris: List[str], properties: Dict[str, List[str]]):
+        explicit_shapes = await self._get_shapes_graph()
+
         data_g = Graph()
         inst_uri = URIRef("urn:temp:instance")
+
         for cls in class_uris:
             data_g.add((inst_uri, RDF.type, URIRef(cls)))
+
         for pred, vals in properties.items():
             if not isinstance(vals, list):
                 vals = [vals]
+
+            datatype_uri = self._property_datatype_from_shapes(
+                explicit_shapes,
+                pred,
+            )
+
             for val in vals:
-                if val.startswith(("http://", "urn:")):
-                    data_g.add((inst_uri, URIRef(pred), URIRef(val)))
+                if datatype_uri is not None:
+                    literal = _metadata_literal(
+                        val,
+                        pred,
+                        datatype_uri,
+                    )
+                    data_g.add((inst_uri, URIRef(pred), literal))
+                elif _is_iri_value(val):
+                    data_g.add(
+                        (inst_uri, URIRef(pred), URIRef(val))
+                    )
                 else:
-                    data_g.add((inst_uri, URIRef(pred), Literal(val)))
+                    data_g.add(
+                        (inst_uri, URIRef(pred), Literal(str(val)))
+                    )
 
         explicit_shapes = await self._get_shapes_graph()
 
@@ -5017,27 +5117,32 @@ async def create_instance(data: dict):
         if not isinstance(vals, list):
             vals = [vals]
 
+        datatype_uri = await shacl.get_property_datatype(pred)
+
         for val in vals:
-            if _is_iri_value(val):
+            if datatype_uri is not None:
+                literal = _metadata_literal(
+                    val,
+                    pred,
+                    datatype_uri,
+                )
+                lines.append(
+                    f"{instance_ref} {pred_ref} {literal.n3()} ."
+                )
+            elif _is_iri_value(val):
                 value_ref = _sparql_iri(
                     val,
                     "value URI",
                 )
                 lines.append(
-                    f"{instance_ref} {pred_ref} "
-                    f"{value_ref} ."
+                    f"{instance_ref} {pred_ref} {value_ref} ."
                 )
             else:
-                safe = (
-                    str(val)
-                    .replace("\\", "\\\\")
-                    .replace('"', '\\"')
-                    .replace("\n", "\\n")
-                )
+                literal = Literal(str(val))
                 lines.append(
-                    f'{instance_ref} {pred_ref} '
-                    f'"{safe}" .'
+                    f"{instance_ref} {pred_ref} {literal.n3()} ."
                 )
+
     triples = "\n".join(lines)
     await store.update(f"INSERT DATA {{ {triples} }}")
     invalidate_instance_count()
@@ -5594,28 +5699,30 @@ async def update_instance(uri: str, data: dict):
         if not isinstance(vals, list):
             vals = [vals]
 
+        datatype_uri = await shacl.get_property_datatype(pred)
+
         for val in vals:
-            if _is_iri_value(val):
+            if datatype_uri is not None:
+                literal = _metadata_literal(
+                    val,
+                    pred,
+                    datatype_uri,
+                )
+                triples += (
+                    f"\n{uri_ref} {pred_ref} {literal.n3()} ."
+                )
+            elif _is_iri_value(val):
                 value_ref = _sparql_iri(
                     val,
                     "value URI",
                 )
-
                 triples += (
-                    f"\n{uri_ref} {pred_ref} "
-                    f"{value_ref} ."
+                    f"\n{uri_ref} {pred_ref} {value_ref} ."
                 )
             else:
-                safe_val = (
-                    str(val)
-                    .replace("\\", "\\\\")
-                    .replace('"', '\\"')
-                    .replace("\n", "\\n")
-                )
-
+                literal = Literal(str(val))
                 triples += (
-                    f'\n{uri_ref} {pred_ref} '
-                    f'"{safe_val}" .'
+                    f"\n{uri_ref} {pred_ref} {literal.n3()} ."
                 )
 
     # Prepare the in-memory representation before touching

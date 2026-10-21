@@ -65,6 +65,10 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
         Literal(1, datatype=XSD.nonNegativeInteger),
     ))
 
+    ontology.add((EX.pageCount, RDF.type, OWL.DatatypeProperty))
+    ontology.add((EX.pageCount, RDFS.domain, BOOK))
+    ontology.add((EX.pageCount, RDFS.range, XSD.integer))
+
     # Process the ontology using the production reasoning function.
     main.apply_reasoning(ontology)
 
@@ -90,6 +94,11 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     # Generate and persist the Application Profile from ontology entities.
     await profile.add_class(str(BOOK))
     await profile.add_property_to_class(str(BOOK), str(TITLE))
+
+    await profile.add_property_to_class(
+        str(BOOK),
+        str(EX.pageCount),
+    )
 
     class_shape = URIRef(
         main.shape_uri_for_entity(str(BOOK), "class", {})
@@ -123,7 +132,10 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
         await main.create_instance({
             "class_uris": [str(BOOK)],
             "instance_uri": invalid_uri,
-            "properties": {},
+            "properties": {
+                str(TITLE): ["A valid title"],
+                str(EX.pageCount): ["42"],
+            },
         })
 
     assert exc_info.value.status_code == 400
@@ -150,7 +162,17 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
 
     expected = Graph()
     expected.add((URIRef(valid_uri), RDF.type, BOOK))
-    expected.add((URIRef(valid_uri), TITLE, Literal("A valid title")))
+    expected.add((
+        URIRef(valid_uri),
+        TITLE,
+        Literal("A valid title", datatype=XSD.string),
+    ))
+
+    expected.add((
+        URIRef(valid_uri),
+        EX.pageCount,
+        Literal("42", datatype=XSD.integer),
+    ))
 
     assert set(default_graph) == set(expected)
     assert set(main.state["created_instances_graph"]) == set(expected)
