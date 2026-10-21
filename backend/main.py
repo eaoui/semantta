@@ -1385,6 +1385,7 @@ def rebuild_precomputed():
     # Single scan for core indexes (subclass, domains, ranges, cardinalities, disjointness)
     # NOTE: update_label_hierarchy() and rebuild_validation_ontology() scan the graph again.
     if load_indexes():
+        rebuild_validation_ontology()
         return
     g = state["combined_onto_graph"]
     subclass_pairs = set()
