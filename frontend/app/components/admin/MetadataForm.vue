@@ -49,14 +49,14 @@
             <input v-model="getPropValues(prop.uri)[index]" :type="inputType(prop.datatype)"
               :step="inputType(prop.datatype) === 'number' ? 'any' : undefined"
               class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              @input="validateField(prop.uri)" />
+              @input="onPropertyInput(prop.uri)" />
           </template>
 
           <!-- Object property (with suggestions) -->
           <template v-else>
             <div class="relative flex-1">
               <input v-model="getPropValues(prop.uri)[index]"
-                @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); validateField(prop.uri)"
+                @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
                 @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
                 class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
                 autocomplete="off" />
@@ -117,15 +117,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import {
+  ref,
+  reactive,
+  computed,
+  watch,
+  onMounted,
+  onBeforeUnmount,
+} from 'vue'
 import { useAppStore } from '@/stores/app'
 import SlideOverPanel from '~/components/shared/SlideOverPanel.vue'
 import EntitySelector from '~/components/admin/EntitySelector.vue'
 import { useDisplay } from '@/composables/useDisplay'
+import { useToast } from '@/composables/useToast'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
 const apiBase = useRuntimeConfig().public.apiBase
+const toast = useToast()
 
 interface ClassOption { uri: string; label: string }
 interface PropDef {
@@ -201,89 +210,387 @@ function getPropValues(propUri: string): string[] {
   return formData[propUri]
 }
 
+
 const validationErrors = reactive<Record<string, string[]>>({})
 
-function validateField(propUri: string) {
-  const propDef = properties.value.find(p => p.uri === propUri)
-  const values = getPropValues(propUri).filter(v => v.trim() !== '')
-  const errors: string[] = []
-  if (!propDef) return
+type LiveValidationStage = 'selection' | 'metadata'
 
+const localToastSignatures = new Map<string, string>()
+const liveValidationFailures: Record<LiveValidationStage, string | null> = {
+  selection: null,
+  metadata: null,
+}
+
+let liveValidationTimer: ReturnType<typeof setTimeout> | undefined
+let liveValidationRevision = 0
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  const e = error as {
+    data?: { detail?: unknown }
+    message?: unknown
+  } | null
+
+  const detail = e?.data?.detail
+
+  if (typeof detail === 'string') return detail
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map(item => {
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String(item.msg)
+        }
+        return String(item)
+      })
+      .join('; ')
+  }
+
+  if (detail != null) return String(detail)
+  if (typeof e?.message === 'string') return e.message
+
+  return fallback
+}
+
+function getFieldErrors(propUri: string): string[] {
+  const propDef = properties.value.find(p => p.uri === propUri)
+  if (!propDef) return []
+
+  const values = getPropValues(propUri).filter(
+    value => String(value ?? '').trim() !== '',
+  )
   const constraints = propDef.constraints || {}
+  const errors: string[] = []
+
   if (!propDef.allowMultiple && values.length > 1) {
     errors.push('Only one value allowed.')
   }
-  if (constraints.minCount != null && values.length < constraints.minCount) {
+
+  if (
+    constraints.minCount != null &&
+    values.length < constraints.minCount
+  ) {
     errors.push(`At least ${constraints.minCount} value(s) required.`)
   }
-  if (constraints.maxCount != null && values.length > constraints.maxCount) {
+
+  if (
+    constraints.maxCount != null &&
+    values.length > constraints.maxCount
+  ) {
     errors.push(`At most ${constraints.maxCount} value(s) allowed.`)
   }
 
+  const datatype = String(
+    constraints.datatype || propDef.datatype || '',
+  ).toLowerCase()
+
+  let pattern: RegExp | null = null
+
+  if (constraints.pattern) {
+    try {
+      pattern = new RegExp(
+        constraints.pattern,
+        constraints.flags || '',
+      )
+    } catch {
+      errors.push(
+        'The active Application Profile has an invalid pattern.',
+      )
+    }
+  }
+
+  if (
+    constraints.hasValue != null &&
+    constraints.hasValue !== '' &&
+    !values.includes(String(constraints.hasValue))
+  ) {
+    errors.push(
+      `The required value is ${constraints.hasValue}.`,
+    )
+  }
+
   for (const val of values) {
-    if (propDef.type === 'datatype' && propDef.datatype) {
-      const dt = propDef.datatype.toLowerCase()
-      if (dt.includes('integer') && !/^-?\d+$/.test(val)) {
+    if (propDef.type === 'datatype' && datatype) {
+      if (datatype.includes('integer') && !/^-?\d+$/.test(val)) {
         errors.push('Must be an integer.')
-        break
-      }
-      if ((dt.includes('decimal') || dt.includes('float') || dt.includes('double')) && isNaN(Number(val))) {
+      } else if (
+        (
+          datatype.includes('decimal') ||
+          datatype.includes('float') ||
+          datatype.includes('double')
+        ) &&
+        (val.trim() === '' || !Number.isFinite(Number(val)))
+      ) {
         errors.push('Must be a number.')
-        break
-      }
-      if (dt.includes('date') && !/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+      } else if (
+        datatype.endsWith('#boolean') &&
+        !['true', 'false', '1', '0'].includes(val.toLowerCase())
+      ) {
+        errors.push('Must be a boolean.')
+      } else if (
+        datatype.endsWith('#date') &&
+        !/^\d{4}-\d{2}-\d{2}$/.test(val)
+      ) {
         errors.push('Must be a valid date (YYYY-MM-DD).')
-        break
       }
     }
 
-    if (constraints.pattern) {
-      const flags = constraints.flags || ''
-      const regex = new RegExp(constraints.pattern, flags)
-      if (!regex.test(val)) {
-        errors.push(`Value must match pattern: ${constraints.pattern}`)
-        break
-      }
+    if (pattern && !pattern.test(val)) {
+      errors.push(`Value must match pattern: ${constraints.pattern}`)
     }
-    if (constraints.minLength != null && val.length < constraints.minLength) {
+
+    if (
+      constraints.minLength != null &&
+      val.length < constraints.minLength
+    ) {
       errors.push(`Minimum length is ${constraints.minLength}.`)
     }
-    if (constraints.maxLength != null && val.length > constraints.maxLength) {
+
+    if (
+      constraints.maxLength != null &&
+      val.length > constraints.maxLength
+    ) {
       errors.push(`Maximum length is ${constraints.maxLength}.`)
     }
+
     if (constraints.nodeKind) {
-      const nk = constraints.nodeKind
-      const isIRI = val.startsWith('http://') || val.startsWith('urn:')
-      if (nk === 'http://www.w3.org/ns/shacl#IRI' && !isIRI) {
+      const isBlankNode = val.startsWith('urn:bnid:')
+      const isIRI =
+        /^[a-z][a-z0-9+.-]*:/i.test(val) && !isBlankNode
+
+      if (
+        constraints.nodeKind.endsWith('#IRI') &&
+        !isIRI
+      ) {
         errors.push('Value must be an IRI.')
-      } else if (nk === 'http://www.w3.org/ns/shacl#Literal' && isIRI) {
+      } else if (
+        constraints.nodeKind.endsWith('#Literal') &&
+        isIRI
+      ) {
         errors.push('Value must be a literal.')
-      } else if (nk === 'http://www.w3.org/ns/shacl#BlankNode' && !val.startsWith('urn:bnid:')) {
+      } else if (
+        constraints.nodeKind.endsWith('#BlankNode') &&
+        !isBlankNode
+      ) {
         errors.push('Value must be a blank node.')
       }
     }
+
+    // Validate sh:in locally only when the API supplies actual
+    // allowed values as an array. The backend remains authoritative.
+    if (Array.isArray(constraints.in)) {
+      const allowed = constraints.in.map(String)
+      if (!allowed.includes(val)) {
+        errors.push(
+          `Value must be one of: ${allowed.join(', ')}.`,
+        )
+      }
+    }
   }
+
+  return [...new Set(errors)]
+}
+
+function validateField(
+  propUri: string,
+  notify = true,
+): string[] {
+  const propDef = properties.value.find(p => p.uri === propUri)
+  if (!propDef) return []
+
+  const errors = getFieldErrors(propUri)
 
   if (errors.length) {
     validationErrors[propUri] = errors
+
+    const signature = JSON.stringify(errors)
+
+    if (
+      notify &&
+      localToastSignatures.get(propUri) !== signature
+    ) {
+      toast.error(
+        `${getPropDisplayLabel(propDef)}: ${errors.join(' ')}`,
+      )
+    }
+
+    localToastSignatures.set(propUri, signature)
   } else {
     delete validationErrors[propUri]
+    localToastSignatures.delete(propUri)
   }
+
+  return errors
 }
 
 function validateAllFields(): boolean {
+  const issues: { label: string; errors: string[] }[] = []
+
   for (const prop of properties.value) {
-    validateField(prop.uri)
+    const errors = validateField(prop.uri, false)
+
+    if (errors.length) {
+      issues.push({
+        label: getPropDisplayLabel(prop),
+        errors,
+      })
+    }
   }
-  return Object.keys(validationErrors).length === 0
+
+  if (issues.length) {
+    const summary = issues
+      .slice(0, 4)
+      .map(issue => `${issue.label}: ${issue.errors.join(' ')}`)
+
+    const remaining = issues.length - summary.length
+
+    toast.error(
+      `Please correct the metadata validation errors. ${summary.join(' | ')
+      }${remaining > 0 ? ` | And ${remaining} more field(s).` : ''
+      }`,
+    )
+
+    return false
+  }
+
+  return true
 }
+
+function collectCleanProperties(): Record<string, string[]> {
+  const result: Record<string, string[]> = {}
+
+  for (const prop of properties.value) {
+    const values = getPropValues(prop.uri).filter(
+      value => value.trim() !== '',
+    )
+
+    if (values.length) {
+      result[prop.uri] = values
+    }
+  }
+
+  return result
+}
+
+function cancelScheduledLiveValidation() {
+  if (liveValidationTimer !== undefined) {
+    clearTimeout(liveValidationTimer)
+    liveValidationTimer = undefined
+  }
+
+  // Ignore responses from requests initiated before cancellation.
+  liveValidationRevision++
+}
+
+function scheduleLiveValidation(stage: LiveValidationStage) {
+  if (liveValidationTimer !== undefined) {
+    clearTimeout(liveValidationTimer)
+    liveValidationTimer = undefined
+  }
+
+  const revision = ++liveValidationRevision
+
+  if (!selectedClasses.value.length) {
+    liveValidationFailures.selection = null
+    liveValidationFailures.metadata = null
+    return
+  }
+
+  // Avoid server requests for incomplete or locally invalid drafts.
+  // Those errors are already handled immediately by validateField().
+  if (
+    stage === 'metadata' &&
+    properties.value.some(prop => getFieldErrors(prop.uri).length > 0)
+  ) {
+    return
+  }
+
+  liveValidationTimer = setTimeout(() => {
+    liveValidationTimer = undefined
+    void runLiveValidation(stage, revision)
+  }, 650)
+}
+
+async function runLiveValidation(
+  stage: LiveValidationStage,
+  revision: number,
+) {
+  if (revision !== liveValidationRevision) return
+  if (!selectedClasses.value.length) return
+
+  if (
+    stage === 'metadata' &&
+    properties.value.some(prop => getFieldErrors(prop.uri).length > 0)
+  ) {
+    return
+  }
+
+  try {
+    await $fetch<{ valid: boolean }>(
+      `${apiBase}/api/metadata/validate`,
+      {
+        method: 'POST',
+        body: {
+          class_uris: [...selectedClasses.value],
+          properties: stage === 'metadata'
+            ? collectCleanProperties()
+            : {},
+          stage,
+        },
+      },
+    )
+
+    if (revision !== liveValidationRevision) return
+
+    // Show success only when this stage previously had an error.
+    if (liveValidationFailures[stage]) {
+      toast.success(
+        stage === 'selection'
+          ? 'Selected classes now satisfy profile and ontology checks.'
+          : 'Metadata now satisfies the active profile and ontology.',
+      )
+    }
+
+    liveValidationFailures[stage] = null
+  } catch (error: unknown) {
+    if (revision !== liveValidationRevision) return
+
+    const message = getErrorMessage(
+      error,
+      'Metadata validation failed.',
+    )
+
+    // Deduplicate repeated errors while the same problem persists.
+    if (liveValidationFailures[stage] !== message) {
+      toast.error(
+        `${stage === 'selection'
+          ? 'Class selection validation'
+          : 'Metadata validation'
+        }: ${message}`,
+      )
+    }
+
+    liveValidationFailures[stage] = message
+  }
+}
+
+function onPropertyInput(propUri: string) {
+  validateField(propUri)
+  scheduleLiveValidation('metadata')
+}
+
+onBeforeUnmount(() => {
+  cancelScheduledLiveValidation()
+})
 
 onMounted(async () => {
   try {
     const res = await $fetch<ClassOption[]>(`${apiBase}/api/create-form/classes`)
     classes.value = res
-  } catch (e) {
-    console.error('Failed to load classes', e)
+  } catch (error: unknown) {
+    console.error('Failed to load classes', error)
+    toast.error(
+      getErrorMessage(error, 'Failed to load metadata classes.'),
+    )
   }
   if (props.mode === 'edit' && selectedClasses.value.length) {
     await fetchPropertiesForClasses()
@@ -293,6 +600,10 @@ onMounted(async () => {
       }
     }
     sortProperties()
+
+    if (validateAllFields()) {
+      scheduleLiveValidation('metadata')
+    }
   }
 })
 
@@ -303,6 +614,13 @@ async function onClassSelectionChange() {
 async function fetchPropertiesForClasses() {
   if (selectedClasses.value.length === 0) {
     properties.value = []
+
+    for (const propUri of Object.keys(validationErrors)) {
+      delete validationErrors[propUri]
+    }
+
+    localToastSignatures.clear()
+    scheduleLiveValidation('selection')
     return
   }
   loadingProps.value = true
@@ -320,14 +638,34 @@ async function fetchPropertiesForClasses() {
     }
     properties.value = Array.from(unique.values())
 
+    const activePropertyUris = new Set(
+      properties.value.map(prop => prop.uri),
+    )
+
+    for (const propUri of Object.keys(validationErrors)) {
+      if (!activePropertyUris.has(propUri)) {
+        delete validationErrors[propUri]
+      }
+    }
+
+    for (const propUri of localToastSignatures.keys()) {
+      if (!activePropertyUris.has(propUri)) {
+        localToastSignatures.delete(propUri)
+      }
+    }
+
     for (const prop of properties.value) {
       const arr = getPropValues(prop.uri)
       if (arr.length === 0) arr.push('')
       filteredSuggestions[prop.uri] = prop.suggestions || []
     }
     sortProperties()
-  } catch (e) {
-    console.error('Failed to load properties', e)
+    scheduleLiveValidation('selection')
+  } catch (error: unknown) {
+    console.error('Failed to load properties', error)
+    toast.error(
+      getErrorMessage(error, 'Failed to load metadata properties.'),
+    )
   } finally {
     loadingProps.value = false
   }
@@ -345,11 +683,13 @@ function inputType(datatype: string | null): string {
 
 function addValue(propUri: string) {
   getPropValues(propUri).push('')
+  validateField(propUri)
+  scheduleLiveValidation('metadata')
 }
 
 function removeValue(propUri: string, index: number) {
   getPropValues(propUri).splice(index, 1)
-  validateField(propUri)
+  onPropertyInput(propUri)
 }
 
 function openSuggestion(propUri: string, index: number) {
@@ -378,7 +718,7 @@ function filterSuggestions(propUri: string, index: number, query: string) {
 function selectSuggestion(propUri: string, index: number, uri: string) {
   getPropValues(propUri)[index] = uri
   activeSuggestion.value = null
-  validateField(propUri)
+  onPropertyInput(propUri)
 }
 
 function openCreatePanel(propUri: string, index: number, ranges: string[]) {
@@ -408,8 +748,11 @@ async function openEditPanel(propUri: string, index: number) {
       classUris: res.types,
       existingProperties: res.properties as Record<string, string[]>,
     }
-  } catch (e) {
-    console.error('Failed to fetch instance', e)
+  } catch (error: unknown) {
+    console.error('Failed to fetch instance', error)
+    toast.error(
+      getErrorMessage(error, 'Failed to load the linked instance.'),
+    )
   }
 }
 
@@ -449,12 +792,24 @@ async function onPanelSubmit(
           editable_property_uris: payload.editablePropertyUris,
         }),
       })
+
       getPropValues(propUri)[index] = payload.instanceUri
     }
+
+    onPropertyInput(propUri)
     closePanel()
-    store.fetchState()
-  } catch (e: any) {
-    alert('Operation failed: ' + (e.message || e))
+
+    toast.success(
+      mode === 'create'
+        ? 'Linked instance created.'
+        : 'Linked instance updated.',
+    )
+
+    void store.fetchState()
+  } catch (error: unknown) {
+    toast.error(
+      getErrorMessage(error, 'Failed to save the linked instance.'),
+    )
   }
 }
 
@@ -477,6 +832,7 @@ watch(selectedClasses, () => {
 }, { deep: true })
 
 function handleSubmit() {
+  cancelScheduledLiveValidation()
   const cleanProps: Record<string, string[]> = {}
   const editablePropertyUris = properties.value.map(prop => prop.uri)
 

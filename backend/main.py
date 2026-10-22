@@ -5140,6 +5140,90 @@ async def upload_metadata(
                 work_dir,
             )
 
+@app.post("/api/metadata/validate")
+async def validate_metadata(data: dict):
+    """Validate a metadata draft without persisting it."""
+    class_uris = data.get("class_uris", [])
+    stage = data.get("stage", "metadata")
+    properties = data.get("properties", {})
+
+    if (
+        not isinstance(class_uris, list)
+        or not class_uris
+        or any(
+            not isinstance(uri, str) or not uri.strip()
+            for uri in class_uris
+        )
+    ):
+        raise HTTPException(
+            400,
+            "At least one valid class URI is required",
+        )
+
+    class_uris = [uri.strip() for uri in class_uris]
+
+    for class_uri in class_uris:
+        _sparql_iri(class_uri, "class URI")
+
+    if stage not in ("selection", "metadata"):
+        raise HTTPException(
+            400,
+            "Invalid validation stage",
+        )
+
+    if not isinstance(properties, dict):
+        raise HTTPException(
+            400,
+            "properties must be an object",
+        )
+
+    normalized_properties: dict[str, list[str]] = {}
+
+    if stage == "metadata":
+        for prop_uri, raw_values in properties.items():
+            if not isinstance(prop_uri, str) or not prop_uri:
+                raise HTTPException(
+                    400,
+                    "Invalid property URI",
+                )
+
+            if isinstance(raw_values, str):
+                values = [raw_values]
+            elif isinstance(raw_values, list):
+                values = raw_values
+            else:
+                raise HTTPException(
+                    400,
+                    f"Values for {prop_uri} must be strings",
+                )
+
+            if any(not isinstance(value, str) for value in values):
+                raise HTTPException(
+                    400,
+                    f"Values for {prop_uri} must be strings",
+                )
+
+            normalized_properties[prop_uri] = values
+    else:
+        # Class-selection checks must not fail merely because required
+        # metadata fields have not yet been completed.
+        normalized_properties = {}
+
+    await check_disjoint_classes(class_uris)
+
+    await _validate_metadata_profile_membership(
+        class_uris,
+        normalized_properties,
+    )
+
+    if stage == "metadata":
+        await shacl.validate_instance(
+            class_uris,
+            normalized_properties,
+        )
+
+    return {"valid": True}
+
 @app.post("/api/metadata/create")
 async def create_instance(data: dict):
     class_uris = data.get("class_uris", [data.get("class_uri")])

@@ -8,6 +8,9 @@ from fastapi import HTTPException
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS, XSD
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
@@ -184,3 +187,89 @@ async def test_uri_looking_string_is_validated_as_literal(
         },
     ) is True
 
+
+@pytest.mark.asyncio
+async def test_live_metadata_validation_runs_profile_and_shacl_checks(
+    monkeypatch,
+):
+    class_uri = str(EX.Book)
+    title_uri = str(EX.title)
+    properties = {title_uri: ["A valid title"]}
+
+    disjoint_check = AsyncMock()
+    membership_check = AsyncMock()
+    shacl_check = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        main,
+        "check_disjoint_classes",
+        disjoint_check,
+    )
+    monkeypatch.setattr(
+        main,
+        "_validate_metadata_profile_membership",
+        membership_check,
+    )
+    monkeypatch.setattr(
+        main,
+        "shacl",
+        SimpleNamespace(validate_instance=shacl_check),
+    )
+
+    result = await main.validate_metadata({
+        "stage": "metadata",
+        "class_uris": [class_uri],
+        "properties": properties,
+    })
+
+    assert result == {"valid": True}
+    disjoint_check.assert_awaited_once_with([class_uri])
+    membership_check.assert_awaited_once_with(
+        [class_uri],
+        properties,
+    )
+    shacl_check.assert_awaited_once_with(
+        [class_uri],
+        properties,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_class_selection_validation_skips_required_fields(
+    monkeypatch,
+):
+    class_uri = str(EX.Book)
+
+    disjoint_check = AsyncMock()
+    membership_check = AsyncMock()
+    shacl_check = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        main,
+        "check_disjoint_classes",
+        disjoint_check,
+    )
+    monkeypatch.setattr(
+        main,
+        "_validate_metadata_profile_membership",
+        membership_check,
+    )
+    monkeypatch.setattr(
+        main,
+        "shacl",
+        SimpleNamespace(validate_instance=shacl_check),
+    )
+
+    result = await main.validate_metadata({
+        "stage": "selection",
+        "class_uris": [class_uri],
+        "properties": {},
+    })
+
+    assert result == {"valid": True}
+    disjoint_check.assert_awaited_once_with([class_uri])
+    membership_check.assert_awaited_once_with(
+        [class_uri],
+        {},
+    )
+    shacl_check.assert_not_awaited()
