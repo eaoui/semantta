@@ -890,8 +890,10 @@ def _format_constraint_value(pred: str, val) -> str:
             return f'"{val}"^^<{XSD_INTEGER}>'
         if pred in (str(SH.minInclusive), str(SH.maxInclusive)):
             return f'"{val}"^^<{XSD_DECIMAL}>'
-    if isinstance(val, str) and (val.startswith("http://") or val.startswith("urn:")):
-        return f"<{val}>"
+    if isinstance(val, str) and val.startswith(
+        ("http://", "https://", "urn:")
+    ):
+        return URIRef(val).n3()
     safe = str(val).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{safe}"'
 
@@ -2300,15 +2302,63 @@ async def _apply_constraints(shape_uri: str, constraints: dict,
             FILTER(?p NOT IN ({keep_filter}))
         }} }}
     """)
+
+    list_constraints = {
+        str(SH["in"]),
+        str(SH.languageIn),
+    }
+
     triples = ""
+    next_list_id = 0
+
     for pred, val in constraints.items():
         if val is None or val == "":
             continue
-        if isinstance(val, list):
-            for v in val:
-                triples += f"<{shape_uri}> <{pred}> {_format_constraint_value(pred, v)} .\n"
+
+        if isinstance(val, list) and pred in list_constraints:
+            if not val:
+                triples += (
+                    f"<{shape_uri}> <{pred}> "
+                    f"<{RDF.nil}> .\n"
+                )
+                continue
+
+            nodes = [
+                f"_:semantta_constraint_list_{next_list_id + i}"
+                for i in range(len(val))
+            ]
+            next_list_id += len(val)
+
+            triples += (
+                f"<{shape_uri}> <{pred}> {nodes[0]} .\n"
+            )
+
+            for i, item in enumerate(val):
+                rest = (
+                    nodes[i + 1]
+                    if i + 1 < len(nodes)
+                    else f"<{RDF.nil}>"
+                )
+
+                triples += (
+                    f"{nodes[i]} <{RDF.first}> "
+                    f"{_format_constraint_value(pred, item)} ; "
+                    f"<{RDF.rest}> {rest} .\n"
+                )
+
+        elif isinstance(val, list):
+            for item in val:
+                triples += (
+                    f"<{shape_uri}> <{pred}> "
+                    f"{_format_constraint_value(pred, item)} .\n"
+                )
+
         else:
-            triples += f"<{shape_uri}> <{pred}> {_format_constraint_value(pred, val)} .\n"
+            triples += (
+                f"<{shape_uri}> <{pred}> "
+                f"{_format_constraint_value(pred, val)} .\n"
+            )
+
     if triples:
         await store.update(
             f"INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ {triples} }} }}"
