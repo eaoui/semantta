@@ -855,6 +855,33 @@ def _cached_label(uri: str) -> str:
 def get_label(uri: str) -> str:
     return _cached_label(uri)
 
+async def _get_stored_labels(uris: List[str]) -> Dict[str, str]:
+    """Retrieve stored labels for a batch of RDF resources."""
+    unique_uris = list(dict.fromkeys(uri for uri in uris if uri))
+    labels: Dict[str, str] = {}
+
+    for offset in range(0, len(unique_uris), 250):
+        result = await store.get_instance_labels(
+            unique_uris[offset:offset + 250]
+        )
+        if isinstance(result, dict):
+            labels.update(result)
+
+    return labels
+
+async def _resolve_display_labels(
+    uris: List[str],
+) -> Dict[str, str]:
+    """Prefer stored labels, then ontology labels, then URI local names."""
+    unique_uris = list(dict.fromkeys(uri for uri in uris if uri))
+    labels = await _get_stored_labels(unique_uris)
+
+    for uri in unique_uris:
+        if not labels.get(uri):
+            labels[uri] = get_label(uri)
+
+    return labels
+
 def get_property_domains(prop: str) -> List[str]:
     return _property_domains.get(prop, [])
 
@@ -5642,6 +5669,20 @@ async def list_instances(
         exclude_uris=exclude_uris,
     )
 
+    type_uris = sorted({
+        type_uri
+        for instance in instances
+        for type_uri in instance.get('types', [])
+    })
+
+    type_labels = await _resolve_display_labels(type_uris)
+
+    for instance in instances:
+        instance['type_labels'] = {
+            type_uri: type_labels.get(type_uri, get_label(type_uri))
+            for type_uri in instance.get('types', [])
+        }
+
     next_cursor = (
         instances[-1]["uri"]
         if has_more and instances
@@ -5687,8 +5728,11 @@ async def get_instance_count(
 
 @app.get("/api/instances/types")
 async def list_instance_types():
+    types = await store.get_instance_types()
+
     return {
-        "types": await store.get_instance_types()
+        "types": types,
+        "labels_by_uri": await _resolve_display_labels(types),
     }
 
 @app.post("/api/instances/types-by-uri")
@@ -5756,7 +5800,16 @@ async def list_instance_types_by_uri(
     for types in types_by_uri.values():
         types.sort()
 
-    return {"types_by_uri": types_by_uri}
+    type_uris = sorted({
+        type_uri
+        for types in types_by_uri.values()
+        for type_uri in types
+    })
+
+    return {
+        "types_by_uri": types_by_uri,
+        "labels_by_uri": await _resolve_display_labels(type_uris),
+    }
 
 @app.get("/api/instances/{uri:path}/syntax")
 async def get_instance_syntax(uri: str, format: str = "turtle"):
@@ -5973,6 +6026,14 @@ async def get_instance(uri: str):
         if preferred_label:
             bnode["label"] = preferred_label
 
+    term_uris = set(types) | set(props)
+
+    for bnode in bnodes.values():
+        term_uris.update(bnode['types'])
+        term_uris.update(bnode['properties'].keys())
+
+    term_labels = await _resolve_display_labels(sorted(term_uris))
+
     return {
         "uri": uri,
         "types": types,
@@ -5981,6 +6042,7 @@ async def get_instance(uri: str):
         "label": value_labels.get(uri),
         "linked_instance_uris": linked_instance_uris,
         "value_labels": value_labels,
+        'term_labels': term_labels,
     }
 
 @app.put("/api/instances/{uri:path}")

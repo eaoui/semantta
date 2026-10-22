@@ -45,6 +45,7 @@ export interface Instance {
   label?: string | null
   source?: string
   starred?: boolean
+  type_labels?: Record<string, string>
 }
 
 export interface ProfileEntityItem {

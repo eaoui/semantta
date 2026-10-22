@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class OntologyInfo(BaseModel):
@@ -58,6 +58,7 @@ class Instance(BaseModel):
     label: Optional[str] = None
     source: str = "imported"
     starred: bool = False
+    type_labels: Dict[str, str] = Field(default_factory=dict)
 
 
 class ToggleRequest(BaseModel):

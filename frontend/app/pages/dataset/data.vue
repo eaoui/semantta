@@ -30,7 +30,7 @@
         <h3 class="font-semibold mb-2 text-gray-900 dark:text-gray-100">Types</h3>
         <ul class="list-disc ml-5 mb-4 text-gray-700 dark:text-gray-300">
           <li v-for="t in instanceTypes" :key="t">
-            <a :href="t" target="_blank" class="hover:underline">{{ formatUri(t) }}</a>
+            <a :href="t" target="_blank" class="hover:underline">{{ displayTerm(t) }}</a>
           </li>
         </ul>
 
@@ -39,7 +39,7 @@
           <template v-for="pred in orderedPropertyKeys" :key="pred">
             <div class="border-b border-gray-200 dark:border-gray-700 pb-2">
               <a :href="pred" target="_blank" class="font-medium text-gray-700 dark:text-gray-300 hover:underline">{{
-                formatUri(pred) }}</a>
+                displayTerm(pred) }}</a>
               <div class="ml-4">
                 <template v-for="v in instanceProperties[pred]" :key="v">
                   <!-- Regular URI value -->
@@ -72,14 +72,14 @@
                       <p v-if="bnodeData[String(v)].types.length"
                         class="text-sm italic text-gray-600 dark:text-gray-400">
                         <template v-for="(typeUri, idx) in bnodeData[String(v)].types" :key="typeUri">
-                          <a :href="typeUri" target="_blank" class="hover:underline">{{ formatUri(typeUri) }}</a><span
+                          <a :href="typeUri" target="_blank" class="hover:underline">{{ displayTerm(typeUri) }}</a><span
                             v-if="showSeparator(idx, bnodeData[String(v)].types.length)">, </span>
                         </template>
                       </p>
                       <div v-for="entry in getActiveBnodeProperties(String(v))" :key="entry[0]" class="ml-2 text-sm">
                         <a :href="entry[0]" target="_blank"
                           class="font-medium text-gray-600 dark:text-gray-400 hover:underline">
-                          {{ formatUri(entry[0]) || entry[0] }}
+                          {{ displayTerm(entry[0]) }}
                         </a>:
                         <span>
                           <template v-for="bv in entry[1]" :key="bv">
@@ -117,8 +117,8 @@
       <div v-else-if="graphError" class="text-red-600 dark:text-red-400">{{ graphError }}</div>
       <GraphView v-show="activeTab === 'graph'" :visible="activeTab === 'graph'" :instanceUri="instanceUri"
         :instanceTypes="instanceTypes" :instanceProperties="instanceProperties" :bnodeData="bnodeData"
-        :formatUri="formatUri" :isBlankNode="isBlankNode" :getDisplayLabel="displayValue" @loading="onGraphLoading"
-        @error="onGraphError" />
+        :termLabels="termLabels" :formatUri="formatUri" :isBlankNode="isBlankNode" :getDisplayLabel="displayValue"
+        @loading="onGraphLoading" @error="onGraphError" />
     </div>
 
     <!-- Syntax tab -->
@@ -189,6 +189,7 @@ const instanceData = ref<(Instance & {
   bnodes?: Record<string, any>
   linked_instance_uris?: string[]
   value_labels?: Record<string, string>
+  term_labels?: Record<string, string>
 }) | null>(null)
 
 const storeInstance = computed(() => instanceData.value)
@@ -203,6 +204,10 @@ const instanceTypes = computed(
 
 const instanceProperties = computed(
   () => storeInstance.value?.properties || {},
+)
+
+const termLabels = computed(
+  () => storeInstance.value?.term_labels || {},
 )
 
 const syntaxLoaded = ref(false)
@@ -301,6 +306,9 @@ function displayValue(uri: string): string {
     return 'Blank node'
   }
 
+  const termLabel = termLabels.value[uri]
+  if (termLabel) return termLabel
+
   return formatUri(uri) as string
 }
 
@@ -327,6 +335,10 @@ function getActiveBnodeProperties(
 
 function getValueDisplayLabel(uri: string): string {
   return displayValue(uri)
+}
+
+function displayTerm(uri: string): string {
+  return termLabels.value[uri] || formatUri(uri) || uri
 }
 
 function showSeparator(index: number | string, length: number): boolean {

@@ -43,7 +43,7 @@
                   <div class="flex flex-col items-start gap-1">
                     <a v-for="typeUri in inst.types" :key="typeUri" :href="typeUri" target="_blank"
                       rel="noopener noreferrer" class="block hover:underline">
-                      {{ formatUri(typeUri) }}
+                      {{ typeDisplayLabel(typeUri) }}
                     </a>
                   </div>
                 </td>
@@ -87,14 +87,19 @@ const { formatUri } = usePublicDisplay()
 const { fetchInstanceTypes } = useApi()
 
 const uniqueTypes = ref<string[]>([])
+const typeLabels = ref<Record<string, string>>({})
 const selectedType = ref('')
 
 const typeOptions = computed(() =>
   uniqueTypes.value.map(uri => ({
     uri,
-    label: formatUri(uri) || uri,
+    label: typeLabels.value[uri] || formatUri(uri) || uri,
   })),
 )
+
+function typeDisplayLabel(uri: string): string {
+  return typeLabels.value[uri] || formatUri(uri) || uri
+}
 
 const hasNonCountableFilters = computed(() =>
   Boolean(searchQuery.value.trim() || selectedType.value),
@@ -178,6 +183,7 @@ async function loadTypes() {
   try {
     const data = await fetchInstanceTypes()
     uniqueTypes.value = data.types
+    typeLabels.value = data.labels_by_uri
   } catch (error) {
     console.error('Failed to load instance types:', error)
   }

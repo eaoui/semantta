@@ -103,9 +103,10 @@ export const useApi = () => {
   }
 
   const fetchInstanceTypes = () =>
-    request<{ types: string[] }>(
-      '/api/instances/types',
-    )
+    request<{
+      types: string[]
+      labels_by_uri: Record<string, string>
+    }>('/api/instances/types')
 
   const fetchInstanceCount = async (
     includeBlankNodes = false,
