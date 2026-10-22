@@ -3412,6 +3412,56 @@ class SHACLProfile:
                         raise HTTPException(400, f"{prop_uri} allows at most {maxc} value(s)")
             return True
 
+
+        # Load descriptions of referenced resources into the temporary
+        # data graph so SHACL can check their existing RDF types.
+        reference_uris = set()
+
+        for pred, vals in properties.items():
+            if not isinstance(vals, list):
+                vals = [vals]
+
+            datatype_uri = self._property_datatype_from_shapes(
+                explicit_shapes,
+                pred,
+            )
+
+            # A value with an explicit literal datatype is not a resource,
+            # even if its lexical value looks like a URL.
+            if datatype_uri is None:
+                reference_uris.update(
+                    val for val in vals if _is_iri_value(val)
+                )
+
+        if reference_uris:
+            reference_terms = " ".join(
+                _sparql_iri(uri, "referenced resource URI")
+                for uri in sorted(reference_uris)
+            )
+
+            referenced_turtle = await self.store.construct(f"""
+                CONSTRUCT {{ ?ref ?p ?o }}
+                WHERE {{
+                    VALUES ?ref {{ {reference_terms} }}
+                    {{
+                        ?ref ?p ?o .
+                    }}
+                    UNION
+                    {{
+                        GRAPH ?g {{ ?ref ?p ?o . }}
+                        FILTER(?g != <{SHAPES_GRAPH}>)
+                    }}
+                }}
+            """)
+
+            if referenced_turtle.strip():
+                referenced_graph = Graph()
+                referenced_graph.parse(
+                    data=referenced_turtle,
+                    format="turtle",
+                )
+                data_g += referenced_graph
+
         conforms, raw_graph, _ = pyshacl.validate(
             data_g,
             shacl_graph=explicit_shapes,
