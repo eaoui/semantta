@@ -12,6 +12,8 @@ from urllib.request import urlopen
 
 import pytest
 import pytest_asyncio
+from rdflib import URIRef
+from collections.abc import AsyncGenerator, Generator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "backend"
@@ -53,18 +55,19 @@ def fuseki_runtime() -> tuple[Path, Path]:
     return executable, FUSEKI_DIR
 
 
-@pytest_asyncio.fixture
-async def fuseki_store(
-    tmp_path: Path,
+@pytest.fixture(scope="session")
+def fuseki_server(
+    tmp_path_factory: pytest.TempPathFactory,
     fuseki_runtime: tuple[Path, Path],
-):
-    """Start an isolated Fuseki/TDB2 dataset for each integration test."""
+) -> Generator[str, None, None]:
+    """Start one isolated Fuseki server for the entire test session."""
     executable, fuseki_dir = fuseki_runtime
     java_home = JAVA_DIR
 
-    database_dir = tmp_path / "tdb2"
-    fuseki_base = tmp_path / "fuseki-base"
-    log_path = tmp_path / "fuseki.log"
+    server_dir = tmp_path_factory.mktemp("semantta-fuseki")
+    database_dir = server_dir / "tdb2"
+    fuseki_base = server_dir / "fuseki-base"
+    log_path = server_dir / "fuseki.log"
 
     database_dir.mkdir()
     fuseki_base.mkdir()
@@ -89,11 +92,10 @@ async def fuseki_store(
         + env.get("PATH", "")
     )
 
-    process = None
-    store = None
+    process: subprocess.Popen | None = None
 
-    with log_path.open("w", encoding="utf-8") as log_file:
-        try:
+    try:
+        with log_path.open("w", encoding="utf-8") as log_file:
             process = subprocess.Popen(
                 [
                     str(executable),
@@ -110,48 +112,78 @@ async def fuseki_store(
                 stderr=subprocess.STDOUT,
             )
 
-            deadline = time.monotonic() + 45
-            ready = False
+        deadline = time.monotonic() + 45
+        ready = False
 
-            while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    break
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
 
-                try:
-                    with urlopen(ping_url, timeout=1) as response:
-                        if response.status == 200:
-                            ready = True
-                            break
-                except (OSError, URLError, TimeoutError):
-                    pass
+            try:
+                with urlopen(ping_url, timeout=1) as response:
+                    if response.status == 200:
+                        ready = True
+                        break
+            except (OSError, URLError, TimeoutError):
+                pass
 
-                time.sleep(0.25)
+            time.sleep(0.25)
 
-            if not ready:
-                log_file.flush()
-                details = log_path.read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                raise RuntimeError(
-                    "Fuseki did not become ready.\n"
-                    f"Process exit code: {process.poll()}\n"
-                    f"Fuseki log:\n{details[-6000:]}"
-                )
+        if not ready:
+            details = log_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            raise RuntimeError(
+                "Fuseki did not become ready.\n"
+                f"Process exit code: {process.poll()}\n"
+                f"Fuseki log:\n{details[-6000:]}"
+            )
 
-            store = FusekiStore(dataset_url=dataset_url)
-            await store.healthcheck()
+        # Pytest will use this URL for all tests in the session.
+        yield dataset_url
 
-            yield store
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
 
+
+async def clear_test_dataset(store: FusekiStore) -> None:
+    """Remove default-graph triples and all populated named graphs."""
+    await store.update("CLEAR DEFAULT")
+
+    rows = await store.query("""
+        SELECT DISTINCT ?g
+        WHERE {
+            GRAPH ?g { ?s ?p ?o }
+        }
+    """)
+
+    for row in rows:
+        graph_uri = URIRef(row["g"]).n3()
+        await store.update(f"DROP SILENT GRAPH {graph_uri}")
+
+
+@pytest_asyncio.fixture
+async def fuseki_store(
+    fuseki_server: str,
+) -> AsyncGenerator[FusekiStore, None]:
+    """Provide a clean dataset and a separate HTTP client for each test."""
+    store = FusekiStore(dataset_url=fuseki_server)
+
+    try:
+        await store.healthcheck()
+        await clear_test_dataset(store)
+
+        yield store
+
+    finally:
+        try:
+            await clear_test_dataset(store)
         finally:
-            if store is not None:
-                await store.close()
-
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=10)
+            await store.close()
