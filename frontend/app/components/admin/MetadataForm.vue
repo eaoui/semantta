@@ -46,10 +46,14 @@
         <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
           <!-- Datatype property -->
           <template v-if="prop.type === 'datatype'">
-            <input v-model="getPropValues(prop.uri)[index]" :type="inputType(prop.datatype)"
+            <input :value="String(getPropValues(prop.uri)[index] ?? '')" :type="inputType(prop.datatype)"
               :step="inputType(prop.datatype) === 'number' ? 'any' : undefined"
               class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              @input="onPropertyInput(prop.uri)" />
+              @input="setPropValue(
+                prop.uri,
+                index,
+                ($event.target as HTMLInputElement).value
+              ); onPropertyInput(prop.uri)" />
           </template>
 
           <!-- Object property (with suggestions) -->
@@ -210,6 +214,17 @@ function getPropValues(propUri: string): string[] {
   return formData[propUri]
 }
 
+function toLexicalString(value: unknown): string {
+  return value == null ? '' : String(value)
+}
+
+function setPropValue(
+  propUri: string,
+  index: number,
+  value: string,
+): void {
+  getPropValues(propUri)[index] = value
+}
 
 const validationErrors = reactive<Record<string, string[]>>({})
 
@@ -255,9 +270,9 @@ function getFieldErrors(propUri: string): string[] {
   const propDef = properties.value.find(p => p.uri === propUri)
   if (!propDef) return []
 
-  const values = getPropValues(propUri).filter(
-    value => String(value ?? '').trim() !== '',
-  )
+  const values = getPropValues(propUri)
+    .map(toLexicalString)
+    .filter(value => value.trim() !== '')
   const constraints = propDef.constraints || {}
   const errors: string[] = []
 
@@ -459,9 +474,9 @@ function collectCleanProperties(): Record<string, string[]> {
   const result: Record<string, string[]> = {}
 
   for (const prop of properties.value) {
-    const values = getPropValues(prop.uri).filter(
-      value => value.trim() !== '',
-    )
+    const values = getPropValues(prop.uri)
+      .map(toLexicalString)
+      .filter(value => value.trim() !== '')
 
     if (values.length) {
       result[prop.uri] = values
@@ -815,8 +830,12 @@ async function onPanelSubmit(
 
 function sortProperties() {
   properties.value.sort((a, b) => {
-    const aFilled = getPropValues(a.uri).some(v => v.trim() !== '')
-    const bFilled = getPropValues(b.uri).some(v => v.trim() !== '')
+    const aFilled = getPropValues(a.uri).some(
+      value => toLexicalString(value).trim() !== '',
+    )
+    const bFilled = getPropValues(b.uri).some(
+      value => toLexicalString(value).trim() !== '',
+    )
     if (aFilled && !bFilled) return -1
     if (!aFilled && bFilled) return 1
     return 0
@@ -837,7 +856,9 @@ function handleSubmit() {
   const editablePropertyUris = properties.value.map(prop => prop.uri)
 
   for (const prop of properties.value) {
-    const vals = getPropValues(prop.uri).filter(v => v.trim() !== '')
+    const vals = getPropValues(prop.uri)
+      .map(toLexicalString)
+      .filter(value => value.trim() !== '')
     if (vals.length > 0) {
       cleanProps[prop.uri] = vals
     }
