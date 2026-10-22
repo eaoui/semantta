@@ -1,9 +1,9 @@
 <template>
   <div>
     <div v-if="!store.isReady" class="text-gray-500 dark:text-gray-400">Loading…</div>
-    <AdminMetadataForm v-else mode="create" @submit="createInstance" />
+    <AdminMetadataForm v-else mode="create" :submitting="!!loadingMsg" @submit="createInstance" />
 
-    <LoadingOverlay :show="!!loadingMsg" :message="loadingMsg" />
+    <LoadingOverlay :show="!!loadingMsg" title="Loading" :message="loadingMsg" />
   </div>
 </template>
 
@@ -18,7 +18,15 @@ const apiBase = useRuntimeConfig().public.apiBase
 const loadingMsg = ref('')
 const toast = useToast()
 
-async function createInstance(payload: { classUris: string[]; instanceUri: string; properties: Record<string, string[]> }) {
+async function createInstance(payload: {
+  classUris: string[]
+  instanceUri: string
+  properties: Record<string, string[]>
+}) {
+  if (loadingMsg.value) return
+
+  loadingMsg.value = 'Validating and saving metadata...'
+
   try {
     await $fetch(`${apiBase}/api/metadata/create`, {
       method: 'POST',
@@ -26,14 +34,19 @@ async function createInstance(payload: { classUris: string[]; instanceUri: strin
       body: JSON.stringify({
         class_uris: payload.classUris,
         instance_uri: payload.instanceUri,
-        properties: payload.properties
-      })
+        properties: payload.properties,
+      }),
     })
+
     toast.success('Instance created')
     await store.fetchState()
-    navigateTo('/admin/metadata/instances')
-  } catch (e: any) {
-    toast.error(e?.data?.detail || e.message)
+    await navigateTo('/admin/metadata/instances')
+  } catch (error: any) {
+    toast.error(
+      error?.data?.detail || error?.message || 'Failed to create instance.',
+    )
+  } finally {
+    loadingMsg.value = ''
   }
 }
 </script>

@@ -6,16 +6,10 @@
       Retry
     </button>
   </div>
-  <AdminMetadataForm
-    v-else
-    mode="edit"
-    :classUris="classUris"
-    :initialInstanceUri="instanceUri"
-    :initialProperties="existingProperties"
-    @submit="updateInstance"
-  />
+  <AdminMetadataForm v-else mode="edit" :classUris="classUris" :initialInstanceUri="instanceUri"
+    :initialProperties="existingProperties" :submitting="!!loadingMsg" @submit="updateInstance" />
 
-  <LoadingOverlay :show="!!loadingMsg" :message="loadingMsg" />
+  <LoadingOverlay :show="!!loadingMsg" title="Loading" :message="loadingMsg" />
 </template>
 
 <script setup lang="ts">
@@ -76,7 +70,10 @@ async function updateInstance(payload: {
   properties: Record<string, string[]>
   editablePropertyUris: string[]
 }) {
-  loadingMsg.value = 'Updating metadata instance…'
+  if (loadingMsg.value) return
+
+  loadingMsg.value = 'Validating and saving metadata...'
+
   try {
     await $fetch(
       `${apiBase}/api/instances/${encodeURIComponent(payload.instanceUri)}`,

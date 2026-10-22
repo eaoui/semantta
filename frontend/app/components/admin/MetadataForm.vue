@@ -118,7 +118,7 @@
         </div>
       </div>
 
-      <button type="submit" :disabled="selectedClasses.length === 0"
+      <button type="submit" :disabled="selectedClasses.length === 0 || props.submitting"
         class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
         {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
       </button>
@@ -169,6 +169,7 @@ const props = defineProps<{
   initialProperties?: Record<string, string[]>
   allowedClassUris?: string[]
   nestingLevel?: number
+  submitting?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -969,6 +970,7 @@ watch(selectedClasses, () => {
 }, { deep: true })
 
 function handleSubmit() {
+  if (props.submitting) return
   cancelScheduledLiveValidation()
   const cleanProps: Record<string, string[]> = {}
   const editablePropertyUris = properties.value.map(prop => prop.uri)
