@@ -20,8 +20,7 @@
     <!-- Classes selection -->
     <div class="mb-4">
       <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
-      <EntitySelector v-model="selectedClasses" :availableClasses="classes" @change="onClassSelectionChange"
-        placeholder="Search classes…" />
+      <EntitySelector v-model="selectedClasses" :availableClasses="classes" placeholder="Search classes…" />
       <p v-if="selectedClasses.length === 0" class="text-red-500 dark:text-red-400 text-sm mt-1">
         Please select at least one class.
       </p>
@@ -45,9 +44,24 @@
 
         <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
           <!-- Datatype property -->
+
           <template v-if="prop.type === 'datatype'">
-            <input :value="String(getPropValues(prop.uri)[index] ?? '')" :type="inputType(prop.datatype)"
-              :step="inputType(prop.datatype) === 'number' ? 'any' : undefined"
+            <select v-if="isBooleanDatatype(getPropDatatype(prop))"
+              :value="toLexicalString(getPropValues(prop.uri)[index])"
+              class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+              @change="setPropValue(
+                prop.uri,
+                index,
+                ($event.target as HTMLSelectElement).value
+              ); onPropertyInput(prop.uri)">
+              <option value="">Select a value</option>
+              <option value="true">True</option>
+              <option value="false">False</option>
+            </select>
+
+            <input v-else :value="toLexicalString(getPropValues(prop.uri)[index])"
+              :type="inputType(getPropDatatype(prop))"
+              :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
               class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
               @input="setPropValue(
                 prop.uri,
@@ -55,6 +69,7 @@
                 ($event.target as HTMLInputElement).value
               ); onPropertyInput(prop.uri)" />
           </template>
+
 
           <!-- Object property (with suggestions) -->
           <template v-else>
@@ -208,14 +223,36 @@ function getPropDisplayLabel(prop: PropDef): string {
 }
 
 function getPropValues(propUri: string): string[] {
-  if (!formData[propUri]) {
-    formData[propUri] = ['']
+  const existing = formData[propUri] as unknown[] | undefined
+
+  if (!existing || existing.length === 0) {
+    const values = ['']
+    formData[propUri] = values
+    return values
   }
-  return formData[propUri]
+
+  if (existing.some(value => typeof value !== 'string')) {
+    const values = existing.map(toLexicalString)
+    formData[propUri] = values
+    return values
+  }
+
+  return existing as string[]
 }
 
 function toLexicalString(value: unknown): string {
-  return value == null ? '' : String(value)
+  if (value == null) return ''
+
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return String(value)
+  }
+
+  return ''
 }
 
 function setPropValue(
@@ -238,6 +275,7 @@ const liveValidationFailures: Record<LiveValidationStage, string | null> = {
 
 let liveValidationTimer: ReturnType<typeof setTimeout> | undefined
 let liveValidationRevision = 0
+let propertyFetchRevision = 0
 
 function getErrorMessage(error: unknown, fallback: string): string {
   const e = error as {
@@ -325,8 +363,28 @@ function getFieldErrors(propUri: string): string[] {
 
   for (const val of values) {
     if (propDef.type === 'datatype' && datatype) {
-      if (datatype.includes('integer') && !/^-?\d+$/.test(val)) {
-        errors.push('Must be an integer.')
+      const datatypeName = datatypeLocalName(datatype)
+      if (numericDatatypeNames.has(datatypeName)) {
+        if (
+          ['integer', 'int', 'long', 'short', 'byte',
+            'nonpositiveinteger', 'negativeinteger',
+            'nonnegativeinteger', 'positiveinteger',
+            'unsignedlong', 'unsignedint',
+            'unsignedshort', 'unsignedbyte'].includes(datatypeName) &&
+          !/^[+-]?\d+$/.test(val)
+        ) {
+          errors.push('Must be an integer.')
+        } else if (
+          datatypeName === 'decimal' &&
+          !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(val)
+        ) {
+          errors.push('Must be a valid decimal.')
+        } else if (
+          ['float', 'double'].includes(datatypeName) &&
+          !Number.isFinite(Number(val))
+        ) {
+          errors.push('Must be a valid number.')
+        }
       } else if (
         (
           datatype.includes('decimal') ||
@@ -610,8 +668,12 @@ onMounted(async () => {
   if (props.mode === 'edit' && selectedClasses.value.length) {
     await fetchPropertiesForClasses()
     if (props.initialProperties) {
-      for (const [pred, vals] of Object.entries(props.initialProperties)) {
-        formData[pred] = Array.isArray(vals) ? [...vals] : [String(vals)]
+      for (const [pred, rawValues] of Object.entries(props.initialProperties)) {
+        const values = Array.isArray(rawValues)
+          ? rawValues
+          : [rawValues]
+
+        formData[pred] = values.map(toLexicalString)
       }
     }
     sortProperties()
@@ -627,7 +689,11 @@ async function onClassSelectionChange() {
 }
 
 async function fetchPropertiesForClasses() {
-  if (selectedClasses.value.length === 0) {
+  const revision = ++propertyFetchRevision
+  const requestedClasses = [...selectedClasses.value]
+
+  if (requestedClasses.length === 0) {
+    loadingProps.value = false
     properties.value = []
 
     for (const propUri of Object.keys(validationErrors)) {
@@ -638,15 +704,22 @@ async function fetchPropertiesForClasses() {
     scheduleLiveValidation('selection')
     return
   }
+
   loadingProps.value = true
+
   try {
-    const allProps: PropDef[] = []
-    for (const classUri of selectedClasses.value) {
-      const data = await $fetch<{ class_uri: string; properties: PropDef[] }>(
-        `${apiBase}/api/create-form/properties?class_uri=${encodeURIComponent(classUri)}`
+    const responses = await Promise.all(
+      requestedClasses.map(classUri =>
+        $fetch<{ class_uri: string; properties: PropDef[] }>(
+          `${apiBase}/api/create-form/properties?class_uri=${encodeURIComponent(classUri)}`
+        )
       )
-      allProps.push(...data.properties)
-    }
+    )
+
+    if (revision !== propertyFetchRevision) return
+
+    const allProps = responses.flatMap(response => response.properties)
+
     const unique = new Map<string, PropDef>()
     for (const p of allProps) {
       if (!unique.has(p.uri)) unique.set(p.uri, p)
@@ -677,22 +750,67 @@ async function fetchPropertiesForClasses() {
     sortProperties()
     scheduleLiveValidation('selection')
   } catch (error: unknown) {
+    if (revision !== propertyFetchRevision) return
     console.error('Failed to load properties', error)
     toast.error(
       getErrorMessage(error, 'Failed to load metadata properties.'),
     )
   } finally {
-    loadingProps.value = false
+    if (revision === propertyFetchRevision) {
+      loadingProps.value = false
+    }
   }
 }
 
+function getPropDatatype(prop: PropDef): string | null {
+  const datatype = prop.constraints?.datatype ?? prop.datatype
+
+  return typeof datatype === 'string'
+    ? datatype
+    : datatype == null
+      ? null
+      : String(datatype)
+}
+
+function datatypeLocalName(datatype: string | null): string {
+  return (datatype ?? '')
+    .toLowerCase()
+    .split(/[\/#:]/)
+    .pop() ?? ''
+}
+
+function isBooleanDatatype(datatype: string | null): boolean {
+  return datatypeLocalName(datatype) === 'boolean'
+}
+
+const numericDatatypeNames = new Set([
+  'integer',
+  'int',
+  'long',
+  'short',
+  'byte',
+  'nonpositiveinteger',
+  'negativeinteger',
+  'nonnegativeinteger',
+  'positiveinteger',
+  'unsignedlong',
+  'unsignedint',
+  'unsignedshort',
+  'unsignedbyte',
+  'decimal',
+  'float',
+  'double',
+])
+
 function inputType(datatype: string | null): string {
-  if (!datatype) return 'text'
-  const dt = datatype.toLowerCase()
-  if (dt.includes('integer') || dt.includes('decimal') || dt.includes('float') || dt.includes('double'))
+  const name = datatypeLocalName(datatype)
+
+  if (numericDatatypeNames.has(name)) {
     return 'number'
-  if (dt.includes('date') || dt.includes('time')) return 'date'
-  if (dt.includes('boolean')) return 'checkbox'
+  }
+
+  // Preserve complete RDF lexical forms, including optional timezones.
+  // The backend remains responsible for validating the declared XSD type.
   return 'text'
 }
 
