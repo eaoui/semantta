@@ -127,6 +127,18 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
 
     invalid_uri = str(EX.invalidBook)
 
+    probe = Graph()
+    probe.add((EX.invalidBook, RDF.type, BOOK))
+
+    conforms, _, report_text = pyshacl.validate(
+        probe,
+        shacl_graph=persisted_shapes,
+        ont_graph=main.validation_ontology_graph,
+        inference="owlrl",
+    )
+
+    assert not conforms, report_text
+
     # Invalid metadata must fail without adding anything to the default graph.
     with pytest.raises(HTTPException) as exc_info:
         await main.create_instance({
