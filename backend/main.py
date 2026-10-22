@@ -126,6 +126,7 @@ GENERIC_RANGES = {str(OWL.Thing), str(RDFS.Resource)}
 XSD_INTEGER = "http://www.w3.org/2001/XMLSchema#integer"
 XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
 IGNORE_NAMESPACES = ["http://www.w3.org/2002/07/owl#"]
+XSD_NAMESPACE = "http://www.w3.org/2001/XMLSchema#"
 
 DEFAULT_ONTOLOGY_UPLOAD_LIMIT_MB = 200
 DEFAULT_METADATA_UPLOAD_LIMIT_MB = 2048
@@ -1319,16 +1320,83 @@ def get_property_cardinality(class_uri: str, prop_uri: str) -> dict:
     minc, maxc = _property_cardinalities.get((class_uri, prop_uri), (None, None))
     return {"minCardinality": minc, "maxCardinality": maxc}
 
-def _get_property_type(prop_uri: str) -> str:
-    u = URIRef(prop_uri)
-    g = state["combined_onto_graph"]
-    if (u, RDF.type, OWL.ObjectProperty) in g:
+def _is_datatype_uri(
+    uri: str,
+    graph: Optional[Graph] = None,
+    active_datatypes: Optional[set[str]] = None,
+) -> bool:
+    """Return whether Semantta recognizes a URI as a datatype."""
+    if uri in SYSTEM_DATATYPES or uri.startswith(XSD_NAMESPACE):
+        return True
+
+    if active_datatypes and uri in active_datatypes:
+        return True
+
+    ontology_graph = (
+        graph
+        if graph is not None
+        else state["combined_onto_graph"]
+    )
+
+    if (
+        URIRef(uri),
+        RDF.type,
+        RDFS.Datatype,
+    ) in ontology_graph:
+        return True
+
+    # Use processed ontology entities as a fallback when the combined
+    # graph does not contain the original datatype declaration.
+    return any(
+        entity.get("uri") == uri
+        and entity.get("type") == "datatype"
+        for ontology in state.get("ontologies", [])
+        for entity in ontology.get("entities", [])
+    )
+
+def _get_property_type(
+    prop_uri: str,
+    active_datatypes: Optional[set[str]] = None,
+) -> str:
+    """Classify a property according to its declared type and ranges."""
+    property_uri = URIRef(prop_uri)
+    ontology_graph = state["combined_onto_graph"]
+
+    # Explicit OWL property declarations take precedence.
+    if (
+        property_uri,
+        RDF.type,
+        OWL.ObjectProperty,
+    ) in ontology_graph:
         return "object"
-    if (u, RDF.type, OWL.DatatypeProperty) in g:
+
+    if (
+        property_uri,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ) in ontology_graph:
         return "datatype"
-    for r in g.objects(u, RDFS.range):
-        if str(r).startswith("http://www.w3.org/2001/XMLSchema#"):
-            return "datatype"
+
+    # Otherwise, classify the property using all known datatype ranges.
+    ranges = [
+        str(value)
+        for value in ontology_graph.objects(
+            property_uri,
+            RDFS.range,
+        )
+        if isinstance(value, URIRef)
+    ]
+
+    if any(
+        _is_datatype_uri(
+            range_uri,
+            ontology_graph,
+            active_datatypes,
+        )
+        for range_uri in ranges
+    ):
+        return "datatype"
+
     return "object"
 
 def _normalize_namespace_delimiters(uri: str) -> str:
@@ -2513,7 +2581,7 @@ class ApplicationProfile:
 
             if uri in SYSTEM_ANNOTATION_PROPERTIES:
                 entity_type = "annotation_property"
-            elif _get_property_type(uri) == "datatype":
+            elif _get_property_type(uri, active_datatypes) == "datatype":
                 entity_type = "datatype_property"
             else:
                 entity_type = "object_property"
@@ -2682,9 +2750,15 @@ class ApplicationProfile:
     async def get_properties_for_class(self, class_uri: str) -> List[dict]:
         prop_refs = await self._list_active_properties(class_uri)
         props = []
+        active_datatypes = set(
+            await shacl.get_active_datatypes()
+        )
         for ref in prop_refs:
             prop_uri = ref["uri"]
-            ptype = _get_property_type(prop_uri)
+            ptype = _get_property_type(
+                prop_uri,
+                active_datatypes,
+            )
             ranges = get_property_ranges(prop_uri)
             datatype = ranges[0] if ptype == "datatype" and ranges else "http://www.w3.org/2001/XMLSchema#string"
             suggestions = await get_instance_suggestions(ranges) if ptype == "object" else []
@@ -2692,9 +2766,12 @@ class ApplicationProfile:
             shacl_constraints = await self._get_property_constraints(prop_uri)
 
             if "class" in shacl_constraints:
+                ptype = "object"
                 ranges = [shacl_constraints["class"]]
-                suggestions = await get_instance_suggestions(ranges) if ptype == "object" else []
+                suggestions = await get_instance_suggestions(ranges)
             if "datatype" in shacl_constraints:
+                ptype = "datatype"
+                suggestions = []
                 datatype = shacl_constraints["datatype"]
             if "minCount" in shacl_constraints:
                 card["minCardinality"] = shacl_constraints["minCount"]
@@ -2848,9 +2925,114 @@ class SHACLProfile:
         if self._on_change:
             self._on_change()
 
+    async def _repair_legacy_datatype_constraints(
+        self,
+        shapes_graph: Graph,
+    ) -> None:
+        """Migrate property shapes that use datatype ranges as classes."""
+        active_datatypes = set(
+            await self.get_active_datatypes()
+        )
+
+        repairs = []
+
+        # Only inspect property shapes, which are identified by sh:path.
+        for shape_uri, _property_uri in list(
+            shapes_graph.subject_objects(SH.path)
+        ):
+            if not isinstance(shape_uri, URIRef):
+                continue
+
+            # Older generated profiles may have emitted sh:class for
+            # custom datatypes because they were not recognized as datatypes.
+            for old_range in list(
+                shapes_graph.objects(shape_uri, SH["class"])
+            ):
+                if not isinstance(old_range, URIRef):
+                    continue
+
+                if not _is_datatype_uri(
+                    str(old_range),
+                    state["combined_onto_graph"],
+                    active_datatypes,
+                ):
+                    continue
+
+
+                new_predicate = SH.datatype
+                new_value = old_range
+
+                repairs.append((
+                    shape_uri,
+                    SH["class"],
+                    old_range,
+                    new_predicate,
+                    new_value,
+                ))
+
+        for (
+            shape_uri,
+            old_predicate,
+            old_value,
+            new_predicate,
+            new_value,
+        ) in repairs:
+            await self.store.update(f"""
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_uri.n3()}
+                        {old_predicate.n3()}
+                        {old_value.n3()} .
+                    }}
+                }}
+                INSERT {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_uri.n3()}
+                        {new_predicate.n3()}
+                        {new_value.n3()} .
+                    }}
+                }}
+                WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_uri.n3()}
+                        {old_predicate.n3()}
+                        {old_value.n3()} .
+                    }}
+                }}
+            """)
+
+            shapes_graph.remove((
+                shape_uri,
+                old_predicate,
+                old_value,
+            ))
+            shapes_graph.add((
+                shape_uri,
+                new_predicate,
+                new_value,
+            ))
+
+        if repairs:
+            self._changed()
+
     async def _get_shapes_graph(self) -> Graph:
         if self._shapes_cache is None:
-            self._shapes_cache = await self.store.load_shapes_graph()
+            shapes_graph = await self.store.load_shapes_graph()
+
+            if shapes_graph is None:
+                raise RuntimeError(
+                    "Failed to load the SHACL shapes graph from Fuseki. "
+                    "Validation cannot continue without the shapes graph."
+                )
+
+            if not isinstance(shapes_graph, Graph):
+                raise TypeError(
+                    "FusekiStore.load_shapes_graph() must return an "
+                    f"rdflib.Graph, not {type(shapes_graph).__name__}."
+                )
+
+            self._shapes_cache = shapes_graph
+
         return self._shapes_cache
 
     def _property_datatype_from_shapes(
@@ -2905,15 +3087,46 @@ class SHACLProfile:
 
     async def _set_default_constraints(self, prop_uri: str, class_uri: Optional[str] = None):
         shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-        ptype = _get_property_type(prop_uri)
+        active_datatypes = set(await self.get_active_datatypes())
+        ptype = _get_property_type(prop_uri, active_datatypes)
         ranges = get_property_ranges(prop_uri)
         card = get_property_cardinality(class_uri, prop_uri) if class_uri else None
 
         constraints = {}
-        if ptype == "object" and ranges and _is_specific_range(ranges[0]):
+
+        known_datatype_ranges = [
+            range_uri
+            for range_uri in ranges
+            if _is_datatype_uri(
+                range_uri,
+                state["combined_onto_graph"],
+                active_datatypes,
+            )
+        ]
+
+        specific_datatype_ranges = [
+            range_uri
+            for range_uri in known_datatype_ranges
+        ]
+
+        if (
+            ptype == "object"
+            and ranges
+            and _is_specific_range(ranges[0])
+        ):
             constraints[str(SH["class"])] = ranges[0]
-        elif ptype == "datatype" and ranges:
-            constraints[str(SH.datatype)] = ranges[0]
+
+        elif ptype == "datatype":
+            if specific_datatype_ranges:
+                constraints[str(SH.datatype)] = (
+                    specific_datatype_ranges[0]
+                )
+
+            elif ranges:
+                # An explicitly declared owl:DatatypeProperty can have a
+                # custom range that is not separately registered as rdfs:Datatype.
+                selected_range = ranges[0]
+                constraints[str(SH.datatype)] = selected_range
 
         if card:
             minc = card.get("minCardinality")

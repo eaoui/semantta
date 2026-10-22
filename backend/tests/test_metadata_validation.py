@@ -19,6 +19,7 @@ import main
 
 EX = Namespace("https://example.org/validation-test/")
 SH = Namespace("http://www.w3.org/ns/shacl#")
+OWL = Namespace("http://www.w3.org/2002/07/owl#")
 
 
 class StaticShapeStore:
@@ -273,3 +274,74 @@ async def test_live_class_selection_validation_skips_required_fields(
         {},
     )
     shacl_check.assert_not_awaited()
+
+
+def test_property_type_recognizes_application_profile_datatypes(
+    monkeypatch,
+):
+    ontology = Graph()
+
+    # Generic literal-valued property.
+    ontology.add((
+        EX.label,
+        RDFS.range,
+        RDFS.Literal,
+    ))
+
+    # Custom datatype declared by the ontology.
+    ontology.add((
+        EX.ISBN,
+        RDF.type,
+        RDFS.Datatype,
+    ))
+    ontology.add((
+        EX.isbn,
+        RDFS.range,
+        EX.ISBN,
+    ))
+
+    # Built-in XML Schema datatype.
+    ontology.add((
+        EX.pageCount,
+        RDFS.range,
+        XSD.integer,
+    ))
+
+    # Explicitly declared object property must remain an object property.
+    ontology.add((
+        EX.author,
+        RDF.type,
+        OWL.ObjectProperty,
+    ))
+    ontology.add((
+        EX.author,
+        RDFS.range,
+        EX.Person,
+    ))
+
+    # A datatype known through the Application Profile inventory.
+    ontology.add((
+        EX.profileValue,
+        RDFS.range,
+        EX.ProfileDatatype,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology,
+    )
+
+    active_datatypes = {
+        str(EX.ProfileDatatype),
+    }
+
+    assert main._get_property_type(str(EX.label)) == "datatype"
+    assert main._get_property_type(str(EX.ISBN)) == "object"
+    assert main._get_property_type(str(EX.isbn)) == "datatype"
+    assert main._get_property_type(str(EX.pageCount)) == "datatype"
+    assert main._get_property_type(
+        str(EX.profileValue),
+        active_datatypes,
+    ) == "datatype"
+    assert main._get_property_type(str(EX.author)) == "object"
