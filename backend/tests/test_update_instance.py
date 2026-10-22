@@ -34,6 +34,12 @@ class FakeSHACL:
     async def get_active_properties(self):
         return [TEST_PROPERTY]
 
+    async def get_property_datatype(
+        self,
+        prop_uri: str,
+    ) -> str | None:
+        return None
+
     async def validate_instance(self, class_uris, properties):
         if self.error is not None:
             raise self.error

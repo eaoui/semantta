@@ -154,19 +154,8 @@ def fuseki_server(
 
 
 async def clear_test_dataset(store: FusekiStore) -> None:
-    """Remove default-graph triples and all populated named graphs."""
-    await store.update("CLEAR DEFAULT")
-
-    rows = await store.query("""
-        SELECT DISTINCT ?g
-        WHERE {
-            GRAPH ?g { ?s ?p ?o }
-        }
-    """)
-
-    for row in rows:
-        graph_uri = URIRef(row["g"]).n3()
-        await store.update(f"DROP SILENT GRAPH {graph_uri}")
+    """Clear the isolated temporary Fuseki test dataset."""
+    await store.update("CLEAR ALL")
 
 
 @pytest_asyncio.fixture

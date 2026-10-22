@@ -3517,7 +3517,7 @@ class SHACLProfile:
             shacl_graph=explicit_shapes,
             ont_graph=validation_ontology_graph,
             do_owl_imports=False,
-            inference="owlrl",
+            inference="rdfs",
             abort_on_first=False,
         )
         report_graph = cast(Graph, raw_graph)

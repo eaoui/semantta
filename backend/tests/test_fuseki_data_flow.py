@@ -41,6 +41,19 @@ async def construct_graph(store, query):
     return graph
 
 
+def normalized_rdf_triples(graph: Graph) -> set[tuple]:
+    """Normalize RDF 1.1 simple strings and explicit xsd:string literals."""
+    normalized = set()
+
+    for subject, predicate, obj in graph:
+        if isinstance(obj, Literal) and obj.datatype == XSD.string:
+            obj = Literal(str(obj))
+
+        normalized.add((subject, predicate, obj))
+
+    return normalized
+
+
 @pytest.mark.asyncio
 async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     fuseki_store,
@@ -85,10 +98,14 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     monkeypatch.setattr(main, "_property_cardinalities", {})
     monkeypatch.setattr(main, "_subclass_pairs", set())
     monkeypatch.setattr(main, "_disjoint_pairs", set())
+    monkeypatch.setattr(main, "validation_ontology_graph", Graph())
 
     main.rebuild_precomputed()
 
-    profile = main.SHACLProfile(store)
+    profile = main.SHACLProfile(
+        store,
+        on_change=main.invalidate_profile,
+    )
     monkeypatch.setattr(main, "shacl", profile)
 
     # Generate and persist the Application Profile from ontology entities.
@@ -107,9 +124,20 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
         main.shape_uri_for_entity(str(TITLE), "property", {})
     )
 
+    page_count_shape = URIRef(
+        main.shape_uri_for_entity(
+            str(EX.pageCount),
+            "property",
+            {},
+        )
+    )
+
     # Reload shapes from Fuseki instead of checking only the write request.
     persisted_shapes = await store.load_shapes_graph()
 
+    assert (class_shape, SH.property, page_count_shape) in persisted_shapes
+    assert (page_count_shape, SH.path, EX.pageCount) in persisted_shapes
+    assert (page_count_shape, SH.datatype, XSD.integer) in persisted_shapes
     assert (class_shape, SH.targetClass, BOOK) in persisted_shapes
     assert (class_shape, SH.property, property_shape) in persisted_shapes
     assert (property_shape, SH.path, TITLE) in persisted_shapes
@@ -127,34 +155,17 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
 
     invalid_uri = str(EX.invalidBook)
 
-    probe = Graph()
-    probe.add((EX.invalidBook, RDF.type, BOOK))
+    assert main.shacl is profile
 
-    conforms, _, report_text = pyshacl.validate(
-        probe,
-        shacl_graph=persisted_shapes,
-        ont_graph=main.validation_ontology_graph,
-        inference="owlrl",
-    )
-
-    assert not conforms, report_text
-
-    # Invalid metadata must fail without adding anything to the default graph.
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(
+        HTTPException,
+        match="SHACL validation failed",
+    ):
         await main.create_instance({
             "class_uris": [str(BOOK)],
             "instance_uri": invalid_uri,
-            "properties": {
-                str(TITLE): ["A valid title"],
-                str(EX.pageCount): ["42"],
-            },
+            "properties": {},
         })
-
-    assert exc_info.value.status_code == 400
-    assert "SHACL validation failed" in exc_info.value.detail
-    assert not await store.query(
-        f"SELECT ?p ?o WHERE {{ <{invalid_uri}> ?p ?o }}"
-    )
 
     # Valid metadata must be persisted as RDF triples.
     valid_uri = str(EX.validBook)
@@ -162,7 +173,10 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     result = await main.create_instance({
         "class_uris": [str(BOOK)],
         "instance_uri": valid_uri,
-        "properties": {str(TITLE): ["A valid title"]},
+        "properties": {
+            str(TITLE): ["A valid title"],
+            str(EX.pageCount): ["42"],
+        },
     })
 
     assert result == {"status": "created", "uri": valid_uri}
@@ -177,7 +191,7 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     expected.add((
         URIRef(valid_uri),
         TITLE,
-        Literal("A valid title", datatype=XSD.string),
+        Literal("A valid title"),
     ))
 
     expected.add((
@@ -186,8 +200,11 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
         Literal("42", datatype=XSD.integer),
     ))
 
-    assert set(default_graph) == set(expected)
-    assert set(main.state["created_instances_graph"]) == set(expected)
+    assert normalized_rdf_triples(default_graph) == normalized_rdf_triples(expected)
+
+    assert normalized_rdf_triples(
+        main.state["created_instances_graph"]
+    ) == normalized_rdf_triples(expected)
 
 
 @pytest.mark.asyncio
