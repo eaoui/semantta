@@ -11,6 +11,18 @@
 <script setup lang="ts">
 import { useAppStore } from '@/stores/app'
 import { Toaster } from 'vue-sonner'
+import { getAdminPageTitle } from '@/utils/pageTitle'
 
 const store = useAppStore()
+const route = useRoute()
+
+useHead(() => {
+  const pageName = getAdminPageTitle(route.path)
+
+  return {
+    title: pageName,
+    titleTemplate: (titleChunk) =>
+      `Semantta - ${titleChunk || pageName}`,
+  }
+})
 </script>

@@ -3,9 +3,9 @@
     <h2 class="text-2xl font-bold mb-4 text-gray-900 dark:text-gray-100">General Settings</h2>
 
     <form @submit.prevent="save">
-      <!-- Website Title -->
+      <!-- Site Title -->
       <div class="mb-4">
-        <label class="block mb-1 text-gray-700 dark:text-gray-300">Website Title</label>
+        <label class="block mb-1 text-gray-700 dark:text-gray-300">Site Title</label>
         <input v-model="title" type="text"
           class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full max-w-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
           placeholder="Semantta" />
@@ -74,16 +74,27 @@ onMounted(async () => {
 })
 
 async function save() {
+  const normalizedTitle = title.value.trim()
+
   await $fetch(`${apiBase}/api/settings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      site_title: title.value,
-      base_iri: baseIri.value
-    })
+      site_title: normalizedTitle,
+      base_iri: baseIri.value,
+    }),
   })
-  if (store.siteTitle !== undefined) store.siteTitle = title.value
-  if (store.baseIri !== undefined) store.baseIri = baseIri.value
+
+  // The backend ignores an empty title, so preserve the current
+  // shared title when the input is blank.
+  if (normalizedTitle) {
+    store.siteTitle = normalizedTitle
+  }
+
+  if (store.baseIri !== undefined) {
+    store.baseIri = baseIri.value
+  }
+
   saved.value = true
   setTimeout(() => (saved.value = false), 2000)
 }

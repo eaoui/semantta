@@ -1,16 +1,24 @@
-/**
- * Provides the site title from the backend settings,
- * with SSR‑safe initial value to avoid flicker.
- */
-export const useSiteTitle = () => {
-  const config = useRuntimeConfig()
-  const apiBase = config.public.apiBase
+import { computed } from 'vue'
+import { useAppStore } from '@/stores/app'
 
-  const { data } = useAsyncData('site-settings', () =>
-    $fetch<{ site_title: string }>(`${apiBase}/api/settings`)
+export const useSiteTitle = () => {
+  const store = useAppStore()
+
+  // Display name used in the public site's interface.
+  const title = computed(
+    () => store.siteTitle?.trim() || 'Semantta',
   )
 
-  const title = computed(() => data.value?.site_title || 'Semantta')
+  // Browser title must not use the fallback brand name.
+  const browserTitle = computed(() => {
+    if (!store.isReady) return 'Loading...'
 
-  return { title }
+    const configuredTitle = store.siteTitle?.trim()
+
+    return configuredTitle && configuredTitle !== 'Semantta'
+      ? configuredTitle
+      : 'Loading...'
+  })
+
+  return { title, browserTitle }
 }

@@ -155,8 +155,17 @@ onMounted(async () => {
   await loadFeatured()
 })
 
-useHead({
-  title: 'Semantta',
+const { title: siteTitle } = useSiteTitle()
+
+const { browserTitle } = useSiteTitle()
+
+useHead(() => {
+  const title = browserTitle.value
+
+  return {
+    title,
+    titleTemplate: () => title,
+  }
 })
 </script>
 ```

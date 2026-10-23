@@ -65,7 +65,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import { useSiteTitle } from '@/composables/useSiteTitle'
 
-const { title: siteTitle } = useSiteTitle()
+const { title: siteTitle, browserTitle } = useSiteTitle()
 const auth = useAuth()
 const userMenuOpen = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
@@ -91,11 +91,20 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocumentClick)
 })
 
-// Dynamic <title> for the browser tab
-useHead({
-  titleTemplate: (titleChunk) => {
-    const site = siteTitle.value || 'Semantta'
-    return titleChunk ? `${titleChunk} - ${site}` : site
-  },
+// Dynamic browser title for public pages.
+useHead(() => {
+  const site = browserTitle.value
+
+  return {
+    titleTemplate: (titleChunk) => {
+      if (site === 'Loading...') {
+        return 'Loading...'
+      }
+
+      return titleChunk
+        ? `${titleChunk} - ${site}`
+        : site
+    },
+  }
 })
 </script>
