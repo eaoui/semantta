@@ -304,43 +304,81 @@ async function fetchConstraints() {
   }
 }
 
+
 async function save() {
   const payload: Record<string, any> = {}
+
   for (const pred in relevantConstraints.value) {
     const config = constraintConfig[pred]
     if (!config) continue
 
     if (config.type === 'boolean') {
       const val = formData[pred]
-      if (val === true || val === 'true') payload[pred] = 'true'
-    } else if (['class', 'property', 'datatype'].includes(config.type)) {
-      const arr = formData[pred] as string[]
-      if (arr && arr.length) {
-        if (pred === 'http://www.w3.org/ns/shacl#datatype' || pred === 'http://www.w3.org/ns/shacl#class') {
+      if (val === true || val === 'true') {
+        payload[pred] = 'true'
+      }
+    } else if (
+      ['class', 'property', 'datatype'].includes(config.type)
+    ) {
+      const raw = formData[pred]
+      const arr = (
+        Array.isArray(raw)
+          ? raw
+          : raw == null || raw === ''
+            ? []
+            : [raw]
+      )
+        .map(String)
+        .filter(value => value.trim() !== '')
+
+      if (config.multiple) {
+        // An empty list is meaningful: it clears existing links
+        // or removes a multi-valued constraint.
+        payload[pred] = arr
+      } else if (arr.length > 0) {
+        if (
+          pred === 'http://www.w3.org/ns/shacl#class' ||
+          pred === 'http://www.w3.org/ns/shacl#datatype'
+        ) {
           payload[pred] = arr[0]
         } else {
-          payload[pred] = arr
+          payload[pred] = arr[0]
         }
       }
-    } else if (config.type === 'integer' || config.type === 'number') {
+    } else if (
+      config.type === 'integer' ||
+      config.type === 'number'
+    ) {
       const val = formData[pred]
-      if (val !== '' && val != null) payload[pred] = val
+      if (val !== '' && val != null) {
+        payload[pred] = val
+      }
     } else {
       const val = formData[pred]
-      if (val !== '' && val != null) payload[pred] = String(val)
+      if (val !== '' && val != null) {
+        payload[pred] = String(val)
+      }
     }
   }
 
   try {
-    await $fetch(`${apiBase}/api/profile/constraints/${encodeURIComponent(entityUri.value)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-    toast.success('Constraints saved')
+    await $fetch(
+      `${apiBase}/api/profile/constraints/${encodeURIComponent(entityUri.value)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    )
+
+    // Refresh shared Application Profile state without reloading the page.
+    await store.fetchState()
+
     snapshotFormData()
+    toast.success('Constraints saved')
   } catch (e: any) {
-    toast.error(e?.data?.detail || e.message)
+    toast.error(e?.data?.detail || e.message || 'Failed to save constraints')
   }
 }
+
 </script>

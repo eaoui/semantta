@@ -90,3 +90,179 @@ async def test_valid_link_replacement_uses_one_update(monkeypatch):
     update = store.update.await_args.args[0]
     assert "DELETE DATA" in update
     assert "INSERT DATA" in update
+
+
+@pytest.mark.asyncio
+async def test_saving_empty_domain_classes_clears_relationships(
+    monkeypatch,
+):
+    store = AsyncMock()
+    store.query.return_value = [{"ps": "urn:test:property-shape"}]
+
+    apply_constraints = AsyncMock()
+    sync_links = AsyncMock()
+
+    monkeypatch.setattr(
+        main,
+        "store",
+        store,
+    )
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value="datatype_property"),
+    )
+    monkeypatch.setattr(
+        main,
+        "validate_constraints",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_apply_constraints",
+        apply_constraints,
+    )
+    monkeypatch.setattr(
+        main,
+        "_sync_entity_links",
+        sync_links,
+    )
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None
+    )
+
+    await main.set_entity_constraints(
+        PROPERTY_URI,
+        {
+            "urn:domainClasses": [],
+            str(main.SH.maxLength): 50,
+        },
+    )
+
+    apply_constraints.assert_awaited_once()
+    sync_links.assert_awaited_once_with(
+        PROPERTY_URI,
+        "datatype_property",
+        [],
+    )
+
+    apply_constraints.assert_awaited_once_with(
+        "urn:test:property-shape",
+        {str(main.SH.maxLength): 50},
+        keep_predicates={
+            main.RDF.type,
+            main.SH.path,
+            main.SH.order,
+            main.SH.property,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_saving_empty_class_properties_clears_relationships(
+    monkeypatch,
+):
+    apply_constraints = AsyncMock()
+    sync_links = AsyncMock()
+
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value="class"),
+    )
+    monkeypatch.setattr(
+        main,
+        "validate_constraints",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        main,
+        "shape_uri_for_entity",
+        lambda *_: "urn:test:class-shape",
+    )
+    monkeypatch.setattr(
+        main,
+        "_apply_constraints",
+        apply_constraints,
+    )
+    monkeypatch.setattr(
+        main,
+        "_sync_entity_links",
+        sync_links,
+    )
+    monkeypatch.setattr(main, "invalidate_profile", lambda: None)
+
+    await main.set_entity_constraints(
+        CLASS_URI,
+        {
+            str(main.SH.property): [],
+            str(main.SH.minCount): 1,
+        },
+    )
+
+    apply_constraints.assert_awaited_once()
+    sync_links.assert_awaited_once_with(
+        CLASS_URI,
+        "class",
+        [],
+    )
+
+    apply_constraints.assert_awaited_once_with(
+        "urn:test:class-shape",
+        {str(main.SH.minCount): 1},
+        keep_predicates={
+            main.RDF.type,
+            main.SH.targetClass,
+            main.SH.property,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_property_domain_list_deletes_existing_links(
+    monkeypatch,
+):
+    store = AsyncMock()
+    store.query.return_value = [{"class": CLASS_URI}]
+
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda _: [],
+    )
+
+    await main._sync_entity_links(
+        PROPERTY_URI,
+        "datatype_property",
+        [],
+    )
+
+    store.update.assert_awaited_once()
+    update = store.update.await_args.args[0]
+
+    assert "DELETE DATA" in update
+    assert "sh:property" in update
+
+
+@pytest.mark.asyncio
+async def test_empty_class_property_list_deletes_existing_links(
+    monkeypatch,
+):
+    store = AsyncMock()
+    monkeypatch.setattr(main, "store", store)
+
+    await main._sync_entity_links(
+        CLASS_URI,
+        "class",
+        [],
+    )
+
+    store.update.assert_awaited_once()
+    update = store.update.await_args.args[0]
+
+    assert "DELETE WHERE" in update
+    assert "sh:property" in update
+    assert "INSERT DATA" not in update

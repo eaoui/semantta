@@ -6746,35 +6746,104 @@ async def get_entity_constraints(entity_uri: str):
 
     return {"uri": entity_uri, "type": etype, "original": original, "overrides": overrides}
 
+
 @app.put("/api/profile/constraints/{entity_uri:path}")
 async def set_entity_constraints(entity_uri: str, constraints: dict):
     etype = await ap.get_entity_type(entity_uri)
+
+    # Work with a copy because relationship keys must be removed before
+    # serializing the remaining entries as SHACL constraint triples.
+    constraints = dict(constraints)
     validate_constraints(entity_uri, etype, constraints)
 
-    if etype in ("object_property", "datatype_property", "annotation_property"):
+    property_types = {
+        "object_property",
+        "datatype_property",
+        "annotation_property",
+    }
+
+    domain_classes_key = "urn:domainClasses"
+    property_links_key = str(SH.property)
+
+    has_domain_classes = (
+        etype in property_types
+        and domain_classes_key in constraints
+    )
+    domain_classes = constraints.pop(
+        domain_classes_key,
+        None,
+    )
+
+    has_property_links = (
+        etype == "class"
+        and property_links_key in constraints
+    )
+    property_links = constraints.pop(
+        property_links_key,
+        None,
+    )
+
+    if etype in property_types:
         rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?ps WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{ ?ps sh:path <{entity_uri}> . }}
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?ps sh:path <{entity_uri}> .
+                }}
             }}
         """)
-        for r in rows:
-            await _apply_constraints(r["ps"], constraints,
-                                     keep_predicates={RDF.type, SH.path, SH.order, SH.property})
-        if "urn:domainClasses" in constraints:
-            await _sync_entity_links(entity_uri, etype, constraints["urn:domainClasses"])
-            del constraints["urn:domainClasses"]
+
+        for row in rows:
+            await _apply_constraints(
+                row["ps"],
+                constraints,
+                keep_predicates={
+                    RDF.type,
+                    SH.path,
+                    SH.order,
+                    SH.property,
+                },
+            )
+
+        # Synchronize explicitly submitted relationship lists even
+        # when empty, so users can remove all class associations.
+        if has_domain_classes:
+            await _sync_entity_links(
+                entity_uri,
+                etype,
+                domain_classes,
+            )
 
     elif etype == "class":
-        class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
-        await _apply_constraints(class_shape_uri, constraints,
-                                 keep_predicates={RDF.type, SH.targetClass, SH.property})
-        if str(SH.property) in constraints:
-            prop_uris = (constraints[str(SH.property)]
-                         if isinstance(constraints[str(SH.property)], list)
-                         else [constraints[str(SH.property)]])
-            await _sync_entity_links(entity_uri, etype, prop_uris)
-            del constraints[str(SH.property)]
+        class_shape_uri = shape_uri_for_entity(
+            entity_uri,
+            "class",
+            state["prefix_map"],
+        )
+
+        await _apply_constraints(
+            class_shape_uri,
+            constraints,
+            keep_predicates={
+                RDF.type,
+                SH.targetClass,
+                SH.property,
+            },
+        )
+
+        if has_property_links:
+            if property_links is None or property_links == "":
+                property_uris = []
+            elif isinstance(property_links, list):
+                property_uris = property_links
+            else:
+                property_uris = [property_links]
+
+            await _sync_entity_links(
+                entity_uri,
+                etype,
+                property_uris,
+            )
 
     invalidate_profile()
     return {"status": "ok"}
