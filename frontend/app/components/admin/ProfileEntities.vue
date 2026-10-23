@@ -1,22 +1,17 @@
 <template>
-  <div class="flex gap-6">
-    <!-- Left: main area -->
-    <div class="flex-1 min-w-0">
-      <div class="mb-4">
-        <button v-if="store.metadataFiles.length > 0" @click="generateProfile"
-          class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
-          Generate profile from metadata
-        </button>
-      </div>
 
-      <!-- Tabs -->
-      <ul class="flex gap-1 mb-4">
-        <li v-for="tab in mainTabs" :key="tab" @click="activeTab = tab"
-          class="px-3 py-1 rounded cursor-pointer transition-colors"
-          :class="activeTab === tab ? 'bg-gray-400 dark:bg-gray-500 text-white font-semibold' : 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-600'">
-          {{ tabLabel(tab) }}
-        </li>
-      </ul>
+  <!-- Tabs -->
+  <ul class="flex gap-1 pb-4 overflow-auto">
+    <li v-for="tab in mainTabs" :key="tab" @click="activeTab = tab"
+      class="px-3 py-1 rounded cursor-pointer transition-colors whitespace-nowrap"
+      :class="activeTab === tab ? 'bg-blue-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-300 dark:hover:bg-slate-600'">
+      {{ tabLabel(tab) }}
+    </li>
+  </ul>
+
+  <div class="flex flex-col md:flex-row gap-6 items-start">
+    <!-- Left: main area -->
+    <div class="w-full flex-1 min-w-0 overflow-x-auto">
 
       <!-- Active entities table -->
       <table class="w-full border-collapse border border-gray-300 dark:border-gray-600">
@@ -59,29 +54,39 @@
     </div>
 
     <!-- Right sidebar -->
-    <aside class="w-72 shrink-0">
-      <div class="mb-6">
-        <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Filter Entities</h3>
-        <div class="space-y-3">
-          <SearchBox v-model="searchQuery" placeholder="Filter entities…" />
-          <select v-model="sourceFilter"
-            class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-            <option v-for="opt in sourceOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-        </div>
+    <aside class="order-first w-full shrink-0 md:order-last md:self-start md:w-56 lg:w-64">
+      <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Bulk Actions</h3>
+      <div class="mb-4">
+        <button v-if="store.metadataFiles.length > 0" @click="generateProfile"
+          class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 w-full">
+          Generate profile from metadata
+        </button>
       </div>
 
-      <div class="sticky top-0">
+      <div>
+        <div class="mb-6">
+          <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Filter Entities</h3>
+          <div class="space-y-3">
+            <SearchBox v-model="searchQuery" placeholder="Filter entities…" />
+            <select v-model="sourceFilter"
+              class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+              <option v-for="opt in sourceOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+          </div>
+        </div>
+
         <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Add Entity</h3>
-        <div class="max-h-96 overflow-y-auto overflow-x-hidden border border-gray-300 dark:border-gray-600 rounded py-2 dark:bg-gray-800">
+        <div
+          class="max-h-96 overflow-y-auto overflow-x-hidden border border-gray-300 dark:border-gray-600 rounded py-2 dark:bg-gray-800">
           <button v-for="entity in filteredInactiveEntities" :key="entity.uri"
             class="flex items-stretch justify-between py-1 hover:text-blue-600 dark:hover:text-blue-400 text-sm cursor-pointer border-b border-gray-200 dark:border-gray-700 last:border-0 hover:bg-gray-100 dark:hover:bg-gray-700 w-full"
             :class="{ 'text-gray-500 dark:text-gray-400': !entity.in_onto && entity.ontology !== 'System' }"
             @click="addEntity(entity.uri)" title="Add entity">
-            <span class="pl-2 py-2 text-left leading-4 text-gray-900 dark:text-gray-100 break-all">{{ formatUri(entity.uri)
-            }}</span>
+            <span class="pl-2 py-2 text-left leading-4 text-gray-900 dark:text-gray-100 break-all">{{
+              formatUri(entity.uri)
+              }}</span>
           </button>
           <p v-if="!filteredInactiveEntities.length" class="text-gray-500 dark:text-gray-400 text-sm mt-2">
             No inactive entities of this type.
