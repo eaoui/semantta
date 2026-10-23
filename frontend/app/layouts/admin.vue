@@ -1,5 +1,5 @@
 <template>
-  <div class="flex h-screen">
+  <div class="flex h-screen overflow-hidden bg-slate-100 dark:bg-slate-800">
     <AdminAppSidebar />
     <main class="flex-1 p-6 overflow-y-auto bg-white dark:bg-gray-900">
       <NuxtPage :key="store.displayFormat" />
