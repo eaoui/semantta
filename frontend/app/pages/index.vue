@@ -129,7 +129,6 @@ async function searchInstances() {
   try {
     const data = await api.fetchInstances({
       limit: 24,
-      offset: 0,
       search: query,
     })
 
