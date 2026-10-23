@@ -35,8 +35,13 @@ import { useAppStore } from '@/stores/app'
 import { useDisplay } from '@/composables/useDisplay'
 
 const { formatUri } = useDisplay()
-// Raw entity URIs, independent of display format
-const rawEntities = ref<string[]>([])
+
+interface EntityOption {
+  uri: string
+  label?: string | null
+}
+
+const rawEntities = ref<EntityOption[]>([])
 
 const props = withDefaults(defineProps<{
   modelValue: string[]
@@ -54,12 +59,27 @@ const emit = defineEmits<{
 }>()
 
 const store = useAppStore()
-// Build the full list whenever rawEntities or display format changes
+
+function displayEntityLabel(
+  uri: string,
+  explicitLabel?: string | null,
+): string {
+  if (store.displayFormat === 'label') {
+    const label =
+      explicitLabel ||
+      store.profileEntities.find(entity => entity.uri === uri)?.label
+
+    return label || formatUri(uri, 'label') || uri
+  }
+
+  return formatUri(uri, store.displayFormat) || uri
+}
+
 const allEntities = computed(() =>
-  rawEntities.value.map(uri => ({
-    uri,
-    label: formatUri(uri, store.displayFormat) || uri,
-  }))
+  rawEntities.value.map(entity => ({
+    uri: entity.uri,
+    label: displayEntityLabel(entity.uri, entity.label),
+  })),
 )
 const search = ref('')
 const open = ref(false)
@@ -73,16 +93,24 @@ watch(search, () => {
 
 onMounted(async () => {
   if (props.availableEntities.length > 0) {
-    rawEntities.value = props.availableEntities.map(e => e.uri)
+    rawEntities.value = props.availableEntities.map(entity => ({
+      uri: entity.uri,
+      label: entity.label,
+    }))
   } else {
     if (props.entityType === 'class') {
       try {
-        const res = await $fetch<{ uri: string; label: string }[]>(
-          `${useRuntimeConfig().public.apiBase}/api/create-form/classes`
+        const res = await $fetch<
+          { uri: string; label?: string | null }[]
+        >(
+          `${useRuntimeConfig().public.apiBase}/api/create-form/classes`,
         )
         // Classes already come with labels from the backend – we still store their URIs
         // and let the computed re‑format them according to the current display mode.
-        rawEntities.value = res.map((c: any) => c.uri)
+        rawEntities.value = res.map(entity => ({
+          uri: entity.uri,
+          label: entity.label,
+        }))
       } catch (e) {
         console.error('Failed to load classes', e)
       }
@@ -90,12 +118,18 @@ onMounted(async () => {
       const activeProps = store.profileEntities.filter(
         e => e.active && ['object_property', 'datatype_property', 'annotation_property'].includes(e.type)
       )
-      rawEntities.value = activeProps.map(e => e.uri)
+      rawEntities.value = activeProps.map(e => ({
+        uri: e.uri,
+        label: e.label,
+      }))
     } else if (props.entityType === 'datatype') {
       const activeDatatypes = store.profileEntities.filter(
         e => e.active && e.type === 'datatype'
       )
-      rawEntities.value = activeDatatypes.map(e => e.uri)
+      rawEntities.value = activeDatatypes.map(e => ({
+        uri: e.uri,
+        label: e.label,
+      }))
     }
   }
 })
@@ -123,13 +157,14 @@ function remove(uri: string) {
 }
 
 function getLabel(uri: string): string {
-  const found = allEntities.value.find(e => e.uri === uri)
-  if (found?.label) return found.label
-  const profileEntity = store.profileEntities.find(e => e.uri === uri)
-  if (profileEntity) {
-    return formatUri(profileEntity.uri, store.displayFormat) || profileEntity.uri
-  }
-  return formatUri(uri, store.displayFormat) || uri
+  const found = allEntities.value.find(entity => entity.uri === uri)
+  if (found) return found.label
+
+  const profileEntity = store.profileEntities.find(
+    entity => entity.uri === uri,
+  )
+
+  return displayEntityLabel(uri, profileEntity?.label)
 }
 
 function hideDropdown() {

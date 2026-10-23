@@ -50,6 +50,7 @@ export interface Instance {
 
 export interface ProfileEntityItem {
   uri: string
+  label?: string | null
   type: string
   in_onto: boolean
   active: boolean

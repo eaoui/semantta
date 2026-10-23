@@ -29,6 +29,7 @@ class MetadataFileInfo(BaseModel):
 
 class ProfileEntityItem(BaseModel):
     uri: str
+    label: Optional[str] = None
     type: str
     in_onto: bool
     active: bool

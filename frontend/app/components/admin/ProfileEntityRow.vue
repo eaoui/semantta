@@ -1,22 +1,24 @@
 <template>
   <tr>
     <!-- Drag handle -->
-    <td v-if="draggable" class="border border-gray-300 dark:border-gray-600 p-2 text-center drag-handle cursor-grab" :class="mutedTextClass">⠿</td>
+    <td v-if="draggable" class="border border-gray-300 dark:border-gray-600 p-2 text-center drag-handle cursor-grab"
+      :class="mutedTextClass">⠿</td>
 
     <!-- URI -->
     <td class="border border-gray-300 dark:border-gray-600 p-2" :class="mutedTextClass">
-      {{ formatUri(props.entity.uri) }}
+      {{ displayEntityLabel(props.entity.uri, props.entity.label) }}
     </td>
 
     <!-- Types (only for individuals) -->
     <td v-if="showTypes" class="border border-gray-300 dark:border-gray-600 p-2" :class="mutedTextClass">
-      <span v-if="props.entity.types?.length">{{ props.entity.types.map(t => formatUri(t)).join(', ') }}</span>
+      <span v-if="props.entity.types?.length">{{props.entity.types.map(t => displayEntityLabel(t)).join(', ')}}</span>
       <span v-else class="text-gray-400 dark:text-gray-500">—</span>
     </td>
 
     <!-- Domain (only for properties) -->
     <td v-if="showDomain" class="border border-gray-300 dark:border-gray-600 p-2" :class="mutedTextClass">
-      <span v-if="props.entity.domain?.length">{{ props.entity.domain.map(d => formatUri(d)).join(', ') }}</span>
+      <span v-if="props.entity.domain?.length">{{props.entity.domain.map(d => displayEntityLabel(d)).join(', ')
+        }}</span>
       <span v-else class="text-gray-400 dark:text-gray-500">—</span>
     </td>
 
@@ -60,6 +62,21 @@ defineEmits<{
 
 const { formatUri } = useDisplay()
 const store = useAppStore()
+
+function displayEntityLabel(
+  uri: string,
+  explicitLabel?: string | null,
+): string {
+  if (store.displayFormat === 'label') {
+    const label =
+      explicitLabel ||
+      store.profileEntities.find(entity => entity.uri === uri)?.label
+
+    return label || formatUri(uri, 'label') || uri
+  }
+
+  return formatUri(uri) || uri
+}
 
 const isCoreEntity = computed(() => CORE_ENTITY_URIS.has(props.entity.uri))
 const isMetadataOnly = computed(() => {

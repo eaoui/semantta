@@ -7,7 +7,9 @@
         title="Back to Application Profile">
         <PhosphorIcon name="arrow-left" :ize="24" />
       </button>
-      <h2 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Edit Constraints – {{ formatUri(entityUri) }}</h2>
+      <h2 class="text-2xl font-bold text-gray-900 dark:text-gray-100">
+        Edit Constraints – {{ entityDisplayLabel }}
+      </h2>
     </div>
 
     <div v-if="loading" class="text-gray-500 dark:text-gray-400">Loading…</div>
@@ -98,11 +100,13 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from '@/composables/useDisplay'
+import { useAppStore } from '@/stores/app'
 import { constraintConfig } from '~/utils/constraintConfig'
 import EntitySelector from '@/components/admin/EntitySelector.vue'
 import { useToast } from '@/composables/useToast'
 
 const route = useRoute()
+const store = useAppStore()
 const router = useRouter()
 const { formatUri } = useDisplay()
 const apiBase = useRuntimeConfig().public.apiBase
@@ -110,6 +114,16 @@ const toast = useToast()
 
 const entityUri = ref('')
 const entityType = ref('')
+const entityDisplayLabel = computed(() => {
+  const uri = entityUri.value
+  const entity = store.profileEntities.find(item => item.uri === uri)
+
+  if (store.displayFormat === 'label') {
+    return entity?.label || formatUri(uri, 'label') || uri
+  }
+
+  return formatUri(uri) || uri
+})
 const original = ref<Record<string, string[]>>({})
 const overrides = ref<Record<string, string>>({})
 const loading = ref(true)

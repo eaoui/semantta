@@ -2654,6 +2654,21 @@ class ApplicationProfile:
                 },
             )
 
+        entity_labels = {
+            uri: get_label(uri)
+            for uri in candidates
+        }
+
+        metadata_only_uris = [
+            uri
+            for uri, candidate in candidates.items()
+            if not candidate["in_onto"]
+        ]
+
+        entity_labels.update(
+            await _get_stored_labels(metadata_only_uris)
+        )
+
         result = []
         for uri, cand in candidates.items():
             etype = cand["type"]
@@ -2673,7 +2688,11 @@ class ApplicationProfile:
                 active = False
 
             item = ProfileEntityItem(
-                uri=uri, type=etype, in_onto=cand["in_onto"], active=active,
+                uri=uri,
+                label=entity_labels.get(uri) or get_label(uri),
+                type=etype,
+                in_onto=cand["in_onto"],
+                active=active,
                 sources=list(dict.fromkeys(cand["sources"])),
                 ontology=cand["sources"][0] if cand["sources"] else None,
             )

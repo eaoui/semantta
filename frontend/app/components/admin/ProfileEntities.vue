@@ -20,7 +20,8 @@
             <th v-if="isPropertyTab"
               class="border border-gray-300 dark:border-gray-600 p-2 text-left w-8 text-gray-700 dark:text-gray-300">
             </th>
-            <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">URI
+            <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
+              {{ store.displayFormat === 'label' ? 'Entity' : 'URI' }}
             </th>
             <th v-if="activeTab === 'individual'"
               class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">Types
@@ -84,9 +85,9 @@
             class="flex items-stretch justify-between py-1 hover:text-blue-600 dark:hover:text-blue-400 text-sm cursor-pointer border-b border-gray-200 dark:border-gray-700 last:border-0 hover:bg-gray-100 dark:hover:bg-gray-700 w-full"
             :class="{ 'text-gray-500 dark:text-gray-400': !entity.in_onto && entity.ontology !== 'System' }"
             @click="addEntity(entity.uri)" title="Add entity">
-            <span class="pl-2 py-2 text-left leading-4 text-gray-900 dark:text-gray-100 break-all">{{
-              formatUri(entity.uri)
-              }}</span>
+            <span class="pl-2 py-2 text-left leading-4 text-gray-900 dark:text-gray-100 break-all">
+              {{ displayEntityLabel(entity) }}
+            </span>
           </button>
           <p v-if="!filteredInactiveEntities.length" class="text-gray-500 dark:text-gray-400 text-sm mt-2">
             No inactive entities of this type.
@@ -119,6 +120,14 @@ const router = useRouter()
 const loadingMsg = ref('')
 const toast = useToast()
 
+function displayEntityLabel(entity: ProfileEntityItem): string {
+  if (store.displayFormat === 'label') {
+    return entity.label || formatUri(entity.uri, 'label') || entity.uri
+  }
+
+  return formatUri(entity.uri) || entity.uri
+}
+
 const activeTab = computed({
   get: () => (route.query.tab as string) || 'class',
   set: (tab: string) => router.replace({ query: { ...route.query, tab } })
@@ -147,11 +156,18 @@ const isPropertyTab = computed(() =>
   ['object_property', 'datatype_property', 'annotation_property'].includes(activeTab.value)
 )
 
-function entityMatchesSearch(entity: ProfileEntityItem, query: string): boolean {
+function entityMatchesSearch(
+  entity: ProfileEntityItem,
+  query: string,
+): boolean {
   if (!query) return true
+
   const q = query.toLowerCase()
-  const display = entity.uri.toLowerCase()
-  return display.includes(q) || entity.uri.toLowerCase().includes(q)
+
+  return (
+    entity.uri.toLowerCase().includes(q) ||
+    (entity.label || '').toLowerCase().includes(q)
+  )
 }
 
 function entityMatchesSource(entity: ProfileEntityItem): boolean {
