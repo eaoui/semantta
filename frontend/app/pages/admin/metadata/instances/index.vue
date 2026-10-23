@@ -8,11 +8,11 @@
       <main class="w-full min-w-0 flex-1">
 
         <!-- Create button -->
-        <div class="mb-4">
+        <!-- <div class="mb-4">
           <NuxtLink to="/admin/metadata/create" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
             Create Instance
           </NuxtLink>
-        </div>
+        </div> -->
 
         <div v-if="store.instancesLoading" class="text-gray-500 dark:text-gray-400">
           Loading…

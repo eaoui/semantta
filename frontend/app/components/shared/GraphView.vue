@@ -2,7 +2,7 @@
   <div ref="graphPanel"
     class="graph-panel relative w-full h-150 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 [&:fullscreen]:w-screen [&:fullscreen]:h-screen [&:fullscreen]:max-w-none [&:fullscreen]:max-h-none [&:fullscreen]:rounded-none">
     <div class="grid h-full min-h-0 w-full" :class="filtersVisible
-      ? 'grid-cols-[minmax(0,5fr)_minmax(0,1fr)]'
+      ? 'grid-cols-[minmax(0,3fr)_minmax(0,2fr)] md:grid-cols-[minmax(0,4fr)_minmax(0,2fr)] lg:grid-cols-[minmax(0,5fr)_minmax(0,1fr)]'
       : 'grid-cols-[minmax(0,1fr)]'">
       <!-- Main graph area -->
       <section class="relative w-full h-full min-w-0 min-h-0">
@@ -848,10 +848,28 @@ function shuffleLayout() {
 }
 
 // ---------- lifecycle ----------
+let largeScreenQuery: MediaQueryList | null = null
+
+function handleLargeScreenChange(event: MediaQueryListEvent) {
+  filtersVisible.value = event.matches
+
+  void nextTick(() => {
+    network?.redraw()
+  })
+}
+
 onMounted(() => {
   document.addEventListener(
     'fullscreenchange',
     handleFullscreenChange,
+  )
+
+  largeScreenQuery = window.matchMedia('(min-width: 1024px)')
+  filtersVisible.value = largeScreenQuery.matches
+
+  largeScreenQuery.addEventListener(
+    'change',
+    handleLargeScreenChange,
   )
 })
 
@@ -885,6 +903,12 @@ onUnmounted(() => {
     'fullscreenchange',
     handleFullscreenChange,
   )
+
+  largeScreenQuery?.removeEventListener(
+    'change',
+    handleLargeScreenChange,
+  )
+  largeScreenQuery = null
 
   if (network) {
     network.destroy()

@@ -2,19 +2,9 @@
     <aside
         class="order-first w-full shrink-0 md:order-last md:sticky md:top-4 md:max-h-[calc(100vh-2rem)] md:self-start md:w-56 md:overflow-y-auto">
         <div>
-            <p v-if="showCount" class="mb-4 text-sm text-gray-600 dark:text-gray-400">
-                <template v-if="hasNonCountableFilters">
-                    Showing {{ pageStart }}–{{ pageEnd }} instance(s)
-                </template>
-                <template v-else>
-                    Showing {{ pageStart }}–{{ pageEnd }} of {{ total }} instance(s)
-                </template>
-            </p>
             <h3 class="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">
                 {{ mode === 'dataset' ? 'Filter Dataset' : 'Filter Instances' }}
             </h3>
-
-
 
             <div class="space-y-4">
                 <!-- Search -->
@@ -78,6 +68,15 @@
                 </template>
             </div>
         </div>
+
+        <p v-if="showCount" class="mt-6 text-sm text-gray-600 dark:text-gray-400">
+            <template v-if="hasNonCountableFilters">
+                Showing {{ pageStart }}–{{ pageEnd }} instance(s)
+            </template>
+            <template v-else>
+                Showing {{ pageStart }}–{{ pageEnd }} of {{ total }} instance(s)
+            </template>
+        </p>
     </aside>
 </template>
 

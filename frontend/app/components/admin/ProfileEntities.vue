@@ -55,7 +55,7 @@
     </div>
 
     <!-- Right sidebar -->
-    <aside class="order-first w-full shrink-0 md:order-last md:self-start md:w-56 lg:w-64">
+    <aside class="order-first w-full shrink-0 md:order-last md:self-start md:w-56 lg:w-64 max-w-96 mx-auto">
       <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Bulk Actions</h3>
       <div class="mb-4">
         <button v-if="store.metadataFiles.length > 0" @click="generateProfile"
