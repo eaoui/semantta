@@ -3814,8 +3814,71 @@ class SHACLProfile:
         report_graph = cast(Graph, raw_graph)
 
         if not conforms:
-            msgs = [str(o) for _, _, o in report_graph.triples((None, SH.resultMessage, None))]
-            raise HTTPException(400, "SHACL validation failed: " + "; ".join(msgs))
+            messages: list[str] = []
+
+            # Read each SHACL result separately so each message remains
+            # associated with its own result path.
+            result_nodes = sorted(
+                set(report_graph.subjects(SH.resultMessage, None)),
+                key=str,
+            )
+
+            for result_node in result_nodes:
+                path = report_graph.value(result_node, SH.resultPath)
+
+                # Fall back to the property path on the source shape when
+                # the validator does not include sh:resultPath.
+                if path is None:
+                    source_shape = report_graph.value(
+                        result_node,
+                        SH.sourceShape,
+                    )
+
+                    if source_shape is not None:
+                        path = explicit_shapes.value(
+                            source_shape,
+                            SH.path,
+                        )
+
+                for message_node in report_graph.objects(
+                    result_node,
+                    SH.resultMessage,
+                ):
+                    message = str(message_node)
+
+                    if isinstance(path, URIRef):
+                        property_ref = f"<{path}>"
+
+                        if message.startswith("Value "):
+                            # Example:
+                            # "Value does not have class <...>"
+                            # becomes:
+                            # "The value of property <...> does not have class <...>"
+                            message = (
+                                f"The value of property {property_ref} "
+                                f"{message[len('Value '):]}"
+                            )
+                        else:
+                            message = f"Property {property_ref}: {message}"
+
+                    elif path is not None:
+                        message = f"Validation issue for property path {path}: {message}"
+                    else:
+                        message = f"Validation issue: {message}"
+
+                    messages.append(message)
+
+            if not messages:
+                messages.append(
+                    "SHACL validation failed without providing result messages."
+                )
+
+            raise HTTPException(
+                400,
+                "SHACL validation failed: " + "; ".join(messages),
+            )
+
+        return True
         return True
 
 # ---------------------------------------------------------------------------

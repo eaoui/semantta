@@ -345,3 +345,28 @@ def test_property_type_recognizes_application_profile_datatypes(
         active_datatypes,
     ) == "datatype"
     assert main._get_property_type(str(EX.author)) == "object"
+
+
+@pytest.mark.asyncio
+async def test_shacl_validation_error_identifies_property():
+    property_uri = EX.agent
+    required_class = EX.Agent
+
+    shapes = make_property_shape(
+        EX.Book,
+        property_uri,
+        [(SH["class"], required_class)],
+    )
+    profile = make_profile(shapes)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await profile.validate_instance(
+            [str(EX.Book)],
+            {str(property_uri): ["not-a-resource"]},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert (
+        f"The value of property <{property_uri}> "
+        f"does not have class <{required_class}>"
+    ) in exc_info.value.detail
