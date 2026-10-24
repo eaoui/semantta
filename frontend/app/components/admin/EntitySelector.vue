@@ -50,8 +50,7 @@ const props = withDefaults(defineProps<{
   entityType?: 'class' | 'property' | 'datatype'
 }>(), {
   placeholder: 'Search…',
-  availableEntities: () => [],
-  entityType: 'class'
+  entityType: 'class',
 })
 
 const emit = defineEmits<{
@@ -87,12 +86,25 @@ const open = ref(false)
 const highlightIndex = ref(-1)
 const dropdownList = ref<HTMLElement | null>(null)
 
+watch(
+  () => props.availableEntities,
+  entities => {
+    if (entities === undefined) return
+
+    rawEntities.value = entities.map(entity => ({
+      uri: entity.uri,
+      label: entity.label,
+    }))
+  },
+  { immediate: true },
+)
+
 watch(search, () => {
   highlightIndex.value = -1
 })
 
 onMounted(async () => {
-  if (props.availableEntities.length > 0) {
+  if (props.availableEntities !== undefined) {
     rawEntities.value = props.availableEntities.map(entity => ({
       uri: entity.uri,
       label: entity.label,

@@ -893,6 +893,38 @@ def is_subclass(cls: str, parents: list) -> bool:
         return True
     return any((cls, p) in _subclass_pairs for p in parents)
 
+def _get_class_ancestor_index() -> Dict[str, List[str]]:
+    """Return all named superclasses for classes in the subclass index."""
+    parents_by_class: Dict[str, Set[str]] = {}
+    class_uris: Set[str] = set()
+
+    for child, parent in _subclass_pairs:
+        if not is_valid_uri(child) or not is_valid_uri(parent):
+            continue
+
+        parents_by_class.setdefault(child, set()).add(parent)
+        class_uris.update((child, parent))
+
+    ancestor_index: Dict[str, List[str]] = {}
+
+    for class_uri in class_uris:
+        ancestors: Set[str] = set()
+        pending = list(parents_by_class.get(class_uri, set()))
+
+        while pending:
+            ancestor = pending.pop()
+
+            # Avoid cycles and do not treat a class as its own superclass.
+            if ancestor == class_uri or ancestor in ancestors:
+                continue
+
+            ancestors.add(ancestor)
+            pending.extend(parents_by_class.get(ancestor, set()))
+
+        ancestor_index[class_uri] = sorted(ancestors)
+
+    return ancestor_index
+
 def _is_class_in_ontology(uri: str, g: Graph) -> bool:
     u = URIRef(uri)
     return (u, RDF.type, OWL.Class) in g or (u, RDF.type, RDFS.Class) in g
@@ -6647,7 +6679,17 @@ async def toggle_entity(req: ToggleRequest):
 
 @app.get("/api/create-form/classes")
 async def get_active_classes():
-    return [{"uri": uri, "label": get_label(uri)} for uri in await ap.get_active_classes()]
+    active_class_uris = await ap.get_active_classes()
+    ancestor_index = _get_class_ancestor_index()
+
+    return [
+        {
+            "uri": uri,
+            "label": get_label(uri),
+            "superClasses": ancestor_index.get(uri, []),
+        }
+        for uri in active_class_uris
+    ]
 
 @app.get("/api/create-form/properties")
 async def get_properties_for_class(class_uri: str):

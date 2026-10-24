@@ -14,9 +14,6 @@
       ? 'grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_17rem]'
       : ''">
       <div class="min-w-0">
-
-
-
         <!-- Instance URI -->
         <div class="mb-4">
           <label class="block mb-1 text-gray-700 dark:text-gray-300">Instance URI</label>
@@ -27,8 +24,17 @@
         <!-- Classes selection -->
         <div class="mb-4">
           <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
-          <EntitySelector v-model="selectedClasses" :availableClasses="classes" placeholder="Search classes…" />
-          <p v-if="selectedClasses.length === 0" class="text-red-500 dark:text-red-400 text-sm mt-1">
+          <EntitySelector v-model="selectedClasses" :available-entities="availableClasses"
+            placeholder="Search classes…" />
+          <p v-if="hasNoActiveRangeClasses" class="mt-2 text-sm text-amber-700 dark:text-amber-400">
+            No active classes satisfy this property's Range Classes. Go to
+            <NuxtLink to="/admin/profile" class="font-medium underline">
+              Application Profile
+            </NuxtLink>
+            to either change this property's Range Classes or activate its existing range classes.
+          </p>
+
+          <p v-else-if="selectedClasses.length === 0" class="mt-1 text-sm text-yellow-500 dark:text-yellow-400">
             Please select at least one class.
           </p>
         </div>
@@ -205,7 +211,12 @@ const { formatUri } = useDisplay()
 const apiBase = useRuntimeConfig().public.apiBase
 const toast = useToast()
 
-interface ClassOption { uri: string; label: string }
+interface ClassOption {
+  uri: string
+  label: string
+  superClasses?: string[]
+}
+
 interface PropDef {
   uri: string; label: string; type: string; datatype: string | null; ranges: string[];
   suggestions: { uri: string; label: string }[]; allowMultiple: boolean;
@@ -244,12 +255,19 @@ const emit = defineEmits<{
 
 const classes = ref<ClassOption[]>([])
 const availableClasses = computed(() => {
-  if (props.allowedClassUris && props.allowedClassUris.length > 0) {
-    return classes.value.filter(c => props.allowedClassUris!.includes(c.uri))
+  if (props.allowedClassUris === undefined) {
+    return classes.value
   }
-  return classes.value
-})
 
+  const allowed = new Set(props.allowedClassUris)
+
+  return classes.value.filter(c => allowed.has(c.uri))
+})
+const hasNoActiveRangeClasses = computed(
+  () =>
+    props.allowedClassUris !== undefined &&
+    props.allowedClassUris.length === 0,
+)
 const selectedClasses = ref<string[]>(props.classUris || [])
 const generatedUuid = ref(crypto.randomUUID())
 const instanceUri = computed(() => {
@@ -953,6 +971,26 @@ function selectSuggestion(propUri: string, index: number, uri: string) {
   onPropertyInput(propUri)
 }
 
+function getAllowedClassUris(
+  ranges: string[],
+): string[] | undefined {
+  const rangeUris = ranges.filter(Boolean)
+
+  // No declared range means any active class is allowed.
+  if (rangeUris.length === 0) {
+    return undefined
+  }
+
+  return classes.value
+    .filter(classOption =>
+      rangeUris.some(rangeUri =>
+        classOption.uri === rangeUri ||
+        classOption.superClasses?.includes(rangeUri),
+      ),
+    )
+    .map(classOption => classOption.uri)
+}
+
 async function openCreatePanel(
   propUri: string,
   index: number,
@@ -961,15 +999,13 @@ async function openCreatePanel(
   openingPanelActionKey.value = getPanelActionKey(propUri, index)
   await waitForIndicatorPaint()
 
-  const allowed = ranges.filter(
-    range => classes.value.some(c => c.uri === range),
-  )
+  const allowed = getAllowedClassUris(ranges)
 
   panelState.value = {
     propUri,
     index,
     mode: 'create',
-    allowedClasses: allowed.length > 0 ? allowed : undefined,
+    allowedClasses: allowed,
   }
 }
 
@@ -985,12 +1021,17 @@ async function openEditPanel(propUri: string, index: number) {
       `${apiBase}/api/instances/${encodeURIComponent(uri)}`,
     )
 
+    const ranges =
+      properties.value.find(prop => prop.uri === propUri)?.ranges ?? []
+
+    const allowed = getAllowedClassUris(ranges)
+
     panelState.value = {
       propUri,
       index,
       mode: 'edit',
       instanceUri: uri,
-      allowedClasses: undefined,
+      allowedClasses: allowed,
       classUris: res.types,
       existingProperties: res.properties as Record<string, string[]>,
     }
@@ -1019,6 +1060,20 @@ async function onPanelSubmit(
 ) {
   if (!panelState.value || panelLoadingMsg.value) return
   const { propUri, index, mode } = panelState.value
+  const allowedClassUris = panelState.value.allowedClasses
+
+  if (
+    allowedClassUris !== undefined &&
+    payload.classUris.some(
+      classUri => !allowedClassUris.includes(classUri),
+    )
+  ) {
+    toast.error(
+      'The linked instance has a class that is not permitted by this property’s Range Classes.',
+    )
+    return
+  }
+
   panelLoadingMsg.value = 'Validating and saving the linked data...'
   try {
     if (mode === 'create') {
