@@ -25,7 +25,7 @@
         <div class="mb-4">
           <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
           <EntitySelector v-model="selectedClasses" :available-entities="availableClasses"
-            placeholder="Search classes…" />
+            placeholder="Search classes…" :disabled="isSingleMatchingRangeClass" />
           <p v-if="hasNoActiveRangeClasses" class="mt-2 text-sm text-amber-700 dark:text-amber-400">
             No active classes satisfy this property's Range Classes. Go to
             <NuxtLink to="/admin/profile" class="font-medium underline">
@@ -269,6 +269,31 @@ const hasNoActiveRangeClasses = computed(
     props.allowedClassUris.length === 0,
 )
 const selectedClasses = ref<string[]>(props.classUris || [])
+const isSingleMatchingRangeClass = computed(() =>
+  props.mode === 'create' &&
+  (props.nestingLevel ?? 0) > 0 &&
+  props.allowedClassUris !== undefined &&
+  availableClasses.value.length === 1
+)
+
+watch(
+  [isSingleMatchingRangeClass, availableClasses],
+  () => {
+    if (!isSingleMatchingRangeClass.value) return
+
+    const onlyClass = availableClasses.value[0]
+    if (!onlyClass) return
+
+    if (
+      selectedClasses.value.length !== 1 ||
+      selectedClasses.value[0] !== onlyClass.uri
+    ) {
+      selectedClasses.value = [onlyClass.uri]
+    }
+  },
+  { immediate: true },
+)
+
 const generatedUuid = ref(crypto.randomUUID())
 const instanceUri = computed(() => {
   if (props.initialInstanceUri) return props.initialInstanceUri

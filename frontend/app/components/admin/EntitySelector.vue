@@ -13,11 +13,11 @@
 
     <!-- Search input + dropdown -->
     <div class="relative">
-      <input v-model="search" type="text" :placeholder="placeholder"
-        class="border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded p-2 w-full"
+      <input v-model="search" type="text" :placeholder="placeholder" :disabled="disabled"
+        class="border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded p-2 w-full disabled:opacity-50"
         autocomplete="off" @focus="open = true" @input="open = true" @blur="hideDropdown" @click="open = true"
         @keydown="onKeyDown" />
-      <ul v-if="open && filteredOptions.length > 0" ref="dropdownList"
+      <ul v-if="!disabled && open && filteredOptions.length > 0" ref="dropdownList"
         class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-48 overflow-auto w-full mt-1">
         <li v-for="(opt, index) in filteredOptions" :key="opt.uri" @mousedown.prevent="add(opt.uri)"
           :class="{ 'bg-gray-100 dark:bg-gray-600': index === highlightIndex }"
@@ -48,9 +48,11 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   availableEntities?: { uri: string; label: string }[]
   entityType?: 'class' | 'property' | 'datatype'
+  disabled?: boolean
 }>(), {
   placeholder: 'Search…',
   entityType: 'class',
+  disabled: false,
 })
 
 const emit = defineEmits<{
@@ -156,6 +158,7 @@ const filteredOptions = computed(() => {
 })
 
 function add(uri: string) {
+  if (props.disabled) return
   if (!selected.value.includes(uri)) {
     emit('update:modelValue', [...selected.value, uri])
   }
@@ -165,6 +168,7 @@ function add(uri: string) {
 }
 
 function remove(uri: string) {
+  if (props.disabled) return
   emit('update:modelValue', selected.value.filter(u => u !== uri))
 }
 
@@ -187,6 +191,7 @@ function hideDropdown() {
 }
 
 function onKeyDown(e: KeyboardEvent) {
+  if (props.disabled) return
   if (!open.value) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
