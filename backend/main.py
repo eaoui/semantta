@@ -6896,6 +6896,240 @@ async def remove_datatype_endpoint(req: dict):
     await shacl.remove_datatype(req["uri"])
     return {"status": "ok"}
 
+async def _get_metadata_entity_usage_index() -> Dict[str, Set[str]]:
+    """Return entity usage indexed by semantic role across all metadata."""
+    roles = ("class", "property", "datatype", "individual")
+    usage_index: Dict[str, Set[str]] = {
+        role: set() for role in roles
+    }
+
+    # Reuse the existing per-file vocabulary index. This routine fills
+    # missing/stale vocabulary indexes in state["metadata_graph_stats"].
+    await get_metadata_integration_status()
+
+    for metadata_file in state["metadata_files"]:
+        graph_uri = metadata_file.get("graph_uri")
+
+        if not isinstance(graph_uri, str) or not graph_uri:
+            raise HTTPException(
+                500,
+                "Cannot safely clean the Application Profile: "
+                "a metadata file has no registered RDF graph.",
+            )
+
+        # Never interpret a missing metadata graph as an empty index.
+        if not await store.graph_exists(graph_uri):
+            raise HTTPException(
+                500,
+                "Cannot safely clean the Application Profile: "
+                f"metadata graph is missing: {graph_uri}",
+            )
+
+        stats = await get_cached_metadata_graph_stats(graph_uri)
+        vocabulary = stats.get("vocabulary_entities")
+
+        if not isinstance(vocabulary, dict):
+            raise HTTPException(
+                500,
+                "Cannot safely clean the Application Profile: "
+                f"vocabulary index is unavailable for {graph_uri}.",
+            )
+
+        for role in roles:
+            indexed_uris = vocabulary.get(role)
+
+            if not isinstance(indexed_uris, (list, tuple, set)):
+                raise HTTPException(
+                    500,
+                    "Cannot safely clean the Application Profile: "
+                    f"the {role} vocabulary index is invalid "
+                    f"for {graph_uri}.",
+                )
+
+            usage_index[role].update(
+                uri
+                for uri in indexed_uris
+                if is_valid_uri(uri)
+            )
+
+    # Metadata created in Semantta is stored separately from the
+    # per-file vocabulary indexes. Include it without modifying it.
+    # The created-instance graph contains metadata records, not ontology
+    # declarations, so RDF.type objects indicate their classes.
+    created_graph = state["created_instances_graph"]
+
+    for subject, predicate, obj in created_graph:
+        if predicate == RDF.type:
+            if isinstance(obj, URIRef):
+                usage_index["class"].add(str(obj))
+        elif isinstance(predicate, URIRef):
+            usage_index["property"].add(str(predicate))
+
+        # Datatype IRIs occur in literal metadata rather than necessarily
+        # appearing as ordinary RDF triple terms.
+        if isinstance(obj, Literal) and obj.datatype is not None:
+            usage_index["datatype"].add(str(obj.datatype))
+
+        # A known active individual is used if it appears as a subject
+        # or URI-valued object in a Semantta-created metadata record.
+        for term in (subject, obj):
+            if isinstance(term, URIRef):
+                usage_index["individual"].add(str(term))
+
+    return usage_index
+
+@app.post("/api/profile/remove-unused-entities")
+async def remove_unused_entities_endpoint():
+    """Remove unused active Application Profile entities, not metadata."""
+    usage_index = await _get_metadata_entity_usage_index()
+
+    active_entities = {
+        "class": set(await shacl.get_active_classes()),
+        "property": set(await shacl.get_active_properties()),
+        "datatype": set(await shacl.get_active_datatypes()),
+        "individual": set(await shacl.get_active_individuals()),
+    }
+
+    # These entities are seeded as core defaults and must remain active,
+    # regardless of whether metadata currently uses them.
+    protected_uris = (
+        set(CORE_ACTIVE_DATATYPES)
+        | set(CORE_ACTIVE_ANNOTATION_PROPERTIES)
+    )
+
+    unused_by_role = {
+        role: sorted(
+            uri
+            for uri in entities
+            if is_valid_uri(uri)
+            and uri not in protected_uris
+            and uri not in usage_index[role]
+        )
+        for role, entities in active_entities.items()
+    }
+
+    removed = [
+        {"uri": uri, "type": role}
+        for role in ("class", "property", "datatype", "individual")
+        for uri in unused_by_role[role]
+    ]
+
+    if not removed:
+        return {
+            "status": "ok",
+            "removed_count": 0,
+            "removed": [],
+        }
+
+    # Build one atomic update. Target entity identities rather than
+    # assuming that every active SHACL shape uses a particular URI.
+    branches = []
+
+    if unused_by_role["class"]:
+        values = " ".join(
+            _sparql_iri(uri, "class URI")
+            for uri in unused_by_role["class"]
+        )
+        branches.append(
+            "{ VALUES ?entity { " + values + " } "
+            "?shape a sh:NodeShape ; sh:targetClass ?entity . }"
+        )
+
+    if unused_by_role["property"]:
+        values = " ".join(
+            _sparql_iri(uri, "property URI")
+            for uri in unused_by_role["property"]
+        )
+        branches.append(
+            "{ VALUES ?entity { " + values + " } "
+            "?shape sh:path ?entity . }"
+        )
+
+    if unused_by_role["datatype"]:
+        values = " ".join(
+            _sparql_iri(uri, "datatype URI")
+            for uri in unused_by_role["datatype"]
+        )
+        branches.append(
+            "{ VALUES ?entity { " + values + " } "
+            "?shape a sh:NodeShape ; sh:targetNode ?entity . "
+            'FILTER(STRSTARTS(STR(?shape), "urn:shape:datatype:")) }'
+        )
+
+    if unused_by_role["individual"]:
+        values = " ".join(
+            _sparql_iri(uri, "individual URI")
+            for uri in unused_by_role["individual"]
+        )
+        branches.append(
+            "{ VALUES ?entity { " + values + " } "
+            "?shape a sh:NodeShape ; sh:targetNode ?entity . "
+            'FILTER(STRSTARTS(STR(?shape), "urn:shape:individual:")) }'
+        )
+
+    shape_match = "\nUNION\n".join(branches)
+
+    # Delete the selected shapes and their incoming class/property links.
+    # The update touches only the shapes graph: imported metadata graphs,
+    # the default data graph, and created metadata remain unchanged.
+    delete_operations = []
+
+    # First, remove every class-shape reference to an unused property shape.
+    # This must happen explicitly before deleting the property shapes.
+    if unused_by_role["property"]:
+        unused_property_values = " ".join(
+            _sparql_iri(uri, "property URI")
+            for uri in unused_by_role["property"]
+        )
+
+        delete_operations.append(f"""
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?classShape sh:property ?propertyShape .
+                }}
+            }}
+            WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    VALUES ?entity {{ {unused_property_values} }}
+                    ?propertyShape sh:path ?entity .
+                    ?classShape sh:property ?propertyShape .
+                }}
+            }}
+        """)
+
+    # Next, delete the shapes belonging to all unused entities.
+    delete_operations.append(f"""
+        DELETE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?shape ?shapePredicate ?shapeObject .
+            }}
+        }}
+        WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                {{
+                    {shape_match}
+                }}
+                ?shape ?shapePredicate ?shapeObject .
+            }}
+        }}
+    """)
+
+    # Execute both operations in order within one SPARQL update request.
+    combined_updates = ";\n".join(delete_operations)
+
+    await store.update(f"""
+        PREFIX sh: <{SH}>
+        {combined_updates}
+    """)
+
+    invalidate_profile()
+
+    return {
+        "status": "ok",
+        "removed_count": len(removed),
+        "removed": removed,
+    }
+
 @app.post("/api/profile/generate")
 async def generate_profile_from_metadata():
     try:

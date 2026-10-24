@@ -64,6 +64,13 @@
         </button>
       </div>
 
+      <div class="mb-6">
+        <button type="button" @click="confirmRemoveUnused = true"
+          class="w-full rounded bg-fuchsia-600 px-4 py-2 text-white hover:bg-fuchsia-700">
+          Remove unused entities
+        </button>
+      </div>
+
       <div>
         <div class="mb-6">
           <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Filter Entities</h3>
@@ -98,6 +105,10 @@
 
     <LoadingOverlay :show="!!loadingMsg" :message="loadingMsg" />
   </div>
+
+  <ConfirmDialog :show="confirmRemoveUnused"
+    message="Remove all active Application Profile entities that are unused in imported metadata or metadata records created in Semantta? Core default entities will be preserved. Metadata records and their values will not be deleted. If no metadata is available, every other active entity will be considered unused."
+    @cancel="confirmRemoveUnused = false" @confirm="removeUnusedEntities" />
 </template>
 
 <script setup lang="ts">
@@ -105,12 +116,13 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useDisplay } from '@/composables/useDisplay'
+import { useToast } from '@/composables/useToast'
 import type { ProfileEntityItem } from '@/types'
 import SortableTbody from '@/components/admin/SortableTbody.vue'
 import ProfileEntityRow from '@/components/admin/ProfileEntityRow.vue'
 import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 import SearchBox from '@/components/shared/SearchBox.vue'
-import { useToast } from '@/composables/useToast'
+import ConfirmDialog from '@/components/admin/ConfirmDialog.vue'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
@@ -118,6 +130,7 @@ const apiBase = useRuntimeConfig().public.apiBase
 const route = useRoute()
 const router = useRouter()
 const loadingMsg = ref('')
+const confirmRemoveUnused = ref(false)
 const toast = useToast()
 
 function displayEntityLabel(entity: ProfileEntityItem): string {
@@ -277,6 +290,39 @@ async function generateProfile() {
   }
   catch {
     toast.error('Generation failed')
+  } finally {
+    loadingMsg.value = ''
+  }
+}
+
+async function removeUnusedEntities() {
+  confirmRemoveUnused.value = false
+  loadingMsg.value = 'Checking metadata indexes and removing unused entities…'
+
+  try {
+    const result = await $fetch<{
+      removed_count: number
+      removed: { uri: string; type: string }[]
+    }>(`${apiBase}/api/profile/remove-unused-entities`, {
+      method: 'POST',
+    })
+
+    await store.fetchState()
+
+    if (result.removed_count === 0) {
+      toast.info('No unused active entities found')
+    } else {
+      const noun = result.removed_count === 1 ? 'entity' : 'entities'
+      toast.success(
+        `Removed ${result.removed_count} unused active ${noun} from the Application Profile`,
+      )
+    }
+  } catch (error: any) {
+    toast.error(
+      error?.data?.detail ||
+      error?.message ||
+      'Failed to remove unused entities',
+    )
   } finally {
     loadingMsg.value = ''
   }
