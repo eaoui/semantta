@@ -93,12 +93,16 @@
               @click="openCreatePanel(prop.uri, index, prop.ranges)"
               class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
               title="Create new instance">
-              <PhosphorIcon name="plus" size="16" />
+              <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
+                size="16" class="animate-spin" aria-hidden="true" />
+              <PhosphorIcon v-else name="plus" size="16" aria-hidden="true" />
             </button>
             <button v-if="getPropValues(prop.uri)[index]" type="button" @click="openEditPanel(prop.uri, index)"
               class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
               title="Edit linked instance">
-              <PhosphorIcon name="pencil-simple" size="16" />
+              <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
+                size="16" class="animate-spin" aria-hidden="true" />
+              <PhosphorIcon v-else name="pencil-simple" size="16" aria-hidden="true" />
             </button>
           </template>
 
@@ -124,7 +128,8 @@
       </button>
     </form>
 
-    <SlideOverPanel :show="panelState !== null" :level="(props.nestingLevel || 0)" @close="closePanel">
+    <SlideOverPanel :show="panelState !== null" :level="(props.nestingLevel || 0)" @close="closePanel"
+      @opened="onPanelOpened">
       <div v-if="panelState">
         <AdminMetadataForm :mode="panelState.mode" :nestingLevel="(props.nestingLevel || 0) + 1"
           :allowedClassUris="panelState.allowedClasses" :classUris="panelState.classUris"
@@ -143,12 +148,14 @@ import {
   watch,
   onMounted,
   onBeforeUnmount,
+  nextTick,
 } from 'vue'
 import { useAppStore } from '@/stores/app'
-import SlideOverPanel from '~/components/shared/SlideOverPanel.vue'
-import EntitySelector from '~/components/admin/EntitySelector.vue'
 import { useDisplay } from '@/composables/useDisplay'
 import { useToast } from '@/composables/useToast'
+import SlideOverPanel from '~/components/shared/SlideOverPanel.vue'
+import EntitySelector from '~/components/admin/EntitySelector.vue'
+import SearchBox from '@/components/shared/SearchBox.vue'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
@@ -216,6 +223,27 @@ interface PanelState {
   existingProperties?: Record<string, string[]>
 }
 const panelState = ref<PanelState | null>(null)
+
+const openingPanelActionKey = ref<string | null>(null)
+
+function getPanelActionKey(propUri: string, index: number): string {
+  return `${propUri}_${index}`
+}
+
+async function waitForIndicatorPaint(): Promise<void> {
+  await nextTick()
+
+  // Allow the loading icon to render before opening the panel.
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
+function onPanelOpened(): void {
+  openingPanelActionKey.value = null
+}
 
 function getPropDisplayLabel(prop: PropDef): string {
   // In 'label' mode, use the ontology label (from backend); otherwise, format the URI
@@ -855,11 +883,18 @@ function selectSuggestion(propUri: string, index: number, uri: string) {
   onPropertyInput(propUri)
 }
 
-function openCreatePanel(propUri: string, index: number, ranges: string[]) {
-  let allowed: string[] = []
-  if (ranges.length > 0) {
-    allowed = ranges.filter(r => classes.value.some(c => c.uri === r))
-  }
+async function openCreatePanel(
+  propUri: string,
+  index: number,
+  ranges: string[],
+) {
+  openingPanelActionKey.value = getPanelActionKey(propUri, index)
+  await waitForIndicatorPaint()
+
+  const allowed = ranges.filter(
+    range => classes.value.some(c => c.uri === range),
+  )
+
   panelState.value = {
     propUri,
     index,
@@ -871,8 +906,15 @@ function openCreatePanel(propUri: string, index: number, ranges: string[]) {
 async function openEditPanel(propUri: string, index: number) {
   const uri = getPropValues(propUri)[index]
   if (!uri) return
+
+  openingPanelActionKey.value = getPanelActionKey(propUri, index)
+  await waitForIndicatorPaint()
+
   try {
-    const res = await $fetch<any>(`${apiBase}/api/instances/${encodeURIComponent(uri)}`)
+    const res = await $fetch<any>(
+      `${apiBase}/api/instances/${encodeURIComponent(uri)}`,
+    )
+
     panelState.value = {
       propUri,
       index,
@@ -883,6 +925,8 @@ async function openEditPanel(propUri: string, index: number) {
       existingProperties: res.properties as Record<string, string[]>,
     }
   } catch (error: unknown) {
+    openingPanelActionKey.value = null
+
     console.error('Failed to fetch instance', error)
     toast.error(
       getErrorMessage(error, 'Failed to load the linked instance.'),
@@ -892,6 +936,7 @@ async function openEditPanel(propUri: string, index: number) {
 
 function closePanel() {
   panelState.value = null
+  openingPanelActionKey.value = null
 }
 
 async function onPanelSubmit(

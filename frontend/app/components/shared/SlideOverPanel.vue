@@ -8,7 +8,7 @@
   <!-- Panel -->
   <Transition enter-active-class="transition-transform duration-300 ease-in-out"
     leave-active-class="transition-transform duration-300 ease-in-out" enter-from-class="translate-x-full"
-    leave-to-class="translate-x-full">
+    leave-to-class="translate-x-full" @after-enter="$emit('opened')">
     <div v-if="show" class="fixed inset-y-0 right-0 z-50 w-full bg-white dark:bg-gray-800
              shadow-xl overflow-y-auto overscroll-contain p-6" :class="panelWidthClass">
       <button @click="$emit('close')" class="absolute top-4 right-4 text-gray-500 dark:text-gray-400
@@ -28,7 +28,10 @@ const props = defineProps<{
   level?: number   // 0 = outermost, 1 = first nested, etc.
 }>()
 
-defineEmits<{ close: [] }>()
+defineEmits<{
+  close: []
+  opened: []
+}>()
 
 const panelWidthClass = computed(() => {
   const level = props.level || 0
