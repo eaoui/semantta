@@ -25,7 +25,7 @@ async function createInstance(payload: {
 }) {
   if (loadingMsg.value) return
 
-  loadingMsg.value = 'Validating and saving metadata...'
+  loadingMsg.value = 'Validating and saving the data...'
 
   try {
     await $fetch(`${apiBase}/api/metadata/create`, {

@@ -10,123 +10,163 @@
         'Edit Metadata' }}</h2>
     </div>
 
-    <!-- Instance URI -->
-    <div class="mb-4">
-      <label class="block mb-1 text-gray-700 dark:text-gray-300">Instance URI</label>
-      <input :value="instanceUri" disabled
-        class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" />
-    </div>
-
-    <!-- Classes selection -->
-    <div class="mb-4">
-      <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
-      <EntitySelector v-model="selectedClasses" :availableClasses="classes" placeholder="Search classes…" />
-      <p v-if="selectedClasses.length === 0" class="text-red-500 dark:text-red-400 text-sm mt-1">
-        Please select at least one class.
-      </p>
-    </div>
-
-    <!-- Loading / message -->
-    <div v-if="loadingProps" class="text-gray-500 dark:text-gray-400">Loading properties…</div>
-    <div v-else-if="properties.length === 0 && selectedClasses.length"
-      class="text-yellow-600 dark:text-yellow-400 mt-2">
-      No active properties for the selected class(es). Enable them in the
-      <NuxtLink to="/admin/profile" class="underline">Application Profile</NuxtLink>.
-    </div>
-
-    <!-- Dynamic form -->
-    <form v-if="properties.length" @submit.prevent="handleSubmit">
-      <div v-for="prop in properties" :key="prop.uri"
-        class="mb-4 p-3 border border-gray-300 dark:border-gray-600 rounded">
-        <label :for="'prop-' + prop.uri" class="block mb-1 font-medium text-gray-900 dark:text-gray-100">
-          {{ getPropDisplayLabel(prop) }}
-        </label>
-
-        <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
-          <!-- Datatype property -->
-
-          <template v-if="prop.type === 'datatype'">
-            <select v-if="isBooleanDatatype(getPropDatatype(prop))"
-              :value="toLexicalString(getPropValues(prop.uri)[index])"
-              class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              @change="setPropValue(
-                prop.uri,
-                index,
-                ($event.target as HTMLSelectElement).value
-              ); onPropertyInput(prop.uri)">
-              <option value="">Select a value</option>
-              <option value="true">True</option>
-              <option value="false">False</option>
-            </select>
-
-            <input v-else :value="toLexicalString(getPropValues(prop.uri)[index])"
-              :type="inputType(getPropDatatype(prop))"
-              :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
-              class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              @input="setPropValue(
-                prop.uri,
-                index,
-                ($event.target as HTMLInputElement).value
-              ); onPropertyInput(prop.uri)" />
-          </template>
+    <div :class="isRootForm
+      ? 'grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_17rem]'
+      : ''">
+      <div class="min-w-0">
 
 
-          <!-- Object property (with suggestions) -->
-          <template v-else>
-            <div class="relative flex-1">
-              <input v-model="getPropValues(prop.uri)[index]"
-                @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
-                @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
-                class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                autocomplete="off" />
-              <ul v-if="activeSuggestion === `${prop.uri}_${index}` && filteredSuggestions[prop.uri]?.length"
-                class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-40 overflow-auto w-full mt-1">
-                <li v-for="sug in filteredSuggestions[prop.uri]" :key="sug.uri"
-                  @mousedown.prevent="selectSuggestion(prop.uri, index, sug.uri)"
-                  class="p-1 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer text-gray-900 dark:text-gray-100">
-                  {{ sug.label }} ({{ sug.uri }})
-                </li>
-              </ul>
+
+        <!-- Instance URI -->
+        <div class="mb-4">
+          <label class="block mb-1 text-gray-700 dark:text-gray-300">Instance URI</label>
+          <input :value="instanceUri" disabled
+            class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400" />
+        </div>
+
+        <!-- Classes selection -->
+        <div class="mb-4">
+          <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
+          <EntitySelector v-model="selectedClasses" :availableClasses="classes" placeholder="Search classes…" />
+          <p v-if="selectedClasses.length === 0" class="text-red-500 dark:text-red-400 text-sm mt-1">
+            Please select at least one class.
+          </p>
+        </div>
+
+        <!-- Loading / message -->
+        <div v-if="loadingProps" class="text-gray-500 dark:text-gray-400">Loading properties…</div>
+        <div v-else-if="properties.length === 0 && selectedClasses.length"
+          class="text-yellow-600 dark:text-yellow-400 mt-2">
+          No active properties for the selected class(es). Enable them in the
+          <NuxtLink to="/admin/profile" class="underline">Application Profile</NuxtLink>.
+        </div>
+
+        <!-- Dynamic form -->
+        <form v-if="properties.length" :id="formId" @submit.prevent="handleSubmit">
+          <p v-if="propertySearch.trim() && visibleProperties.length === 0"
+            class="mb-4 text-sm text-gray-500 dark:text-gray-400">
+            No properties match "{{ propertySearch }}".
+          </p>
+          <div v-for="prop in visibleProperties" :key="prop.uri"
+            class="mb-4 p-3 border border-gray-300 dark:border-gray-600 rounded">
+            <label :for="'prop-' + prop.uri" class="block mb-1 font-medium text-gray-900 dark:text-gray-100">
+              {{ getPropDisplayLabel(prop) }}
+            </label>
+
+            <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
+              <!-- Datatype property -->
+
+              <template v-if="prop.type === 'datatype'">
+                <select v-if="isBooleanDatatype(getPropDatatype(prop))"
+                  :value="toLexicalString(getPropValues(prop.uri)[index])"
+                  class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                  @change="setPropValue(
+                    prop.uri,
+                    index,
+                    ($event.target as HTMLSelectElement).value
+                  ); onPropertyInput(prop.uri)">
+                  <option value="">Select a value</option>
+                  <option value="true">True</option>
+                  <option value="false">False</option>
+                </select>
+
+                <input v-else :value="toLexicalString(getPropValues(prop.uri)[index])"
+                  :type="inputType(getPropDatatype(prop))"
+                  :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
+                  class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                  @input="setPropValue(
+                    prop.uri,
+                    index,
+                    ($event.target as HTMLInputElement).value
+                  ); onPropertyInput(prop.uri)" />
+              </template>
+
+
+              <!-- Object property (with suggestions) -->
+              <template v-else>
+                <div class="relative flex-1">
+                  <input v-model="getPropValues(prop.uri)[index]"
+                    @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
+                    @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
+                    class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                    autocomplete="off" />
+                  <ul v-if="activeSuggestion === `${prop.uri}_${index}` && filteredSuggestions[prop.uri]?.length"
+                    class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-40 overflow-auto w-full mt-1">
+                    <li v-for="sug in filteredSuggestions[prop.uri]" :key="sug.uri"
+                      @mousedown.prevent="selectSuggestion(prop.uri, index, sug.uri)"
+                      class="p-1 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer text-gray-900 dark:text-gray-100">
+                      {{ sug.label }} ({{ sug.uri }})
+                    </li>
+                  </ul>
+                </div>
+
+                <button v-if="!getPropValues(prop.uri)[index]" type="button"
+                  @click="openCreatePanel(prop.uri, index, prop.ranges)"
+                  class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
+                  title="Create new instance">
+                  <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
+                    size="16" class="animate-spin" aria-hidden="true" />
+                  <PhosphorIcon v-else name="plus" size="16" aria-hidden="true" />
+                </button>
+                <button v-if="getPropValues(prop.uri)[index]" type="button" @click="openEditPanel(prop.uri, index)"
+                  class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                  title="Edit linked instance">
+                  <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
+                    size="16" class="animate-spin" aria-hidden="true" />
+                  <PhosphorIcon v-else name="pencil-simple" size="16" aria-hidden="true" />
+                </button>
+              </template>
+
+              <PhosphorIcon v-if="prop.allowMultiple && getPropValues(prop.uri).length > 1"
+                @click="removeValue(prop.uri, index)" name="x" size="16"
+                class="text-red-500 hover:text-red-700 cursor-pointer" />
             </div>
 
-            <button v-if="!getPropValues(prop.uri)[index]" type="button"
-              @click="openCreatePanel(prop.uri, index, prop.ranges)"
-              class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
-              title="Create new instance">
-              <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
-                size="16" class="animate-spin" aria-hidden="true" />
-              <PhosphorIcon v-else name="plus" size="16" aria-hidden="true" />
+            <button v-if="prop.allowMultiple" @click="addValue(prop.uri)" type="button"
+              class="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline text-sm mt-1">
+              <PhosphorIcon name="list-plus" size="24" />
+              Add value
             </button>
-            <button v-if="getPropValues(prop.uri)[index]" type="button" @click="openEditPanel(prop.uri, index)"
-              class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-              title="Edit linked instance">
-              <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
-                size="16" class="animate-spin" aria-hidden="true" />
-              <PhosphorIcon v-else name="pencil-simple" size="16" aria-hidden="true" />
-            </button>
-          </template>
 
-          <PhosphorIcon v-if="prop.allowMultiple && getPropValues(prop.uri).length > 1"
-            @click="removeValue(prop.uri, index)" name="x" size="16"
-            class="text-red-500 hover:text-red-700 cursor-pointer" />
-        </div>
+            <div v-if="validationErrors[prop.uri]" class="mt-1 text-sm text-red-600 dark:text-red-400">
+              <span v-for="msg in validationErrors[prop.uri]" :key="msg" class="block">{{ msg }}</span>
+            </div>
+          </div>
 
-        <button v-if="prop.allowMultiple" @click="addValue(prop.uri)" type="button"
-          class="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline text-sm mt-1">
-          <PhosphorIcon name="list-plus" size="24" />
-          Add value
-        </button>
+          <button v-if="!isRootForm" type="submit" :disabled="selectedClasses.length === 0 || props.submitting"
+            class="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+            {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
+          </button>
+        </form>
 
-        <div v-if="validationErrors[prop.uri]" class="mt-1 text-sm text-red-600 dark:text-red-400">
-          <span v-for="msg in validationErrors[prop.uri]" :key="msg" class="block">{{ msg }}</span>
-        </div>
       </div>
 
-      <button type="submit" :disabled="selectedClasses.length === 0 || props.submitting"
-        class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-        {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
-      </button>
-    </form>
+      <!-- Sidebar -->
+      <aside v-if="isRootForm"
+        class="w-full self-start space-y-4 rounded-lg border border-gray-300 bg-white p-4 dark:border-gray-600 dark:bg-gray-800 lg:sticky lg:top-4">
+        <button type="submit" :form="formId" :disabled="selectedClasses.length === 0 ||
+          properties.length === 0 ||
+          loadingProps ||
+          props.submitting
+          "
+          class="w-full rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+          {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
+        </button>
+
+        <button v-if="mode === 'edit'" type="button" :disabled="props.submitting" @click="emit('delete-request')"
+          class="w-full rounded bg-red-600 px-4 py-2 font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50">
+          <PhosphorIcon name="trash" size="16" class="mr-2 inline-block" aria-hidden="true" />
+          Delete Instance
+        </button>
+
+        <div>
+          <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            Filter properties
+          </label>
+          <SearchBox v-model="propertySearch" placeholder="Filter properties…" />
+        </div>
+      </aside>
+    </div>
 
     <SlideOverPanel :show="panelState !== null" :level="(props.nestingLevel || 0)" @close="closePanel"
       @opened="onPanelOpened">
@@ -134,9 +174,11 @@
         <AdminMetadataForm :mode="panelState.mode" :nestingLevel="(props.nestingLevel || 0) + 1"
           :allowedClassUris="panelState.allowedClasses" :classUris="panelState.classUris"
           :initialInstanceUri="panelState.instanceUri" :initialProperties="panelState.existingProperties"
-          @submit="onPanelSubmit" @cancel="closePanel" />
+          :submitting="!!panelLoadingMsg" @submit="onPanelSubmit" @cancel="closePanel" />
       </div>
     </SlideOverPanel>
+
+    <LoadingOverlay :show="!!panelLoadingMsg" title="Loading" :message="panelLoadingMsg" />
   </div>
 </template>
 
@@ -156,6 +198,7 @@ import { useToast } from '@/composables/useToast'
 import SlideOverPanel from '~/components/shared/SlideOverPanel.vue'
 import EntitySelector from '~/components/admin/EntitySelector.vue'
 import SearchBox from '@/components/shared/SearchBox.vue'
+import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
@@ -179,6 +222,14 @@ const props = defineProps<{
   submitting?: boolean
 }>()
 
+const formId = `metadata-form-${useId()}`
+
+const isRootForm = computed(
+  () => (props.nestingLevel ?? 0) === 0,
+)
+
+const propertySearch = ref('')
+
 const emit = defineEmits<{
   submit: [payload: {
     classUris: string[]
@@ -188,6 +239,7 @@ const emit = defineEmits<{
   }]
   cancel: []
   'panel-state-changed': [open: boolean]
+  'delete-request': []
 }>()
 
 const classes = ref<ClassOption[]>([])
@@ -224,6 +276,8 @@ interface PanelState {
 }
 const panelState = ref<PanelState | null>(null)
 
+const panelLoadingMsg = ref('')
+
 const openingPanelActionKey = ref<string | null>(null)
 
 function getPanelActionKey(propUri: string, index: number): string {
@@ -250,6 +304,22 @@ function getPropDisplayLabel(prop: PropDef): string {
   if (store.displayFormat === 'label') return prop.label
   return formatUri(prop.uri)   // uses current store.displayFormat by default
 }
+
+const visibleProperties = computed(() => {
+  const query = propertySearch.value.trim().toLowerCase()
+
+  if (!query) {
+    return properties.value
+  }
+
+  return properties.value.filter(prop =>
+    [
+      getPropDisplayLabel(prop),
+      prop.label,
+      prop.uri,
+    ].some(value => value.toLowerCase().includes(query)),
+  )
+})
 
 function getPropValues(propUri: string): string[] {
   const existing = formData[propUri] as unknown[] | undefined
@@ -947,8 +1017,9 @@ async function onPanelSubmit(
     editablePropertyUris: string[]
   }
 ) {
-  if (!panelState.value) return
+  if (!panelState.value || panelLoadingMsg.value) return
   const { propUri, index, mode } = panelState.value
+  panelLoadingMsg.value = 'Validating and saving the linked data...'
   try {
     if (mode === 'create') {
       const res = await $fetch<{ uri: string }>(`${apiBase}/api/metadata/create`, {
@@ -989,6 +1060,8 @@ async function onPanelSubmit(
     toast.error(
       getErrorMessage(error, 'Failed to save the linked instance.'),
     )
+  } finally {
+    panelLoadingMsg.value = ''
   }
 }
 

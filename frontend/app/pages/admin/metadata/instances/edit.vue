@@ -7,17 +7,22 @@
     </button>
   </div>
   <AdminMetadataForm v-else mode="edit" :classUris="classUris" :initialInstanceUri="instanceUri"
-    :initialProperties="existingProperties" :submitting="!!loadingMsg" @submit="updateInstance" />
+    :initialProperties="existingProperties" :submitting="!!loadingMsg" @submit="updateInstance"
+    @delete-request="showDeleteConfirm = true" />
 
   <LoadingOverlay :show="!!loadingMsg" title="Loading" :message="loadingMsg" />
+
+  <ConfirmDialog :show="showDeleteConfirm" message="Delete this instance? This cannot be undone."
+    @confirm="deleteCurrentInstance" @cancel="showDeleteConfirm = false" />
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
-import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 import { useToast } from '@/composables/useToast'
+import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
+import ConfirmDialog from '@/components/admin/ConfirmDialog.vue'
 
 const store = useAppStore()
 const route = useRoute()
@@ -31,6 +36,7 @@ const existingProperties = ref<Record<string, string[]>>({})
 const loading = ref(true)
 const error = ref('')
 const loadingMsg = ref('')
+const showDeleteConfirm = ref(false)
 
 onMounted(() => {
   const rawUri = route.query.uri
@@ -72,7 +78,7 @@ async function updateInstance(payload: {
 }) {
   if (loadingMsg.value) return
 
-  loadingMsg.value = 'Validating and saving metadata...'
+  loadingMsg.value = 'Validating and saving the data...'
 
   try {
     await $fetch(
@@ -92,6 +98,28 @@ async function updateInstance(payload: {
     navigateTo('/admin/metadata/instances')
   } catch (e: any) {
     toast.error(e?.data?.detail || e.message)
+  } finally {
+    loadingMsg.value = ''
+  }
+}
+
+async function deleteCurrentInstance() {
+  if (!instanceUri.value || loadingMsg.value) return
+
+  showDeleteConfirm.value = false
+  loadingMsg.value = 'Deleting instance…'
+
+  try {
+    await store.deleteInstance(instanceUri.value)
+
+    toast.success('Instance deleted')
+    await router.push('/admin/metadata/instances')
+  } catch (error: any) {
+    toast.error(
+      error?.data?.detail ||
+      error?.message ||
+      'Failed to delete instance.',
+    )
   } finally {
     loadingMsg.value = ''
   }
