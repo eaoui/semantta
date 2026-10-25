@@ -7,8 +7,8 @@
     </button>
   </div>
   <AdminMetadataForm v-else mode="edit" :classUris="classUris" :initialInstanceUri="instanceUri"
-    :initialProperties="existingProperties" :submitting="!!loadingMsg" @submit="updateInstance"
-    @delete-request="showDeleteConfirm = true" />
+    :initialProperties="existingProperties" :submitting="!!loadingMsg" :serverValidationError="serverValidationError" I
+    @submit="updateInstance" @delete-request="showDeleteConfirm = true" />
 
   <LoadingOverlay :show="!!loadingMsg" title="Loading" :message="loadingMsg" />
 
@@ -37,6 +37,7 @@ const loading = ref(true)
 const error = ref('')
 const loadingMsg = ref('')
 const showDeleteConfirm = ref(false)
+const serverValidationError = ref<string | null>(null)
 
 onMounted(() => {
   const rawUri = route.query.uri
@@ -79,6 +80,7 @@ async function updateInstance(payload: {
   if (loadingMsg.value) return
 
   loadingMsg.value = 'Validating and saving the data...'
+  serverValidationError.value = null
 
   try {
     await $fetch(
@@ -97,7 +99,15 @@ async function updateInstance(payload: {
     await store.fetchState()
     navigateTo('/admin/metadata/instances')
   } catch (e: any) {
-    toast.error(e?.data?.detail || e.message)
+    const message =
+      typeof e?.data?.detail === 'string'
+        ? e.data.detail
+        : typeof e?.message === 'string'
+          ? e.message
+          : 'Failed to update instance.'
+
+    serverValidationError.value = message
+    toast.error(message)
   } finally {
     loadingMsg.value = ''
   }

@@ -1,7 +1,8 @@
 <template>
   <div>
     <div v-if="!store.isReady" class="text-gray-500 dark:text-gray-400">Loading…</div>
-    <AdminMetadataForm v-else mode="create" :submitting="!!loadingMsg" @submit="createInstance" />
+    <AdminMetadataForm v-else mode="create" :submitting="!!loadingMsg" :serverValidationError="serverValidationError"
+      @submit="createInstance" />
 
     <LoadingOverlay :show="!!loadingMsg" title="Loading" :message="loadingMsg" />
   </div>
@@ -18,6 +19,8 @@ const apiBase = useRuntimeConfig().public.apiBase
 const loadingMsg = ref('')
 const toast = useToast()
 
+const serverValidationError = ref<string | null>(null)
+
 async function createInstance(payload: {
   classUris: string[]
   instanceUri: string
@@ -26,6 +29,7 @@ async function createInstance(payload: {
   if (loadingMsg.value) return
 
   loadingMsg.value = 'Validating and saving the data...'
+  serverValidationError.value = null
 
   try {
     await $fetch(`${apiBase}/api/metadata/create`, {
@@ -42,9 +46,15 @@ async function createInstance(payload: {
     await store.fetchState()
     await navigateTo('/admin/metadata/instances')
   } catch (error: any) {
-    toast.error(
-      error?.data?.detail || error?.message || 'Failed to create instance.',
-    )
+    const message =
+      typeof error?.data?.detail === 'string'
+        ? error.data.detail
+        : typeof error?.message === 'string'
+          ? error.message
+          : 'Failed to create instance.'
+
+    serverValidationError.value = message
+    toast.error(message)
   } finally {
     loadingMsg.value = ''
   }

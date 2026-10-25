@@ -16,7 +16,9 @@
       <input v-model="search" type="text" :placeholder="placeholder" :disabled="disabled"
         class="border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded p-2 w-full disabled:opacity-50"
         autocomplete="off" @focus="open = true" @input="open = true" @blur="hideDropdown" @click="open = true"
-        @keydown="onKeyDown" />
+        @keydown="onKeyDown" :class="invalid
+          ? 'border-yellow-500! dark:border-yellow-500! ring-1 ring-yellow-500/30'
+          : ''" :aria-invalid="invalid" />
       <ul v-if="!disabled && open && filteredOptions.length > 0" ref="dropdownList"
         class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-48 overflow-auto w-full mt-1">
         <li v-for="(opt, index) in filteredOptions" :key="opt.uri" @mousedown.prevent="add(opt.uri)"
@@ -49,10 +51,12 @@ const props = withDefaults(defineProps<{
   availableEntities?: { uri: string; label: string }[]
   entityType?: 'class' | 'property' | 'datatype'
   disabled?: boolean
+  invalid?: boolean
 }>(), {
   placeholder: 'Search…',
   entityType: 'class',
   disabled: false,
+  invalid: false,
 })
 
 const emit = defineEmits<{

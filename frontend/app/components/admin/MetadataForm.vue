@@ -14,6 +14,15 @@
       ? 'grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_17rem]'
       : ''">
       <div class="min-w-0">
+        <!-- Form-level summary for errors -->
+        <div v-if="serverSummaryErrors.length"
+          class="mb-4 rounded border border-red-500 bg-red-50 p-3 text-sm text-red-700 dark:border-red-500 dark:bg-red-950/30 dark:text-red-300"
+          role="alert">
+          <p v-for="(message, index) in serverSummaryErrors" :key="`${index}-${message}`">
+            {{ message }}
+          </p>
+        </div>
+
         <!-- Instance URI -->
         <div class="mb-4">
           <label class="block mb-1 text-gray-700 dark:text-gray-300">Instance URI</label>
@@ -25,7 +34,7 @@
         <div class="mb-4">
           <label class="block mb-1 text-gray-700 dark:text-gray-300">Classes</label>
           <EntitySelector v-model="selectedClasses" :available-entities="availableClasses"
-            placeholder="Search classes…" :disabled="isSingleMatchingRangeClass" />
+            :invalid="selectedClasses.length === 0 || classValidationErrors.length > 0" placeholder="Search classes…" />
           <p v-if="hasNoActiveRangeClasses" class="mt-2 text-sm text-amber-700 dark:text-amber-400">
             No active classes satisfy this property's Range Classes. Go to
             <NuxtLink to="/admin/profile" class="font-medium underline">
@@ -33,7 +42,11 @@
             </NuxtLink>
             to either change this property's Range Classes or activate its existing range classes.
           </p>
-
+          <p v-if="classValidationErrors.length" class="mt-1 text-sm text-red-600 dark:text-red-400">
+            <span v-for="(message, index) in classValidationErrors" :key="`${index}-${message}`" class="block">
+              {{ message }}
+            </span>
+          </p>
           <p v-else-if="selectedClasses.length === 0" class="mt-1 text-sm text-yellow-500 dark:text-yellow-400">
             Please select at least one class.
           </p>
@@ -54,23 +67,26 @@
             No properties match "{{ propertySearch }}".
           </p>
           <div v-for="prop in visibleProperties" :key="prop.uri"
-            class="mb-4 p-3 border border-gray-300 dark:border-gray-600 rounded">
+            class="mb-4 p-3 border border-gray-300 dark:border-gray-600 rounded" :class="hasFieldError(prop.uri)
+              ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+              : ''">
             <label :for="'prop-' + prop.uri" class="block mb-1 font-medium text-gray-900 dark:text-gray-100">
               {{ getPropDisplayLabel(prop) }}
             </label>
 
             <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
               <!-- Datatype property -->
-
               <template v-if="prop.type === 'datatype'">
                 <select v-if="isBooleanDatatype(getPropDatatype(prop))"
                   :value="toLexicalString(getPropValues(prop.uri)[index])"
                   class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  @change="setPropValue(
-                    prop.uri,
-                    index,
-                    ($event.target as HTMLSelectElement).value
-                  ); onPropertyInput(prop.uri)">
+                  :class="hasFieldError(prop.uri)
+                    ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                    : ''" :aria-invalid="hasFieldError(prop.uri)" @change="setPropValue(
+                      prop.uri,
+                      index,
+                      ($event.target as HTMLSelectElement).value
+                    ); onPropertyInput(prop.uri)">
                   <option value="">Select a value</option>
                   <option value="true">True</option>
                   <option value="false">False</option>
@@ -80,11 +96,13 @@
                   :type="inputType(getPropDatatype(prop))"
                   :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
                   class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  @input="setPropValue(
-                    prop.uri,
-                    index,
-                    ($event.target as HTMLInputElement).value
-                  ); onPropertyInput(prop.uri)" />
+                  :class="hasFieldError(prop.uri)
+                    ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                    : ''" :aria-invalid="hasFieldError(prop.uri)" @input="setPropValue(
+                      prop.uri,
+                      index,
+                      ($event.target as HTMLInputElement).value
+                    ); onPropertyInput(prop.uri)" />
               </template>
 
 
@@ -95,7 +113,9 @@
                     @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
                     @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
                     class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                    autocomplete="off" />
+                    :class="hasFieldError(prop.uri)
+                      ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                      : ''" :aria-invalid="hasFieldError(prop.uri)" autocomplete="off" />
                   <ul v-if="activeSuggestion === `${prop.uri}_${index}` && filteredSuggestions[prop.uri]?.length"
                     class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-40 overflow-auto w-full mt-1">
                     <li v-for="sug in filteredSuggestions[prop.uri]" :key="sug.uri"
@@ -134,8 +154,10 @@
               Add value
             </button>
 
-            <div v-if="validationErrors[prop.uri]" class="mt-1 text-sm text-red-600 dark:text-red-400">
-              <span v-for="msg in validationErrors[prop.uri]" :key="msg" class="block">{{ msg }}</span>
+            <div v-if="getFieldMessages(prop.uri).length" class="mt-1 text-sm text-red-600 dark:text-red-400">
+              <span v-for="(message, index) in getFieldMessages(prop.uri)" :key="`${index}-${message}`" class="block">
+                {{ message }}
+              </span>
             </div>
           </div>
 
@@ -180,7 +202,8 @@
         <AdminMetadataForm :mode="panelState.mode" :nestingLevel="(props.nestingLevel || 0) + 1"
           :allowedClassUris="panelState.allowedClasses" :classUris="panelState.classUris"
           :initialInstanceUri="panelState.instanceUri" :initialProperties="panelState.existingProperties"
-          :submitting="!!panelLoadingMsg" @submit="onPanelSubmit" @cancel="closePanel" />
+          :serverValidationError="panelServerValidationError" :submitting="!!panelLoadingMsg" @submit="onPanelSubmit"
+          @cancel="closePanel" />
       </div>
     </SlideOverPanel>
 
@@ -231,6 +254,7 @@ const props = defineProps<{
   allowedClassUris?: string[]
   nestingLevel?: number
   submitting?: boolean
+  serverValidationError?: string | null
 }>()
 
 const formId = `metadata-form-${useId()}`
@@ -406,6 +430,10 @@ function setPropValue(
 }
 
 const validationErrors = reactive<Record<string, string[]>>({})
+const serverFieldErrors = reactive<Record<string, string[]>>({})
+const classValidationErrors = ref<string[]>([])
+const serverSummaryErrors = ref<string[]>([])
+const panelServerValidationError = ref<string | null>(null)
 
 type LiveValidationStage = 'selection' | 'metadata'
 
@@ -445,6 +473,101 @@ function getErrorMessage(error: unknown, fallback: string): string {
 
   return fallback
 }
+
+function addUniqueMessage(target: string[], message: string) {
+  if (!target.includes(message)) {
+    target.push(message)
+  }
+}
+
+function getFieldMessages(propUri: string): string[] {
+  return [
+    ...new Set([
+      ...(validationErrors[propUri] ?? []),
+      ...(serverFieldErrors[propUri] ?? []),
+    ]),
+  ]
+}
+
+function hasFieldError(propUri: string): boolean {
+  return getFieldMessages(propUri).length > 0
+}
+
+function clearServerValidationState() {
+  for (const propUri of Object.keys(serverFieldErrors)) {
+    delete serverFieldErrors[propUri]
+  }
+
+  classValidationErrors.value = []
+  serverSummaryErrors.value = []
+}
+
+function applyServerValidationMessage(
+  message: string,
+  stage: 'selection' | 'metadata' = 'metadata',
+) {
+  // Separate messages using the prefixes established by commit 1.
+  // The lookahead avoids splitting semicolons within a message.
+  const normalized = message
+    .replace(/^SHACL validation failed:\s*/i, '')
+    .trim()
+
+  const issues = normalized
+    .split(
+      /;\s+(?=(?:The value of property <|Property <|Validation issue:))/i,
+    )
+    .map(issue => issue.trim())
+    .filter(Boolean)
+
+  for (const issue of issues) {
+    const propertyMatch = issue.match(
+      /(?:The value of property|Property)\s+<([^>]+)>/i,
+    )
+
+    if (propertyMatch?.[1]) {
+      const propUri = propertyMatch[1]
+
+      if (properties.value.some(prop => prop.uri === propUri)) {
+        const errors = serverFieldErrors[propUri] ?? []
+        addUniqueMessage(errors, issue)
+        serverFieldErrors[propUri] = errors
+      } else {
+        // The property is not represented by a current form field.
+        addUniqueMessage(serverSummaryErrors.value, issue)
+      }
+
+      continue
+    }
+
+    // Retain compatibility with validation errors that predate the
+    // property-path message format, such as profile-membership errors.
+    const matchingProperty = properties.value.find(
+      prop => issue.includes(prop.uri),
+    )
+
+    if (matchingProperty) {
+      const errors = serverFieldErrors[matchingProperty.uri] ?? []
+      addUniqueMessage(errors, issue)
+      serverFieldErrors[matchingProperty.uri] = errors
+    } else if (
+      stage === 'selection' ||
+      /\bclasses?\b|\bdisjoint\b/i.test(issue)
+    ) {
+      addUniqueMessage(classValidationErrors.value, issue)
+    } else {
+      addUniqueMessage(serverSummaryErrors.value, issue)
+    }
+  }
+}
+
+watch(
+  () => props.serverValidationError,
+  message => {
+    if (message) {
+      applyServerValidationMessage(message, 'metadata')
+    }
+  },
+)
 
 function getFieldErrors(propUri: string): string[] {
   const propDef = properties.value.find(p => p.uri === propUri)
@@ -765,6 +888,12 @@ async function runLiveValidation(
       )
     }
 
+    if (stage === 'metadata') {
+      clearServerValidationState()
+    } else {
+      classValidationErrors.value = []
+    }
+
     liveValidationFailures[stage] = null
   } catch (error: unknown) {
     if (revision !== liveValidationRevision) return
@@ -773,6 +902,8 @@ async function runLiveValidation(
       error,
       'Metadata validation failed.',
     )
+
+    applyServerValidationMessage(message, stage)
 
     // Deduplicate repeated errors while the same problem persists.
     if (liveValidationFailures[stage] !== message) {
@@ -789,6 +920,8 @@ async function runLiveValidation(
 }
 
 function onPropertyInput(propUri: string) {
+  delete serverFieldErrors[propUri]
+  serverSummaryErrors.value = []
   validateField(propUri)
   scheduleLiveValidation('metadata')
 }
@@ -1100,6 +1233,7 @@ async function onPanelSubmit(
   }
 
   panelLoadingMsg.value = 'Validating and saving the linked data...'
+  panelServerValidationError.value = null
   try {
     if (mode === 'create') {
       const res = await $fetch<{ uri: string }>(`${apiBase}/api/metadata/create`, {
@@ -1137,9 +1271,13 @@ async function onPanelSubmit(
 
     void store.fetchState()
   } catch (error: unknown) {
-    toast.error(
-      getErrorMessage(error, 'Failed to save the linked instance.'),
+    const message = getErrorMessage(
+      error,
+      'Failed to save the linked instance.',
     )
+
+    panelServerValidationError.value = message
+    toast.error(message)
   } finally {
     panelLoadingMsg.value = ''
   }
@@ -1164,6 +1302,7 @@ watch(() => panelState.value, (val) => {
 })
 
 watch(selectedClasses, () => {
+  clearServerValidationState()
   onClassSelectionChange()
 }, { deep: true })
 
@@ -1183,6 +1322,8 @@ function handleSubmit() {
   }
 
   if (!validateAllFields()) return
+
+  clearServerValidationState()
 
   emit('submit', {
     classUris: selectedClasses.value,
