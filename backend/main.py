@@ -3803,6 +3803,11 @@ class SHACLProfile:
                 )
                 data_g += referenced_graph
 
+        # Validate only the instance represented by this form.
+        # Referenced resources remain in data_g so that direct constraints,
+        # such as sh:class on an object property, can inspect their RDF types.
+        # However, their own class-targeted shapes must be validated when
+        # those resources are edited through their own forms.
         conforms, raw_graph, _ = pyshacl.validate(
             data_g,
             shacl_graph=explicit_shapes,
@@ -3810,6 +3815,7 @@ class SHACLProfile:
             do_owl_imports=False,
             inference="rdfs",
             abort_on_first=False,
+            focus_nodes=[inst_uri],
         )
         report_graph = cast(Graph, raw_graph)
 

@@ -32,6 +32,21 @@ class StaticShapeStore:
         return self.shapes
 
 
+class ReferencedResourceStore(StaticShapeStore):
+    """Static SHACL store with RDF descriptions of linked resources."""
+
+    def __init__(
+        self,
+        shapes: Graph,
+        referenced_graph: Graph,
+    ):
+        super().__init__(shapes)
+        self.referenced_graph = referenced_graph
+
+    async def construct(self, sparql: str) -> str:
+        return self.referenced_graph.serialize(format="turtle")
+
+    
 def make_property_shape(
     target_class: URIRef,
     property_uri: URIRef,
@@ -188,6 +203,141 @@ async def test_uri_looking_string_is_validated_as_literal(
         },
     ) is True
 
+
+@pytest.mark.asyncio
+async def test_validation_does_not_validate_nested_resource_shapes(
+    monkeypatch,
+):
+    shapes = Graph()
+
+    work_shape = URIRef("urn:test:WorkShape")
+    work_contribution_property = URIRef(
+        "urn:test:WorkContributionProperty"
+    )
+
+    contribution_shape = URIRef("urn:test:ContributionShape")
+    contribution_agent_property = URIRef(
+        "urn:test:ContributionAgentProperty"
+    )
+
+    # The current form edits a Work instance. Its direct contribution
+    # property requires the linked resource to be a Contribution.
+    shapes.add((work_shape, RDF.type, SH.NodeShape))
+    shapes.add((work_shape, SH.targetClass, EX.Work))
+    shapes.add((work_shape, SH.property, work_contribution_property))
+
+    shapes.add((
+        work_contribution_property,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes.add((work_contribution_property, SH.path, EX.contribution))
+    shapes.add((
+        work_contribution_property,
+        SH["class"],
+        EX.Contribution,
+    ))
+
+    # This shape belongs to the linked Contribution instance, not Work.
+    # Its agent property is intentionally invalid.
+    shapes.add((contribution_shape, RDF.type, SH.NodeShape))
+    shapes.add((
+        contribution_shape,
+        SH.targetClass,
+        EX.Contribution,
+    ))
+    shapes.add((
+        contribution_shape,
+        SH.property,
+        contribution_agent_property,
+    ))
+
+    shapes.add((
+        contribution_agent_property,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes.add((contribution_agent_property, SH.path, EX.agent))
+    shapes.add((
+        contribution_agent_property,
+        SH["class"],
+        EX.Agent,
+    ))
+
+    contribution_node = URIRef("urn:bnid:test-contribution")
+    agent_node = EX.untypedAgent
+
+    referenced_graph = Graph()
+    referenced_graph.add((
+        contribution_node,
+        RDF.type,
+        EX.Contribution,
+    ))
+    referenced_graph.add((
+        contribution_node,
+        EX.agent,
+        agent_node,
+    ))
+
+    store = ReferencedResourceStore(shapes, referenced_graph)
+    profile = main.SHACLProfile(cast(main.RDFStore, store))
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    # The direct Work -> Contribution class constraint still passes.
+    # The nested Contribution -> Agent constraint must not be evaluated
+    # while editing Work.
+    assert await profile.validate_instance(
+        [str(EX.Work)],
+        {
+            str(EX.contribution): [str(contribution_node)],
+        },
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_direct_object_property_class_constraint_is_still_enforced(
+    monkeypatch,
+):
+    shapes = make_property_shape(
+        EX.Work,
+        EX.contribution,
+        [(SH["class"], EX.Contribution)],
+    )
+
+    contribution_node = URIRef("urn:bnid:wrong-type-contribution")
+
+    referenced_graph = Graph()
+    referenced_graph.add((
+        contribution_node,
+        RDF.type,
+        EX.Person,
+    ))
+
+    store = ReferencedResourceStore(shapes, referenced_graph)
+    profile = main.SHACLProfile(cast(main.RDFStore, store))
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await profile.validate_instance(
+            [str(EX.Work)],
+            {
+                str(EX.contribution): [str(contribution_node)],
+            },
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "SHACL validation failed" in exc_info.value.detail
+    
 
 @pytest.mark.asyncio
 async def test_live_metadata_validation_runs_profile_and_shacl_checks(
