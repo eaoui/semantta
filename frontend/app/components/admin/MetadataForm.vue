@@ -69,7 +69,7 @@
         </div>
 
         <!-- Dynamic form -->
-        <form v-if="properties.length > 0 && !loadingProps" @submit.prevent="handleSubmit">
+        <form v-if="properties.length > 0 && !loadingProps" :id="formId" @submit.prevent="handleSubmit">
           <p v-if="propertySearch.trim() && visibleProperties.length === 0"
             class="mb-4 text-sm text-gray-500 dark:text-gray-400">
             No properties match "{{ propertySearch }}".
@@ -228,6 +228,7 @@ import {
   onMounted,
   onBeforeUnmount,
   nextTick,
+  useId
 } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useDisplay } from '@/composables/useDisplay'
@@ -1166,6 +1167,8 @@ async function openCreatePanel(
   index: number,
   ranges: string[],
 ) {
+  panelServerValidationError.value = null
+
   openingPanelActionKey.value = getPanelActionKey(propUri, index)
   await waitForIndicatorPaint()
 
@@ -1182,6 +1185,8 @@ async function openCreatePanel(
 async function openEditPanel(propUri: string, index: number) {
   const uri = getPropValues(propUri)[index]
   if (!uri) return
+
+  panelServerValidationError.value = null
 
   openingPanelActionKey.value = getPanelActionKey(propUri, index)
   await waitForIndicatorPaint()
@@ -1218,6 +1223,7 @@ async function openEditPanel(propUri: string, index: number) {
 function closePanel() {
   panelState.value = null
   openingPanelActionKey.value = null
+  panelServerValidationError.value = null
 }
 
 async function onPanelSubmit(
