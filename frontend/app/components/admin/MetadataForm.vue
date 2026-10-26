@@ -53,15 +53,23 @@
         </div>
 
         <!-- Loading / message -->
-        <div v-if="loadingProps" class="text-gray-500 dark:text-gray-400">Loading properties…</div>
-        <div v-else-if="properties.length === 0 && selectedClasses.length"
-          class="text-yellow-600 dark:text-yellow-400 mt-2">
+        <div v-if="loadingProps" class="text-gray-500 dark:text-gray-400">
+          Loading properties…
+        </div>
+
+        <div v-else-if="
+          propertiesLoaded &&
+          properties.length === 0 &&
+          selectedClasses.length > 0
+        " class="mt-2 text-yellow-600 dark:text-yellow-400">
           No active properties for the selected class(es). Enable them in the
-          <NuxtLink to="/admin/profile" class="underline">Application Profile</NuxtLink>.
+          <NuxtLink to="/admin/profile" class="underline">
+            Application Profile
+          </NuxtLink>.
         </div>
 
         <!-- Dynamic form -->
-        <form v-if="properties.length" :id="formId" @submit.prevent="handleSubmit">
+        <form v-if="properties.length > 0 && !loadingProps" @submit.prevent="handleSubmit">
           <p v-if="propertySearch.trim() && visibleProperties.length === 0"
             class="mb-4 text-sm text-gray-500 dark:text-gray-400">
             No properties match "{{ propertySearch }}".
@@ -326,7 +334,8 @@ const instanceUri = computed(() => {
   return `${base.endsWith('/') ? base : base + '/'}${generatedUuid.value}`
 })
 const properties = ref<PropDef[]>([])
-const loadingProps = ref(false)
+const loadingProps = ref(selectedClasses.value.length > 0)
+const propertiesLoaded = ref(false)
 
 const formData = reactive<Record<string, string[]>>({})
 const activeSuggestion = ref<string | null>(null)
@@ -969,6 +978,7 @@ async function fetchPropertiesForClasses() {
 
   if (requestedClasses.length === 0) {
     loadingProps.value = false
+    propertiesLoaded.value = false
     properties.value = []
 
     for (const propUri of Object.keys(validationErrors)) {
@@ -981,6 +991,7 @@ async function fetchPropertiesForClasses() {
   }
 
   loadingProps.value = true
+  propertiesLoaded.value = false
 
   try {
     const responses = await Promise.all(
@@ -1000,6 +1011,7 @@ async function fetchPropertiesForClasses() {
       if (!unique.has(p.uri)) unique.set(p.uri, p)
     }
     properties.value = Array.from(unique.values())
+    propertiesLoaded.value = true
 
     const activePropertyUris = new Set(
       properties.value.map(prop => prop.uri),
