@@ -1717,12 +1717,244 @@ def rebuild_validation_ontology():
     global validation_ontology_graph
     validation_ontology_graph = Graph()
     g = state["combined_onto_graph"]
-    for s, p, o in g:
-        if str(p) in SHACL_RELEVANT_PREDICATES:
-            validation_ontology_graph.add((s, p, o))
-    for subj, obj in g.subject_objects(RDF.type):
-        if str(obj).startswith(str(OWL)):
-            validation_ontology_graph.add((subj, RDF.type, obj))
+
+    for subject, predicate, obj in g:
+        if str(predicate) in SHACL_RELEVANT_PREDICATES:
+            validation_ontology_graph.add(
+                (subject, predicate, obj)
+            )
+
+_FAST_PROFILE_SHAPE_PREDICATES = {
+    RDF.type,
+    RDF.first,
+    RDF.rest,
+    RDFS.label,
+    RDFS.comment,
+    SH.targetClass,
+    SH.targetNode,
+    SH.property,
+    SH.path,
+    SH.order,
+    SH["class"],
+    SH.datatype,
+    SH.minCount,
+    SH.maxCount,
+    SH.minLength,
+    SH.maxLength,
+    SH.pattern,
+    SH.flags,
+    SH.languageIn,
+    SH["in"],
+    SH.hasValue,
+    SH.nodeKind,
+    SH.message,
+    SH.name,
+    SH.description,
+    SH.severity,
+}
+
+def _copy_validation_graph(source: Graph) -> Graph:
+    """Return an independent copy of a validation ontology graph."""
+    copied = Graph()
+
+    for prefix, namespace in source.namespaces():
+        copied.bind(prefix, namespace, replace=True)
+
+    copied += source
+    return copied
+
+def _is_builtin_validation_uri(term) -> bool:
+    """Identify vocabulary URIs that require conservative fallback."""
+    if not isinstance(term, URIRef):
+        return False
+
+    uri = str(term)
+    return uri.startswith(
+        (
+            str(RDF),
+            str(RDFS),
+            str(OWL),
+            "http://www.w3.org/2001/XMLSchema#",
+            str(SH),
+        )
+    )
+
+def _build_validation_ontology_for_instance(
+    data_graph: Graph,
+    shapes_graph: Graph,
+) -> Graph:
+    """
+    Build an ontology projection for ordinary Application Profile shapes.
+
+    Retain the RDFS relationships relevant to classes and properties
+    referenced in the input graph and shapes graph.
+
+    Preserve the existing validation ontology for custom or unsupported
+    shapes, and for constraints involving built-in vocabulary URIs.
+    """
+    source = validation_ontology_graph
+
+    # Use the existing graph whenever the shapes contain predicates that
+    # have not explicitly been included in the optimized path. This avoids
+    # accidentally changing the behavior of custom SHACL constraints.
+    if any(
+        predicate not in _FAST_PROFILE_SHAPE_PREDICATES
+        for _, predicate, _ in shapes_graph
+    ):
+        return _copy_validation_graph(source)
+
+    paths = set(shapes_graph.objects(None, SH.path))
+
+    # Complex property paths are deliberately handled by the existing path.
+    if any(not isinstance(path, URIRef) for path in paths):
+        return _copy_validation_graph(source)
+
+    class_seeds = {
+        obj
+        for _, obj in data_graph.subject_objects(RDF.type)
+        if isinstance(obj, URIRef)
+    }
+    class_seeds.update(
+        obj
+        for _, obj in shapes_graph.subject_objects(SH.targetClass)
+        if isinstance(obj, URIRef)
+    )
+    class_seeds.update(
+        obj
+        for _, obj in shapes_graph.subject_objects(SH["class"])
+        if isinstance(obj, URIRef)
+    )
+
+    property_seeds: set[URIRef] = {
+        predicate
+        for _, predicate, _ in data_graph
+        if isinstance(predicate, URIRef)
+        and predicate != RDF.type
+    }
+    property_seeds.update(
+        path
+        for path in paths
+        if isinstance(path, URIRef)
+    )
+
+    # If a constraint explicitly depends on RDF/RDFS/OWL/SHACL vocabulary,
+    # keep the existing graph so the optimization does not omit its context.
+    if any(
+        _is_builtin_validation_uri(term)
+        for term in class_seeds | property_seeds
+    ):
+        return _copy_validation_graph(source)
+
+    # An empty seed set is unexpected for ordinary instance validation.
+    # Prefer the existing graph rather than risking an incomplete projection.
+    if not class_seeds and not property_seeds:
+        return _copy_validation_graph(source)
+
+    projected = Graph()
+
+    for prefix, namespace in source.namespaces():
+        projected.bind(prefix, namespace, replace=True)
+
+    # Collect the properties and their superproperties. Equivalent
+    # properties also imply subproperty relationships in both directions.
+    properties: set[URIRef] = set()
+    pending_properties: list[URIRef] = list(property_seeds)
+
+    while pending_properties:
+        prop = pending_properties.pop()
+
+        if prop in properties:
+            continue
+
+        properties.add(prop)
+
+        # Do not expand the internal schema of built-in vocabulary terms.
+        # A built-in term used directly by a constraint triggers fallback
+        # above; these terms can still appear as parents of user properties.
+        if _is_builtin_validation_uri(prop):
+            continue
+
+        for parent in source.objects(prop, RDFS.subPropertyOf):
+            projected.add((prop, RDFS.subPropertyOf, parent))
+
+            if isinstance(parent, URIRef) and parent not in properties:
+                pending_properties.append(parent)
+
+        equivalents = set(
+            source.objects(prop, OWL.equivalentProperty)
+        )
+        equivalents.update(
+            source.subjects(OWL.equivalentProperty, prop)
+        )
+
+        for equivalent in equivalents:
+            if not isinstance(equivalent, URIRef):
+                continue
+
+            projected.add((prop, RDFS.subPropertyOf, equivalent))
+            projected.add((equivalent, RDFS.subPropertyOf, prop))
+
+            if equivalent not in properties:
+                pending_properties.append(equivalent)
+
+    # Domain and range declarations on a property or one of its
+    # superproperties can imply types that are relevant to validation.
+    for prop in properties:
+        if _is_builtin_validation_uri(prop):
+            continue
+
+        for predicate in (RDFS.domain, RDFS.range):
+            for value in source.objects(prop, predicate):
+                projected.add((prop, predicate, value))
+
+                if isinstance(value, URIRef):
+                    class_seeds.add(value)
+
+    # Preserve the superclass relationships of all types and constraint
+    # classes relevant to the input and the shapes graph.
+    pending_classes = list(class_seeds)
+    processed_classes: set[URIRef] = set()
+
+    while pending_classes:
+        cls = pending_classes.pop()
+
+        if cls in processed_classes:
+            continue
+
+        processed_classes.add(cls)
+
+        if _is_builtin_validation_uri(cls):
+            continue
+
+        for parent in source.objects(cls, RDFS.subClassOf):
+            projected.add((cls, RDFS.subClassOf, parent))
+
+            if (
+                isinstance(parent, URIRef)
+                and parent not in processed_classes
+            ):
+                pending_classes.append(parent)
+
+        # Class equivalence must preserve subclass-based validation in
+        # both directions, even if the source graph lacks the derived edges.
+        equivalents = set(
+            source.objects(cls, OWL.equivalentClass)
+        )
+        equivalents.update(
+            source.subjects(OWL.equivalentClass, cls)
+        )
+
+        for equivalent in equivalents:
+            if not isinstance(equivalent, URIRef):
+                continue
+
+            projected.add((cls, RDFS.subClassOf, equivalent))
+            projected.add((equivalent, RDFS.subClassOf, cls))
+
+            if equivalent not in processed_classes:
+                pending_classes.append(equivalent)
+
+    return projected
 
 # ---------------------------------------------------------------------------
 #  Cache Invalidation
@@ -3803,15 +4035,45 @@ class SHACLProfile:
                 )
                 data_g += referenced_graph
 
+        # Preserve OWL type assertions for resources participating
+        # in this validation, rather than copying every ontology
+        # entity's OWL type assertions into the global schema graph.
+        ontology_graph = state["combined_onto_graph"]
+
+        validation_resources = {
+            term
+            for triple in data_g
+            for term in triple
+            if isinstance(term, URIRef)
+        }
+
+        for resource in validation_resources:
+            for type_uri in ontology_graph.objects(
+                resource,
+                RDF.type,
+            ):
+                if (
+                    isinstance(type_uri, URIRef)
+                    and str(type_uri).startswith(str(OWL))
+                ):
+                    data_g.add(
+                        (resource, RDF.type, type_uri)
+                    )
+
         # Validate only the instance represented by this form.
         # Referenced resources remain in data_g so that direct constraints,
         # such as sh:class on an object property, can inspect their RDF types.
         # However, their own class-targeted shapes must be validated when
         # those resources are edited through their own forms.
+        validation_ontology = _build_validation_ontology_for_instance(
+            data_g,
+            explicit_shapes,
+        )
+
         conforms, raw_graph, _ = pyshacl.validate(
             data_g,
             shacl_graph=explicit_shapes,
-            ont_graph=validation_ontology_graph,
+            ont_graph=validation_ontology,
             do_owl_imports=False,
             inference="rdfs",
             abort_on_first=False,

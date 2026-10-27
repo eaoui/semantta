@@ -105,6 +105,260 @@ def test_validation_ontology_rebuilds_when_index_cache_is_valid(
     ) in main.validation_ontology_graph
 
 
+def test_validation_ontology_excludes_global_owl_type_declarations(
+    monkeypatch,
+):
+    ontology = Graph()
+    ontology.add((EX.Child, RDFS.subClassOf, EX.Parent))
+    ontology.add((EX.Book, RDF.type, OWL.Class))
+    ontology.add((EX.title, RDF.type, OWL.DatatypeProperty))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology,
+    )
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    main.rebuild_validation_ontology()
+
+    # Schema relationships required for RDFS validation are preserved.
+    assert (
+        EX.Child,
+        RDFS.subClassOf,
+        EX.Parent,
+    ) in main.validation_ontology_graph
+
+    # OWL type declarations are not copied globally.
+    assert (
+        EX.Book,
+        RDF.type,
+        OWL.Class,
+    ) not in main.validation_ontology_graph
+    assert (
+        EX.title,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ) not in main.validation_ontology_graph
+
+
+@pytest.mark.asyncio
+async def test_referenced_ontology_resource_retains_owl_class_type_for_sh_class(
+    monkeypatch,
+):
+    shapes = make_property_shape(
+        EX.Work,
+        EX.vocabularyTerm,
+        [(SH["class"], OWL.Class)],
+    )
+
+    ontology = Graph()
+    ontology.add((
+        EX.CatalogedClass,
+        RDF.type,
+        OWL.Class,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology,
+    )
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    main.rebuild_validation_ontology()
+
+    # This declaration must not be present in the global validation graph.
+    assert (
+        EX.CatalogedClass,
+        RDF.type,
+        OWL.Class,
+    ) not in main.validation_ontology_graph
+
+    profile = main.SHACLProfile(
+        cast(
+            main.RDFStore,
+            ReferencedResourceStore(shapes, Graph()),
+        )
+    )
+
+    # The referenced ontology resource still satisfies sh:class owl:Class
+    # through the type information made available for this validation.
+    assert await profile.validate_instance(
+        [str(EX.Work)],
+        {
+            str(EX.vocabularyTerm): [
+                str(EX.CatalogedClass),
+            ],
+        },
+    ) is True
+
+
+def test_validation_ontology_projection_preserves_relevant_schema(
+    monkeypatch,
+):
+    ontology = Graph()
+    ontology.add((
+        EX.Child,
+        OWL.equivalentClass,
+        EX.Parent,
+    ))
+    ontology.add((
+        EX.Parent,
+        RDFS.subClassOf,
+        EX.Entity,
+    ))
+    ontology.add((
+        EX.title,
+        RDFS.subPropertyOf,
+        EX.label,
+    ))
+    ontology.add((
+        EX.label,
+        RDFS.domain,
+        EX.Parent,
+    ))
+    ontology.add((
+        EX.label,
+        RDFS.range,
+        EX.TitleValue,
+    ))
+
+    ontology.add((
+        EX.UnrelatedChild,
+        RDFS.subClassOf,
+        EX.UnrelatedParent,
+    ))
+    ontology.add((
+        EX.unusedProperty,
+        RDFS.range,
+        EX.UnrelatedParent,
+    ))
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        ontology,
+    )
+
+    data_graph = Graph()
+    instance = URIRef("urn:temp:instance")
+    data_graph.add((instance, RDF.type, EX.Child))
+    data_graph.add((instance, EX.title, Literal("A title")))
+
+    shapes_graph = make_property_shape(
+        EX.Parent,
+        EX.title,
+        [(SH.datatype, XSD.string)],
+    )
+
+    projected = main._build_validation_ontology_for_instance(
+        data_graph,
+        shapes_graph,
+    )
+
+    # Subclass relationships, including class equivalence, are retained.
+    assert (
+        EX.Child,
+        RDFS.subClassOf,
+        EX.Parent,
+    ) in projected
+    assert (
+        EX.Parent,
+        RDFS.subClassOf,
+        EX.Child,
+    ) in projected
+    assert (
+        EX.Parent,
+        RDFS.subClassOf,
+        EX.Entity,
+    ) in projected
+
+    # Relevant property hierarchy and domain/range declarations survive.
+    assert (
+        EX.title,
+        RDFS.subPropertyOf,
+        EX.label,
+    ) in projected
+    assert (
+        EX.label,
+        RDFS.domain,
+        EX.Parent,
+    ) in projected
+    assert (
+        EX.label,
+        RDFS.range,
+        EX.TitleValue,
+    ) in projected
+
+    # Unrelated ontology components are excluded.
+    assert (
+        EX.UnrelatedChild,
+        RDFS.subClassOf,
+        EX.UnrelatedParent,
+    ) not in projected
+    assert (
+        EX.unusedProperty,
+        RDFS.range,
+        EX.UnrelatedParent,
+    ) not in projected
+
+    assert len(projected) < len(ontology)
+
+
+def test_validation_ontology_projection_falls_back_for_custom_shapes(
+    monkeypatch,
+):
+    ontology = Graph()
+    ontology.add((
+        EX.Child,
+        RDFS.subClassOf,
+        EX.Parent,
+    ))
+    ontology.add((
+        EX.UnrelatedChild,
+        RDFS.subClassOf,
+        EX.UnrelatedParent,
+    ))
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        ontology,
+    )
+
+    data_graph = Graph()
+    instance = URIRef("urn:temp:instance")
+    data_graph.add((instance, RDF.type, EX.Child))
+
+    shapes_graph = make_property_shape(
+        EX.Parent,
+        EX.title,
+        [],
+    )
+    shapes_graph.add((
+        URIRef("urn:test:CustomConstraint"),
+        SH.sparql,
+        Literal("SELECT $this WHERE { $this ?p ?o }"),
+    ))
+
+    projected = main._build_validation_ontology_for_instance(
+        data_graph,
+        shapes_graph,
+    )
+
+    # The fallback preserves the complete existing validation graph.
+    assert set(projected) == set(ontology)
+
+
 @pytest.mark.asyncio
 async def test_superclass_constraints_apply_to_subclass_instances(
     monkeypatch,
