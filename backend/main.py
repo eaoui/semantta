@@ -23,7 +23,8 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, unquote, urlsplit
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from time import monotonic
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Set, cast, Any
@@ -1955,6 +1956,106 @@ def _build_validation_ontology_for_instance(
                 pending_classes.append(equivalent)
 
     return projected
+
+_SHACL_SUCCESS_CACHE_TTL_SECONDS = 30.0
+_SHACL_SUCCESS_CACHE_MAX_ENTRIES = 128
+
+# Cache only recent successful validation fingerprints, not RDF graphs.
+_SHACL_VALIDATION_SUCCESS_CACHE: OrderedDict[str, float] = (
+    OrderedDict()
+)
+
+def _graph_content_fingerprint(graph: Graph) -> str:
+    """Return a fingerprint of the RDF statements in a graph."""
+    statements = sorted(
+        f"{subject.n3()} {predicate.n3()} {obj.n3()} ."
+        for subject, predicate, obj in graph
+    )
+
+    digest = hashlib.sha256()
+
+    for statement in statements:
+        digest.update(statement.encode("utf-8"))
+        digest.update(b"\n")
+
+    return digest.hexdigest()
+
+def _shacl_validation_cache_key(
+    data_graph: Graph,
+    shapes_graph: Graph,
+    ontology_graph: Graph,
+) -> str:
+    """Fingerprint all graphs and fixed settings affecting SHACL results."""
+    digest = hashlib.sha256()
+
+    digest.update(
+        b"pyshacl-v1|"
+        b"focus=urn:temp:instance|"
+        b"inference=rdfs|"
+        b"do_owl_imports=false\n"
+    )
+
+    for name, graph in (
+        ("data", data_graph),
+        ("shapes", shapes_graph),
+        ("ontology", ontology_graph),
+    ):
+        digest.update(name.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(
+            _graph_content_fingerprint(graph).encode("ascii")
+        )
+        digest.update(b"\0")
+
+    return digest.hexdigest()
+
+def _can_cache_shacl_success(shapes_graph: Graph) -> bool:
+    """Avoid memoization for shapes with potentially dynamic behavior."""
+    dynamic_predicates = (
+        SH.sparql,
+        SH.js,
+        SH.rule,
+    )
+
+    return not any(
+        next(
+            shapes_graph.triples((None, predicate, None)),
+            None,
+        )
+        is not None
+        for predicate in dynamic_predicates
+    )
+
+def _has_cached_shacl_success(cache_key: str) -> bool:
+    """Return whether an unexpired successful validation is cached."""
+    now = monotonic()
+
+    for key, expires_at in list(
+        _SHACL_VALIDATION_SUCCESS_CACHE.items()
+    ):
+        if expires_at <= now:
+            del _SHACL_VALIDATION_SUCCESS_CACHE[key]
+
+    expires_at = _SHACL_VALIDATION_SUCCESS_CACHE.get(cache_key)
+
+    if expires_at is None:
+        return False
+
+    _SHACL_VALIDATION_SUCCESS_CACHE.move_to_end(cache_key)
+    return True
+
+def _remember_shacl_success(cache_key: str) -> None:
+    """Cache a successful validation fingerprint with bounded retention."""
+    _SHACL_VALIDATION_SUCCESS_CACHE[cache_key] = (
+        monotonic() + _SHACL_SUCCESS_CACHE_TTL_SECONDS
+    )
+    _SHACL_VALIDATION_SUCCESS_CACHE.move_to_end(cache_key)
+
+    while (
+        len(_SHACL_VALIDATION_SUCCESS_CACHE)
+        > _SHACL_SUCCESS_CACHE_MAX_ENTRIES
+    ):
+        _SHACL_VALIDATION_SUCCESS_CACHE.popitem(last=False)
 
 # ---------------------------------------------------------------------------
 #  Cache Invalidation
@@ -3973,8 +4074,6 @@ class SHACLProfile:
                         (inst_uri, URIRef(pred), Literal(str(val)))
                     )
 
-        explicit_shapes = await self._get_shapes_graph()
-
         if len(explicit_shapes) == 0:
             for class_uri in class_uris:
                 for prop_uri, values in properties.items():
@@ -4070,15 +4169,46 @@ class SHACLProfile:
             explicit_shapes,
         )
 
+        # Copy the shapes graph because PySHACL may modify it.
+        validation_shapes = Graph()
+
+        for prefix, namespace in explicit_shapes.namespaces():
+            validation_shapes.bind(
+                prefix,
+                namespace,
+                replace=True,
+            )
+
+        validation_shapes += explicit_shapes
+
+        # Use the exact ontology graph that will be passed to PySHACL.
+        validation_ontology = _build_validation_ontology_for_instance(
+            data_g,
+            validation_shapes,
+        )
+
+        cache_key: str | None = None
+
+        if _can_cache_shacl_success(validation_shapes):
+            cache_key = _shacl_validation_cache_key(
+                data_g,
+                validation_shapes,
+                validation_ontology,
+            )
+
+            if _has_cached_shacl_success(cache_key):
+                return True
+
         conforms, raw_graph, _ = pyshacl.validate(
             data_g,
-            shacl_graph=explicit_shapes,
+            shacl_graph=validation_shapes,
             ont_graph=validation_ontology,
             do_owl_imports=False,
             inference="rdfs",
             abort_on_first=False,
             focus_nodes=[inst_uri],
         )
+        
         report_graph = cast(Graph, raw_graph)
 
         if not conforms:
@@ -4146,7 +4276,9 @@ class SHACLProfile:
                 "SHACL validation failed: " + "; ".join(messages),
             )
 
-        return True
+        if cache_key is not None:
+            _remember_shacl_success(cache_key)
+    
         return True
 
 # ---------------------------------------------------------------------------

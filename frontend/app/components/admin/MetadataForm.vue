@@ -456,6 +456,11 @@ const liveValidationFailures: Record<LiveValidationStage, string | null> = {
 let liveValidationTimer: ReturnType<typeof setTimeout> | undefined
 let liveValidationRevision = 0
 let propertyFetchRevision = 0
+let liveValidationInFlight = false
+let pendingLiveValidation: {
+  stage: LiveValidationStage
+  revision: number
+} | undefined
 
 function getErrorMessage(error: unknown, fallback: string): string {
   const e = error as {
@@ -825,6 +830,8 @@ function cancelScheduledLiveValidation() {
     liveValidationTimer = undefined
   }
 
+  pendingLiveValidation = undefined
+
   // Ignore responses from requests initiated before cancellation.
   liveValidationRevision++
 }
@@ -871,6 +878,13 @@ async function runLiveValidation(
   ) {
     return
   }
+
+  if (liveValidationInFlight) {
+    pendingLiveValidation = { stage, revision }
+    return
+  }
+
+  liveValidationInFlight = true
 
   try {
     await $fetch<{ valid: boolean }>(
@@ -926,6 +940,22 @@ async function runLiveValidation(
     }
 
     liveValidationFailures[stage] = message
+  } finally {
+    liveValidationInFlight = false
+
+    const pending = pendingLiveValidation
+    pendingLiveValidation = undefined
+
+    if (
+      pending &&
+      pending.revision === liveValidationRevision &&
+      !props.submitting
+    ) {
+      void runLiveValidation(
+        pending.stage,
+        pending.revision,
+      )
+    }
   }
 }
 

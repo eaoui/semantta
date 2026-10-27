@@ -360,6 +360,78 @@ def test_validation_ontology_projection_falls_back_for_custom_shapes(
 
 
 @pytest.mark.asyncio
+async def test_successful_shacl_validation_is_cached_for_identical_graphs(
+    monkeypatch,
+):
+    shapes = make_property_shape(
+        EX.Book,
+        EX.title,
+        [(SH.minCount, Literal(1))],
+    )
+
+    profile = make_profile(shapes)
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+
+    main._SHACL_VALIDATION_SUCCESS_CACHE.clear()
+    calls = []
+
+    def fake_validate(
+        data_graph,
+        *,
+        shacl_graph,
+        ont_graph,
+        do_owl_imports,
+        inference,
+        abort_on_first,
+        focus_nodes,
+    ):
+        calls.append(1)
+        return True, Graph(), "Conforms"
+
+    monkeypatch.setattr(
+        main.pyshacl,
+        "validate",
+        fake_validate,
+    )
+
+    try:
+        properties = {
+            str(EX.title): ["A valid title"],
+        }
+
+        assert await profile.validate_instance(
+            [str(EX.Book)],
+            properties,
+        ) is True
+
+        # The same input and validation context reuse the successful result.
+        assert await profile.validate_instance(
+            [str(EX.Book)],
+            properties,
+        ) is True
+
+        assert len(calls) == 1
+
+        # A changed data graph must be validated independently.
+        assert await profile.validate_instance(
+            [str(EX.Book)],
+            {
+                str(EX.title): ["A different title"],
+            },
+        ) is True
+
+        assert len(calls) == 2
+
+    finally:
+        main._SHACL_VALIDATION_SUCCESS_CACHE.clear()
+
+
+@pytest.mark.asyncio
 async def test_superclass_constraints_apply_to_subclass_instances(
     monkeypatch,
 ):
