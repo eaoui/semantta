@@ -1957,6 +1957,66 @@ def _build_validation_ontology_for_instance(
 
     return projected
 
+def _build_instance_validation_shapes(
+    source_shapes: Graph,
+    focus_node: URIRef,
+) -> Graph:
+    """Prepare shapes for validation, including universal properties."""
+    validation_shapes = Graph()
+
+    for prefix, namespace in source_shapes.namespaces():
+        validation_shapes.bind(prefix, namespace, replace=True)
+
+    validation_shapes += source_shapes
+
+    property_shapes = set(validation_shapes.subjects(SH.path, None))
+    linked_shapes = set(validation_shapes.objects(None, SH.property))
+
+    target_predicates = (
+        SH.targetClass,
+        SH.targetNode,
+        SH.targetSubjectsOf,
+        SH.targetObjectsOf,
+    )
+
+    universal_property_shapes = [
+        shape
+        for shape in property_shapes
+        if shape not in linked_shapes
+        and not any(
+            validation_shapes.triples((shape, predicate, None))
+            for predicate in target_predicates
+        )
+        and (
+            shape,
+            SH.deactivated,
+            Literal(True),
+        ) not in validation_shapes
+    ]
+
+    if universal_property_shapes:
+        instance_shape = BNode()
+
+        validation_shapes.add((
+            instance_shape,
+            RDF.type,
+            SH.NodeShape,
+        ))
+        validation_shapes.add((
+            instance_shape,
+            SH.targetNode,
+            focus_node,
+        ))
+
+        for property_shape in universal_property_shapes:
+            validation_shapes.add((
+                instance_shape,
+                SH.property,
+                property_shape,
+            ))
+
+    return validation_shapes
+
 _SHACL_SUCCESS_CACHE_TTL_SECONDS = 30.0
 _SHACL_SUCCESS_CACHE_MAX_ENTRIES = 128
 
@@ -4164,24 +4224,15 @@ class SHACLProfile:
         # such as sh:class on an object property, can inspect their RDF types.
         # However, their own class-targeted shapes must be validated when
         # those resources are edited through their own forms.
-        validation_ontology = _build_validation_ontology_for_instance(
-            data_g,
+
+        # Copy the shapes graph and include universal property shapes
+        # for this specific instance.
+        validation_shapes = _build_instance_validation_shapes(
             explicit_shapes,
+            inst_uri,
         )
 
-        # Copy the shapes graph because PySHACL may modify it.
-        validation_shapes = Graph()
-
-        for prefix, namespace in explicit_shapes.namespaces():
-            validation_shapes.bind(
-                prefix,
-                namespace,
-                replace=True,
-            )
-
-        validation_shapes += explicit_shapes
-
-        # Use the exact ontology graph that will be passed to PySHACL.
+        # Build the ontology projection from the final validation shapes.
         validation_ontology = _build_validation_ontology_for_instance(
             data_g,
             validation_shapes,
