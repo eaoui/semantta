@@ -360,74 +360,47 @@ async function fetchConstraints() {
           : 'default'
     }
 
+    const effectiveValues = res.effective || {}
+
     for (const pred in relevantConstraints.value) {
       const config = relevantConstraints.value[pred]
-      if (config.type === 'boolean') {
-        formData[pred] = false
-      } else if (config.type === 'integer' || config.type === 'number') {
-        formData[pred] = null
-      } else if (['class', 'property', 'datatype'].includes(config.type)) {
-        formData[pred] = []
-      } else {
-        formData[pred] = ''
-      }
-    }
 
-    for (const pred in original.value) {
-      const config = constraintConfig[pred]
-      if (!config) continue
-      let vals = original.value[pred] ?? []
-      if (['class', 'property', 'datatype'].includes(config.type) && !Array.isArray(vals)) {
-        vals = [vals]
-      }
-      if (config.type === 'boolean') {
-        formData[pred] = vals.includes('true')
-      } else if (['class', 'property', 'datatype'].includes(config.type)) {
-        formData[pred] = vals
-      } else {
-        formData[pred] = vals[0] || ''
-      }
-    }
+      const raw = Object.prototype.hasOwnProperty.call(
+        effectiveValues,
+        pred,
+      )
+        ? effectiveValues[pred]
+        : getDefaultValue(pred)
 
-    for (const pred in overrides.value) {
-      if (fieldModes[pred] !== 'override') continue
-      const config = constraintConfig[pred]
-      if (!config) continue
       if (config.type === 'boolean') {
-        formData[pred] = overrides.value[pred] === 'true'
-      } else if (['class', 'property', 'datatype'].includes(config.type)) {
-        const raw = overrides.value[pred]
-        formData[pred] = Array.isArray(raw) ? raw : (raw ? [raw.trim()] : [])
-      } else if (config.type === 'integer' || config.type === 'number') {
-        formData[pred] = Number(overrides.value[pred])
-      } else {
-        formData[pred] = overrides.value[pred]
-      }
-    }
+        formData[pred] = raw === true || raw === 'true'
 
-    // An explicitly empty override has state but may have no SHACL value.
-    for (const pred in relevantConstraints.value) {
-      if (
-        fieldModes[pred] !== 'override' ||
-        Object.prototype.hasOwnProperty.call(overrides.value, pred)
+      } else if (
+        ['class', 'property', 'datatype'].includes(config.type)
       ) {
-        continue
-      }
+        const values = Array.isArray(raw)
+          ? raw
+          : raw == null || raw === ''
+            ? []
+            : [raw]
 
-      const config = constraintConfig[pred]
-      if (!config) continue
+        formData[pred] = values.map(String)
 
-      if (['class', 'property', 'datatype'].includes(config.type)) {
-        formData[pred] = []
-      } else if (config.type === 'boolean') {
-        formData[pred] = false
       } else if (
         config.type === 'integer' ||
         config.type === 'number'
       ) {
-        formData[pred] = null
+        const scalar = Array.isArray(raw) ? raw[0] : raw
+
+        formData[pred] =
+          scalar == null || scalar === ''
+            ? null
+            : Number(scalar)
+
       } else {
-        formData[pred] = ''
+        const scalar = Array.isArray(raw) ? raw[0] : raw
+
+        formData[pred] = scalar == null ? '' : String(scalar)
       }
     }
 

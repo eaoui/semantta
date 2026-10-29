@@ -2917,6 +2917,129 @@ def _resolve_profile_field_modes(
 
     return result
 
+_PROFILE_MULTI_VALUE_FIELDS = {
+    str(SH["property"]),
+    "urn:domainClasses",
+    str(SH["class"]),
+    str(SH.datatype),
+    str(SH["in"]),
+    str(SH.languageIn),
+}
+
+_PROFILE_NUMERIC_FIELDS = {
+    str(SH.minCount),
+    str(SH.maxCount),
+    str(SH.minLength),
+    str(SH.maxLength),
+    str(SH.minInclusive),
+    str(SH.maxInclusive),
+}
+
+
+def _effective_profile_field_values(value: object) -> list:
+    """Return a field value as a list without discarding any values."""
+    if value is None or value == "":
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+
+    return [value]
+
+
+def _empty_effective_profile_field_value(field_uri: str):
+    """Return the empty effective value appropriate for a profile field."""
+    if field_uri in _PROFILE_MULTI_VALUE_FIELDS:
+        return []
+
+    if field_uri in _PROFILE_NUMERIC_FIELDS:
+        return None
+
+    return ""
+
+
+def _normalize_effective_profile_field_value(
+    field_uri: str,
+    value: object,
+):
+    """Normalize a selected source value for application-layer consumers."""
+    if field_uri in _PROFILE_MULTI_VALUE_FIELDS:
+        return [
+            str(item)
+            for item in _effective_profile_field_values(value)
+        ]
+
+    if value is None or value == "":
+        return _empty_effective_profile_field_value(field_uri)
+
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+
+        if not values:
+            return _empty_effective_profile_field_value(field_uri)
+
+        if len(values) == 1:
+            return values[0]
+
+        # Preserve invalid or ambiguous multiple values for later
+        # validation; do not silently select the first one.
+        return values
+
+    return value
+
+def _resolve_effective_profile_constraints(
+    entity_type: str,
+    original: dict,
+    overrides: dict,
+    field_modes: dict[str, str],
+) -> dict:
+    """
+    Resolve effective profile fields from ontology defaults and overrides.
+
+    Non-editable profile constraints are preserved from the stored profile.
+    Editable fields use their selected source exclusively.
+    """
+    editable_fields = PROFILE_EDITABLE_FIELDS_BY_TYPE.get(
+        entity_type,
+        set(),
+    )
+
+    # Retain profile constraints that are not governed by this field-mode
+    # model. The editable fields below are resolved explicitly.
+    effective = dict(overrides)
+
+    for field_uri in editable_fields:
+        mode = field_modes.get(
+            field_uri,
+            PROFILE_FIELD_MODE_DEFAULT,
+        )
+
+        if mode == PROFILE_FIELD_MODE_DEFAULT:
+            source = original
+        elif mode == PROFILE_FIELD_MODE_OVERRIDE:
+            source = overrides
+        else:
+            raise HTTPException(
+                500,
+                f"Invalid field mode for {field_uri}: {mode}.",
+            )
+
+        if field_uri in source:
+            effective[field_uri] = (
+                _normalize_effective_profile_field_value(
+                    field_uri,
+                    source[field_uri],
+                )
+            )
+        else:
+            # This is significant for explicitly empty overrides. An empty
+            # override must not fall back to the ontology default.
+            effective[field_uri] = (
+                _empty_effective_profile_field_value(field_uri)
+            )
+
+    return effective
+
 def _profile_field_state_uri(
     entity_uri: str,
     field_uri: str,
@@ -3561,8 +3684,25 @@ class ApplicationProfile:
             for r in linked + orphan
         ]
 
-    async def _get_property_constraints(self, prop_uri: str) -> dict:
+    async def _get_property_constraints(
+        self,
+        prop_uri: str,
+        effective_profile: dict | None = None,
+    ) -> dict:
         pshape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
+        if effective_profile is None:
+            profile_data = await get_entity_constraints(prop_uri)
+            effective_profile = profile_data.get("effective")
+
+        if not isinstance(effective_profile, dict):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Effective profile constraints could not be resolved "
+                    f"for property {prop_uri}."
+                ),
+            )
+
         rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT ?pred ?val WHERE {{
@@ -3598,6 +3738,77 @@ class ApplicationProfile:
                 constraints["nodeKind"] = v
             elif p == str(SH.hasValue):
                 constraints["hasValue"] = v
+
+        effective_field_map = {
+            str(SH["class"]): "class",
+            str(SH.datatype): "datatype",
+            str(SH.minCount): "minCount",
+            str(SH.maxCount): "maxCount",
+            str(SH.minLength): "minLength",
+            str(SH.maxLength): "maxLength",
+            str(SH.pattern): "pattern",
+            str(SH.flags): "flags",
+            str(SH.languageIn): "languageIn",
+            str(SH["in"]): "in",
+            str(SH.hasValue): "hasValue",
+            str(SH.nodeKind): "nodeKind",
+            str(SH.minInclusive): "minInclusive",
+            str(SH.maxInclusive): "maxInclusive",
+        }
+
+        for predicate, field_name in effective_field_map.items():
+            if predicate not in effective_profile:
+                continue
+
+            value = effective_profile[predicate]
+
+            if value is None or value == "" or value == []:
+                constraints.pop(field_name, None)
+                continue
+
+            if field_name in {
+                "minCount",
+                "maxCount",
+                "minLength",
+                "maxLength",
+            }:
+                try:
+                    if isinstance(value, list):
+                        value = [int(item) for item in value]
+                    else:
+                        value = int(value)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"Invalid integer SHACL constraint "
+                            f"{field_name} for property {prop_uri}: "
+                            f"{value!r}"
+                        ),
+                    )
+
+            if field_name in {"class", "datatype"}:
+                values = _effective_profile_field_values(value)
+
+                if values:
+                    # Preserve every effective value. The consumer must
+                    # not silently collapse multiple range classes or
+                    # datatypes to the first one.
+                    constraints[field_name] = values
+                else:
+                    constraints.pop(field_name, None)
+
+            elif isinstance(value, list):
+                if len(value) == 1:
+                    constraints[field_name] = value[0]
+                elif value:
+                    constraints[field_name] = value
+                else:
+                    constraints.pop(field_name, None)
+
+            else:
+                constraints[field_name] = value
+
         return constraints
 
     async def get_properties_for_class(self, class_uri: str) -> List[dict]:
@@ -3608,35 +3819,117 @@ class ApplicationProfile:
         )
         for ref in prop_refs:
             prop_uri = ref["uri"]
-            ptype = _get_property_type(
-                prop_uri,
-                active_datatypes,
-            )
-            ranges = get_property_ranges(prop_uri)
-            datatype = ranges[0] if ptype == "datatype" and ranges else "http://www.w3.org/2001/XMLSchema#string"
-            suggestions = await get_instance_suggestions(ranges) if ptype == "object" else []
-            card = get_property_cardinality(class_uri, prop_uri)
-            shacl_constraints = await self._get_property_constraints(prop_uri)
-
-            property_entity_type = await self.get_entity_type(prop_uri)
+            profile_data = await get_entity_constraints(prop_uri)
+            effective_profile = profile_data["effective"]
+            entity_type = profile_data["type"]
 
             _validate_profile_range_constraint_compatibility(
-                property_entity_type,
-                shacl_constraints,
+                entity_type,
+                effective_profile,
                 entity_uri=prop_uri,
                 status_code=409,
             )
 
-            if "class" in shacl_constraints:
+            shacl_constraints = await self._get_property_constraints(
+                prop_uri,
+                effective_profile=effective_profile,
+            )
+
+            # Ontology-native property type remains authoritative.
+            # SHACL range constraints may change the effective range,
+            # but must not silently change how RDF values are represented.
+            if entity_type == "object_property":
                 ptype = "object"
-                ranges = [shacl_constraints["class"]]
-                suggestions = await get_instance_suggestions(ranges)
-            if "datatype" in shacl_constraints:
+                ranges = _effective_profile_field_values(
+                    effective_profile.get(str(SH["class"]), [])
+                )
+                datatype = (
+                    "http://www.w3.org/2001/XMLSchema#string"
+                )
+                suggestions = (
+                    await get_instance_suggestions(ranges)
+                    if ranges
+                    else []
+                )
+
+            elif entity_type == "datatype_property":
                 ptype = "datatype"
+                ranges = _effective_profile_field_values(
+                    effective_profile.get(str(SH.datatype), [])
+                )
+
+                if len(ranges) > 1:
+                    raise HTTPException(
+                        409,
+                        f"Property {prop_uri} has multiple effective "
+                        "datatype ranges, which cannot be represented by "
+                        "the current metadata form.",
+                    )
+
+                datatype = (
+                    str(ranges[0])
+                    if ranges
+                    else "http://www.w3.org/2001/XMLSchema#string"
+                )
                 suggestions = []
-                datatype = shacl_constraints["datatype"]
+
+            else:
+                # Annotation properties may accept either kind of value.
+                class_ranges = _effective_profile_field_values(
+                    effective_profile.get(str(SH["class"]), [])
+                )
+                datatype_ranges = _effective_profile_field_values(
+                    effective_profile.get(str(SH.datatype), [])
+                )
+
+                if class_ranges and datatype_ranges:
+                    raise HTTPException(
+                        409,
+                        f"Annotation property {prop_uri} has both class "
+                        "and datatype range constraints. The current form "
+                        "cannot represent both value kinds simultaneously.",
+                    )
+
+                if class_ranges:
+                    ptype = "object"
+                    ranges = class_ranges
+                    datatype = (
+                        "http://www.w3.org/2001/XMLSchema#string"
+                    )
+                    suggestions = await get_instance_suggestions(ranges)
+
+                elif datatype_ranges:
+                    if len(datatype_ranges) > 1:
+                        raise HTTPException(
+                            409,
+                            f"Annotation property {prop_uri} has multiple "
+                            "effective datatype ranges.",
+                        )
+
+                    ptype = "datatype"
+                    ranges = []
+                    datatype = str(datatype_ranges[0])
+                    suggestions = []
+
+                else:
+                    ptype = _get_property_type(
+                        prop_uri,
+                        active_datatypes,
+                    )
+                    ranges = []
+                    datatype = (
+                        "http://www.w3.org/2001/XMLSchema#string"
+                    )
+                    suggestions = []
+
+            card = get_property_cardinality(class_uri, prop_uri)
+
+            # Class-specific ontology cardinalities remain a contextual
+            # fallback for this phase. The later cardinality phase will
+            # separate them fully from shared property shapes.
             if "minCount" in shacl_constraints:
                 card["minCardinality"] = shacl_constraints["minCount"]
+
             if "maxCount" in shacl_constraints:
                 card["maxCardinality"] = shacl_constraints["maxCount"]
 
@@ -3757,22 +4050,106 @@ class ApplicationProfile:
         return role_map
 
     async def _get_shacl_domains(self) -> Dict[str, List[str]]:
-        if hasattr(self, '_cached_domains') and self._cached_domains is not None:
+        if (
+            hasattr(self, "_cached_domains")
+            and self._cached_domains is not None
+        ):
             return self._cached_domains
+
         rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT ?propUri ?class WHERE {{
+            SELECT DISTINCT ?propUri ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?classShape sh:targetClass ?class ; sh:property ?propShape .
                     ?propShape sh:path ?propUri .
+                    OPTIONAL {{
+                        ?classShape
+                            sh:targetClass ?class ;
+                            sh:property ?propShape .
+                    }}
                 }}
             }}
         """)
-        mapping = defaultdict(list)
-        for r in rows:
-            mapping[r["propUri"]].append(r["class"])
-        self._cached_domains = dict(mapping)
-        return self._cached_domains
+
+        stored_modes_rows = await self.store.query(f"""
+            SELECT ?entity ?mode WHERE {{
+                GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                    ?record
+                        <{PROFILE_FIELD_STATE_VOCAB.entity}> ?entity ;
+                        <{PROFILE_FIELD_STATE_VOCAB.field}>
+                            <urn:domainClasses> ;
+                        <{PROFILE_FIELD_STATE_VOCAB.mode}> ?mode .
+                }}
+            }}
+        """)
+
+        linked_domains: Dict[str, set[str]] = defaultdict(set)
+        property_uris = set(_property_domains)
+
+        for row in rows:
+            prop_uri = row["propUri"]
+            property_uris.add(prop_uri)
+
+            class_uri = row.get("class")
+            if class_uri:
+                linked_domains[prop_uri].add(class_uri)
+
+        stored_modes: Dict[str, str] = {}
+
+        for row in stored_modes_rows:
+            prop_uri = row["entity"]
+            mode = row["mode"]
+
+            previous = stored_modes.get(prop_uri)
+            if previous is not None and previous != mode:
+                raise HTTPException(
+                    500,
+                    "Conflicting stored domain field modes for "
+                    f"property {prop_uri}.",
+                )
+
+            stored_modes[prop_uri] = mode
+
+        mapping: Dict[str, List[str]] = {}
+
+        for prop_uri in sorted(property_uris):
+            ontology_domains = list(get_property_domains(prop_uri))
+
+            original = {
+                "urn:domainClasses": ontology_domains,
+            }
+
+            overrides = {}
+
+            if linked_domains.get(prop_uri):
+                overrides["urn:domainClasses"] = sorted(
+                    linked_domains[prop_uri]
+                )
+
+            modes = {}
+
+            if prop_uri in stored_modes:
+                modes["urn:domainClasses"] = stored_modes[prop_uri]
+
+            field_modes = _resolve_profile_field_modes(
+                "object_property",
+                original,
+                overrides,
+                modes,
+            )
+
+            effective = _resolve_effective_profile_constraints(
+                "object_property",
+                original,
+                overrides,
+                field_modes,
+            )
+
+            mapping[prop_uri] = _effective_profile_field_values(
+                effective.get("urn:domainClasses", [])
+            )
+
+        self._cached_domains = mapping
+        return mapping
 
 # ---------------------------------------------------------------------------
 #  SHACL Profile Manager
@@ -3897,17 +4274,19 @@ class SHACLProfile:
 
         return self._shapes_cache
 
-    def _property_datatype_from_shapes(
+    async def _property_datatype_from_shapes(
         self,
         shapes_graph: Graph,
         prop_uri: str,
     ) -> Optional[str]:
         """Resolve a property's datatype from SHACL, then ontology ranges."""
+        property_uri = URIRef(prop_uri)
+
         datatype_uris = {
             str(datatype)
             for property_shape in shapes_graph.subjects(
                 SH.path,
-                URIRef(prop_uri),
+                property_uri,
             )
             for datatype in shapes_graph.objects(
                 property_shape,
@@ -3915,58 +4294,34 @@ class SHACLProfile:
             )
         }
 
-        class_uris = {
-            str(class_uri)
-            for property_shape in shapes_graph.subjects(
-                SH.path,
-                URIRef(prop_uri),
-            )
-            for class_uri in shapes_graph.objects(
-                property_shape,
-                SH["class"],
-            )
-        }
-
-        property_uri = URIRef(prop_uri)
-        ontology_graph = state["combined_onto_graph"]
-
-        explicitly_object = (
-            property_uri,
-            RDF.type,
-            OWL.ObjectProperty,
-        ) in ontology_graph
-
-        explicitly_datatype = (
-            property_uri,
-            RDF.type,
-            OWL.DatatypeProperty,
-        ) in ontology_graph
-
-        if explicitly_object and datatype_uris:
-            raise HTTPException(
-                409,
-                f"Object property {prop_uri} has an incompatible "
-                f"sh:datatype constraint.",
-            )
-
-        if explicitly_datatype and class_uris:
-            raise HTTPException(
-                409,
-                f"Datatype property {prop_uri} has an incompatible "
-                f"sh:class constraint.",
-            )
-
         if len(datatype_uris) > 1:
             raise HTTPException(
-                500,
+                400,
                 f"Conflicting SHACL datatype constraints for {prop_uri}.",
             )
 
+        # An explicit SHACL datatype determines literal construction.
         if datatype_uris:
             return next(iter(datatype_uris))
 
-        # Preserve the ontology's declared range when the profile has
-        # not explicitly set a datatype constraint.
+        # An explicit SHACL class constraint indicates resource-valued objects.
+        has_class_constraint = any(
+            True
+            for property_shape in shapes_graph.subjects(
+                SH.path,
+                property_uri,
+            )
+            for _ in shapes_graph.objects(
+                property_shape,
+                SH["class"],
+            )
+        )
+
+        if has_class_constraint:
+            return None
+
+        # Fall back to ontology information only when SHACL has not
+        # specified a datatype or class constraint.
         if _get_property_type(prop_uri) == "datatype":
             ranges = get_property_ranges(prop_uri)
             if ranges:
@@ -3979,8 +4334,45 @@ class SHACLProfile:
         prop_uri: str,
     ) -> Optional[str]:
         """Return the effective datatype for a metadata property."""
+        try:
+            profile_data = await get_entity_constraints(prop_uri)
+        except HTTPException as exc:
+            # Properties absent from the Application Profile may still
+            # have SHACL or ontology datatype information.
+            if exc.status_code != 404:
+                raise
+        else:
+            effective_profile = profile_data.get("effective")
+
+            if isinstance(effective_profile, dict):
+                datatype_values = _effective_profile_field_values(
+                    effective_profile.get(str(SH.datatype), [])
+                )
+
+                if len(datatype_values) > 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Property {prop_uri} has multiple effective "
+                            "datatype ranges, which cannot be represented "
+                            "by the current metadata form."
+                        ),
+                    )
+
+                if datatype_values:
+                    return str(datatype_values[0])
+
+                field_modes = profile_data.get("field_modes", {})
+                if (
+                    isinstance(field_modes, dict)
+                    and field_modes.get(str(SH.datatype)) == "override"
+                ):
+                    # An explicit empty override suppresses the
+                    # ontology default datatype.
+                    return None
+
         shapes_graph = await self._get_shapes_graph()
-        return self._property_datatype_from_shapes(
+        return await self._property_datatype_from_shapes(
             shapes_graph,
             prop_uri,
         )
@@ -4555,7 +4947,7 @@ class SHACLProfile:
             if not isinstance(vals, list):
                 vals = [vals]
 
-            datatype_uri = self._property_datatype_from_shapes(
+            datatype_uri = await self._property_datatype_from_shapes(
                 explicit_shapes,
                 pred,
             )
@@ -4596,7 +4988,7 @@ class SHACLProfile:
             if not isinstance(vals, list):
                 vals = [vals]
 
-            datatype_uri = self._property_datatype_from_shapes(
+            datatype_uri = await self._property_datatype_from_shapes(
                 explicit_shapes,
                 pred,
             )
@@ -7690,12 +8082,34 @@ async def get_entity_constraints(entity_uri: str):
         orig_domains = get_property_domains(entity_uri)
         original["urn:domainClasses"] = orig_domains if orig_domains else []
 
+        ranges = original.get(str(RDFS.range), [])
+
         if etype == "object_property":
-            ranges = original.get(str(RDFS.range), [])
-            if ranges: original[str(SH["class"])] = [ranges[0]]
-        elif etype in ("datatype_property", "annotation_property"):
-            ranges = original.get(str(RDFS.range), [])
-            if ranges: original[str(SH.datatype)] = [ranges[0]]
+            original[str(SH["class"])] = list(ranges)
+
+        elif etype == "datatype_property":
+            original[str(SH.datatype)] = list(ranges)
+
+        elif etype == "annotation_property":
+            active_datatypes = set(
+                await shacl.get_active_datatypes()
+            )
+
+            class_ranges = []
+            datatype_ranges = []
+
+            for range_uri in ranges:
+                if _is_datatype_uri(
+                    range_uri,
+                    state["combined_onto_graph"],
+                    active_datatypes,
+                ):
+                    datatype_ranges.append(range_uri)
+                else:
+                    class_ranges.append(range_uri)
+
+            original[str(SH["class"])] = class_ranges
+            original[str(SH.datatype)] = datatype_ranges
 
     elif etype == "class":
         class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
@@ -7754,12 +8168,27 @@ async def get_entity_constraints(entity_uri: str):
         stored_modes,
     )
 
+    effective = _resolve_effective_profile_constraints(
+        etype,
+        original,
+        overrides,
+        field_modes,
+    )
+
+    _validate_profile_range_constraint_compatibility(
+        etype,
+        effective,
+        entity_uri=entity_uri,
+        status_code=409,
+    )
+
     return {
         "uri": entity_uri,
         "type": etype,
         "original": original,
         "overrides": overrides,
         "field_modes": field_modes,
+        "effective": effective,
     }
 
 
