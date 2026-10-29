@@ -29,8 +29,9 @@
         <!-- Left column -->
         <div class="flex-1 space-y-4">
           <div v-for="(config, pred) in leftConstraints" :key="pred"
-            class="p-3 rounded border bg-white dark:bg-gray-800"
-            :class="isDefault(pred) ? 'border-gray-300 dark:border-gray-600' : 'border-blue-500 dark:border-blue-400'">
+            class="p-3 rounded border bg-white dark:bg-gray-800" :class="isFieldHighlighted(pred)
+              ? 'border-blue-500 dark:border-blue-400'
+              : 'border-gray-300 dark:border-gray-600'">
             <div class="flex items-center gap-2 mb-1">
               <label class="font-medium text-gray-900 dark:text-gray-100">{{ config.label }}</label>
               <button v-if="!isDefault(pred)" type="button" @click="restoreDefault(pred)"
@@ -77,8 +78,9 @@
         <!-- Right column (numeric fields) -->
         <div v-if="hasRightColumn" class="w-64 shrink-0 space-y-4">
           <div v-for="(config, pred) in rightConstraints" :key="pred"
-            class="p-3 rounded border bg-white dark:bg-gray-800"
-            :class="isDefault(pred) ? 'border-gray-300 dark:border-gray-600' : 'border-blue-500 dark:border-blue-400'">
+            class="p-3 rounded border bg-white dark:bg-gray-800" :class="isFieldHighlighted(pred)
+              ? 'border-blue-500 dark:border-blue-400'
+              : 'border-gray-300 dark:border-gray-600'">
             <div class="flex items-center gap-2 mb-1">
               <label class="font-medium text-gray-900 dark:text-gray-100">{{ config.label }}</label>
               <button v-if="!isDefault(pred)" type="button" @click="restoreDefault(pred)"
@@ -97,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from '@/composables/useDisplay'
 import { useAppStore } from '@/stores/app'
@@ -212,21 +214,29 @@ function valuesAreEqual(a: any, b: any, type: string): boolean {
 const isDefault = (pred: string) =>
   (fieldModes[pred] ?? 'default') === 'default'
 
-const hasChanges = computed(() => {
-  for (const pred in relevantConstraints.value) {
-    const config = constraintConfig[pred]
-    if (!config) continue
+function hasFieldChanges(pred: string): boolean {
+  const config = relevantConstraints.value[pred]
+  if (!config) return false
 
-    const current = formData[pred]
-    const baseline = savedFormData.value[pred]
-    const currentMode = fieldModes[pred] ?? 'default'
-    const savedMode = savedFieldModes.value[pred] ?? 'default'
+  const currentMode = fieldModes[pred] ?? 'default'
+  const savedMode = savedFieldModes.value[pred] ?? 'default'
 
-    if (currentMode !== savedMode) return true
-    if (!valuesAreEqual(current, baseline, config.type)) return true
-  }
-  return false
-})
+  if (currentMode !== savedMode) return true
+
+  return !valuesAreEqual(
+    formData[pred],
+    savedFormData.value[pred],
+    config.type,
+  )
+}
+
+function isFieldHighlighted(pred: string): boolean {
+  return hasFieldChanges(pred) || !isDefault(pred)
+}
+
+const hasChanges = computed(() =>
+  Object.keys(relevantConstraints.value).some(hasFieldChanges),
+)
 
 function snapshotFormData() {
   const snap: Record<string, any> = {}
@@ -278,14 +288,47 @@ async function restoreDefault(pred: string) {
   }
 }
 
+function syncFieldModeWithValue(pred: string) {
+  const config = constraintConfig[pred]
+  if (!config) return
+
+  fieldModes[pred] = valuesAreEqual(
+    formData[pred],
+    getDefaultValue(pred),
+    config.type,
+  )
+    ? 'default'
+    : 'override'
+}
+
+function syncAllFieldModesWithValues() {
+  for (const pred in relevantConstraints.value) {
+    syncFieldModeWithValue(pred)
+  }
+}
+
 function setFieldValue(pred: string, value: any) {
   formData[pred] = value
-  fieldModes[pred] = 'override'
+  syncFieldModeWithValue(pred)
 }
 
 function markOverride(pred: string) {
-  fieldModes[pred] = 'override'
+  // The changed value might actually equal the current default.
+  syncFieldModeWithValue(pred)
 }
+
+watch(
+  formData,
+  () => {
+    if (loading.value) return
+
+    syncAllFieldModesWithValues()
+  },
+  {
+    deep: true,
+    flush: 'sync',
+  },
+)
 
 onMounted(() => {
   const rawUri = route.query.uri
@@ -387,6 +430,10 @@ async function fetchConstraints() {
         formData[pred] = ''
       }
     }
+
+    // Normalize modes after all ontology defaults and stored overrides
+    // have been applied. Values equal to their current defaults are default.
+    syncAllFieldModesWithValues()
 
     snapshotFormData()
   } catch (e: any) {
