@@ -16,6 +16,7 @@ from config import FUSEKI_CONFIG, FusekiConfig
 from utils import shape_uri_for_entity
 
 SHAPES_GRAPH = "urn:profile:shapes"
+PROFILE_FIELD_STATE_GRAPH = "urn:profile:field-state"
 METADATA_GRAPH_PREFIX = "urn:semantta:metadata:"
 
 

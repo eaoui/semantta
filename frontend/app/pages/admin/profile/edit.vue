@@ -43,24 +43,24 @@
             <!-- Datatype picker -->
             <template v-if="config.type === 'datatype'">
               <EntitySelector entityType="datatype" :modelValue="formData[pred] || []"
-                @update:modelValue="(val: string[]) => formData[pred] = val" placeholder="Search datatypes…" />
+                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search datatypes…" />
             </template>
 
             <!-- Class list -->
             <template v-else-if="config.type === 'class'">
               <EntitySelector entityType="class" :modelValue="formData[pred] || []"
-                @update:modelValue="(val: string[]) => formData[pred] = val" placeholder="Search classes…" />
+                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search classes…" />
             </template>
 
             <!-- Property list -->
             <template v-else-if="config.type === 'property'">
               <EntitySelector entityType="property" :modelValue="formData[pred] || []"
-                @update:modelValue="(val: string[]) => formData[pred] = val" placeholder="Search properties…" />
+                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search properties…" />
             </template>
 
             <!-- Dropdown -->
             <template v-else-if="config.type === 'dropdown'">
-              <select v-model="formData[pred]"
+              <select v-model="formData[pred]" @change="markOverride(pred)" @input="markOverride(pred)"
                 class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                 <option v-for="opt in config.options" :key="opt" :value="opt">{{ opt }}</option>
               </select>
@@ -68,7 +68,7 @@
 
             <!-- Default text input -->
             <template v-else>
-              <input v-model="formData[pred]" type="text"
+              <input v-model="formData[pred]" type="text" @input="markOverride(pred)"
                 class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
             </template>
           </div>
@@ -87,7 +87,7 @@
                 <PhosphorIcon name="arrow-counter-clockwise" size="14" />
               </button>
             </div>
-            <input v-model.number="formData[pred]" type="number" min="0" step="1"
+            <input v-model.number="formData[pred]" type="number" min="0" step="1" @input="markOverride(pred)"
               class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
           </div>
         </div>
@@ -131,6 +131,11 @@ const error = ref('')
 
 const formData = reactive<Record<string, any>>({})
 const savedFormData = ref<Record<string, any>>({})
+
+type ProfileFieldMode = 'default' | 'override'
+
+const fieldModes = reactive<Record<string, ProfileFieldMode>>({})
+const savedFieldModes = ref<Record<string, ProfileFieldMode>>({})
 
 const relevantConstraints = computed(() => {
   const result: Record<string, any> = {}
@@ -204,18 +209,20 @@ function valuesAreEqual(a: any, b: any, type: string): boolean {
   return a === b
 }
 
-const isDefault = (pred: string) => {
-  const config = constraintConfig[pred]
-  if (!config) return true
-  return valuesAreEqual(formData[pred], getDefaultValue(pred), config.type)
-}
+const isDefault = (pred: string) =>
+  (fieldModes[pred] ?? 'default') === 'default'
 
 const hasChanges = computed(() => {
   for (const pred in relevantConstraints.value) {
     const config = constraintConfig[pred]
     if (!config) continue
+
     const current = formData[pred]
     const baseline = savedFormData.value[pred]
+    const currentMode = fieldModes[pred] ?? 'default'
+    const savedMode = savedFieldModes.value[pred] ?? 'default'
+
+    if (currentMode !== savedMode) return true
     if (!valuesAreEqual(current, baseline, config.type)) return true
   }
   return false
@@ -223,16 +230,61 @@ const hasChanges = computed(() => {
 
 function snapshotFormData() {
   const snap: Record<string, any> = {}
+
   for (const pred in relevantConstraints.value) {
     const val = formData[pred]
     snap[pred] = Array.isArray(val) ? [...val] : val
   }
+
   savedFormData.value = snap
+
+  const modeSnapshot: Record<string, ProfileFieldMode> = {}
+
+  for (const pred in relevantConstraints.value) {
+    modeSnapshot[pred] = fieldModes[pred] ?? 'default'
+  }
+
+  savedFieldModes.value = modeSnapshot
 }
 
-function restoreDefault(pred: string) {
-  const defaultValue = getDefaultValue(pred)
-  formData[pred] = Array.isArray(defaultValue) ? [...defaultValue] : defaultValue
+async function restoreDefault(pred: string) {
+  try {
+    const latest = await $fetch<any>(
+      `${apiBase}/api/profile/constraints/${encodeURIComponent(entityUri.value)}`,
+    )
+
+    const latestOriginal = latest.original || {}
+    const nextOriginal = { ...original.value }
+
+    if (Object.prototype.hasOwnProperty.call(latestOriginal, pred)) {
+      nextOriginal[pred] = latestOriginal[pred]
+    } else {
+      delete nextOriginal[pred]
+    }
+
+    original.value = nextOriginal
+
+    const defaultValue = getDefaultValue(pred)
+
+    formData[pred] = Array.isArray(defaultValue)
+      ? [...defaultValue]
+      : defaultValue
+
+    fieldModes[pred] = 'default'
+  } catch (e: any) {
+    toast.error(
+      e?.data?.detail || e.message || 'Failed to restore default values',
+    )
+  }
+}
+
+function setFieldValue(pred: string, value: any) {
+  formData[pred] = value
+  fieldModes[pred] = 'override'
+}
+
+function markOverride(pred: string) {
+  fieldModes[pred] = 'override'
 }
 
 onMounted(() => {
@@ -251,6 +303,19 @@ async function fetchConstraints() {
     entityType.value = res.type
     original.value = res.original || {}
     overrides.value = res.overrides || {}
+
+    for (const pred of Object.keys(fieldModes)) {
+      delete fieldModes[pred]
+    }
+
+    const receivedModes = res.field_modes || {}
+
+    for (const pred in relevantConstraints.value) {
+      fieldModes[pred] =
+        receivedModes[pred] === 'override'
+          ? 'override'
+          : 'default'
+    }
 
     for (const pred in relevantConstraints.value) {
       const config = relevantConstraints.value[pred]
@@ -282,6 +347,7 @@ async function fetchConstraints() {
     }
 
     for (const pred in overrides.value) {
+      if (fieldModes[pred] !== 'override') continue
       const config = constraintConfig[pred]
       if (!config) continue
       if (config.type === 'boolean') {
@@ -296,6 +362,32 @@ async function fetchConstraints() {
       }
     }
 
+    // An explicitly empty override has state but may have no SHACL value.
+    for (const pred in relevantConstraints.value) {
+      if (
+        fieldModes[pred] !== 'override' ||
+        Object.prototype.hasOwnProperty.call(overrides.value, pred)
+      ) {
+        continue
+      }
+
+      const config = constraintConfig[pred]
+      if (!config) continue
+
+      if (['class', 'property', 'datatype'].includes(config.type)) {
+        formData[pred] = []
+      } else if (config.type === 'boolean') {
+        formData[pred] = false
+      } else if (
+        config.type === 'integer' ||
+        config.type === 'number'
+      ) {
+        formData[pred] = null
+      } else {
+        formData[pred] = ''
+      }
+    }
+
     snapshotFormData()
   } catch (e: any) {
     error.value = e.message || 'Failed to load constraints'
@@ -307,20 +399,47 @@ async function fetchConstraints() {
 
 async function save() {
   const payload: Record<string, any> = {}
+  const fieldModesPayload: Record<string, ProfileFieldMode> = {}
 
   for (const pred in relevantConstraints.value) {
+    const mode = fieldModes[pred] ?? 'default'
+    fieldModesPayload[pred] = mode
+
+    const isRelationshipField =
+      pred === 'urn:domainClasses' ||
+      pred === 'http://www.w3.org/ns/shacl#property'
+
+    const value = mode === 'default'
+      ? getDefaultValue(pred)
+      : formData[pred]
+
+    const isEmptyDefault =
+      value == null ||
+      value === '' ||
+      (Array.isArray(value) && value.length === 0)
+
+    // Do not turn an empty default into a stored empty SHACL constraint.
+    // Empty relationship lists must still be submitted to synchronize links.
+    if (
+      mode === 'default' &&
+      !isRelationshipField &&
+      isEmptyDefault
+    ) {
+      continue
+    }
+
     const config = constraintConfig[pred]
     if (!config) continue
 
     if (config.type === 'boolean') {
-      const val = formData[pred]
+      const val = value
       if (val === true || val === 'true') {
         payload[pred] = 'true'
       }
     } else if (
       ['class', 'property', 'datatype'].includes(config.type)
     ) {
-      const raw = formData[pred]
+      const raw = value
       const arr = (
         Array.isArray(raw)
           ? raw
@@ -336,14 +455,9 @@ async function save() {
         // or removes a multi-valued constraint.
         payload[pred] = arr
       } else if (arr.length > 0) {
-        if (
-          pred === 'http://www.w3.org/ns/shacl#class' ||
-          pred === 'http://www.w3.org/ns/shacl#datatype'
-        ) {
-          payload[pred] = arr[0]
-        } else {
-          payload[pred] = arr[0]
-        }
+        payload[pred] = arr[0]
+      } else if (mode === 'override') {
+        payload[pred] = []
       }
     } else if (
       config.type === 'integer' ||
@@ -360,6 +474,8 @@ async function save() {
       }
     }
   }
+
+  payload['__field_modes__'] = fieldModesPayload
 
   try {
     await $fetch(

@@ -63,7 +63,7 @@ from rdflib.namespace import OWL, RDF, RDFS, split_uri
 
 
 from config import FUSEKI_CONFIG, is_loopback_host
-from fuseki_store import FusekiStore, SHAPES_GRAPH
+from fuseki_store import FusekiStore, SHAPES_GRAPH, PROFILE_FIELD_STATE_GRAPH
 from rdf_store import RDFStore
 from streaming_rdf import (
     RelativeIRIWithoutBaseError,
@@ -123,6 +123,52 @@ INDEX_CACHE_VERSION = 1
 REASONED_CACHE_VERSION = 1
 
 SH = Namespace("http://www.w3.org/ns/shacl#")
+PROFILE_FIELD_STATE_VOCAB = Namespace(
+    "urn:semantta:profile-field-state#"
+)
+
+PROFILE_FIELD_MODES_KEY = "__field_modes__"
+
+PROFILE_FIELD_MODE_DEFAULT = "default"
+PROFILE_FIELD_MODE_OVERRIDE = "override"
+# Keep this mapping aligned with constraintConfig.ts.
+# Only fields that the SHACL profile editor actually exposes belong here.
+
+PROFILE_EDITABLE_FIELDS_BY_TYPE: dict[str, set[str]] = {
+    "class": {
+        str(SH.property),
+    },
+    "object_property": {
+        "urn:domainClasses",
+        str(SH["class"]),
+        str(SH.minCount),
+        str(SH.maxCount),
+        str(SH.nodeKind),
+        str(SH["in"]),
+        str(SH.hasValue),
+    },
+    "datatype_property": {
+        "urn:domainClasses",
+        str(SH.datatype),
+        str(SH.minCount),
+        str(SH.maxCount),
+        str(SH.minLength),
+        str(SH.maxLength),
+        str(SH.pattern),
+        str(SH.flags),
+        str(SH.nodeKind),
+        str(SH.languageIn),
+        str(SH.minInclusive),
+        str(SH.maxInclusive),
+    },
+    "annotation_property": {
+        "urn:domainClasses",
+        str(SH["class"]),
+        str(SH.datatype),
+        str(SH.minCount),
+        str(SH.maxCount),
+    },
+}
 GENERIC_RANGES = {str(OWL.Thing), str(RDFS.Resource)}
 XSD_INTEGER = "http://www.w3.org/2001/XMLSchema#integer"
 XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
@@ -2796,6 +2842,342 @@ def get_original_constraints(entity_uri: str, entity_type: str, g: Graph) -> dic
                             constraints[str(card)].append(f"{pstr} {val}")
     return dict(constraints)
 
+def _normalize_profile_field_value(value: object) -> list[str]:
+    """Normalize profile values for comparing defaults and stored values."""
+    if value is None:
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        return sorted(
+            str(item)
+            for item in value
+            if item is not None
+        )
+
+    return [str(value)]
+
+def _infer_legacy_profile_field_mode(
+    field_uri: str,
+    original: dict,
+    overrides: dict,
+) -> str:
+    """
+    Infer a field's mode when no explicit mode has been stored yet.
+
+    A legacy stored value equal to its current default is treated as
+    default mode. A differing value is treated as an override.
+    """
+    if field_uri not in overrides:
+        return PROFILE_FIELD_MODE_DEFAULT
+
+    if field_uri in original:
+        if (
+            _normalize_profile_field_value(original[field_uri])
+            == _normalize_profile_field_value(overrides[field_uri])
+        ):
+            return PROFILE_FIELD_MODE_DEFAULT
+
+    return PROFILE_FIELD_MODE_OVERRIDE
+
+def _resolve_profile_field_modes(
+    entity_type: str,
+    original: dict,
+    overrides: dict,
+    stored_modes: dict[str, str],
+) -> dict[str, str]:
+    """Resolve explicit modes first, falling back to legacy inference."""
+    editable_fields = PROFILE_EDITABLE_FIELDS_BY_TYPE.get(
+        entity_type,
+        set(),
+    )
+
+    result: dict[str, str] = {}
+
+    for field_uri in sorted(editable_fields):
+        stored_mode = stored_modes.get(field_uri)
+
+        if stored_mode is not None:
+            if stored_mode not in {
+                PROFILE_FIELD_MODE_DEFAULT,
+                PROFILE_FIELD_MODE_OVERRIDE,
+            }:
+                raise HTTPException(
+                    500,
+                    f"Invalid stored profile field mode for {field_uri}.",
+                )
+
+            result[field_uri] = stored_mode
+            continue
+
+        result[field_uri] = _infer_legacy_profile_field_mode(
+            field_uri,
+            original,
+            overrides,
+        )
+
+    return result
+
+def _profile_field_state_uri(
+    entity_uri: str,
+    field_uri: str,
+) -> URIRef:
+    """Return a stable state-record URI for an entity field."""
+    digest = hashlib.sha256(
+        f"{entity_uri}\0{field_uri}".encode("utf-8")
+    ).hexdigest()
+
+    return URIRef(
+        f"urn:semantta:profile-field-state:{digest}"
+    )
+
+async def _load_stored_profile_field_modes(
+    entity_uri: str,
+    profile_store=None,
+) -> dict[str, str]:
+    """Load persisted field modes from the dedicated state graph."""
+    target_store = profile_store or store
+    entity_ref = _sparql_iri(entity_uri, "profile entity URI")
+
+    rows = await target_store.query(f"""
+        SELECT ?field ?mode WHERE {{
+            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                ?state
+                    <{PROFILE_FIELD_STATE_VOCAB.entity}> {entity_ref} ;
+                    <{PROFILE_FIELD_STATE_VOCAB.field}> ?field ;
+                    <{PROFILE_FIELD_STATE_VOCAB.mode}> ?mode .
+            }}
+        }}
+    """)
+
+    result: dict[str, str] = {}
+
+    for row in rows:
+        field_uri = row["field"]
+        mode = row["mode"]
+
+        if mode not in {
+            PROFILE_FIELD_MODE_DEFAULT,
+            PROFILE_FIELD_MODE_OVERRIDE,
+        }:
+            raise HTTPException(
+                500,
+                f"Invalid stored profile field mode for {field_uri}.",
+            )
+
+        previous_mode = result.get(field_uri)
+
+        if previous_mode is not None and previous_mode != mode:
+            raise HTTPException(
+                500,
+                f"Conflicting stored profile field modes for {field_uri}.",
+            )
+
+        result[field_uri] = mode
+
+    return result
+
+def _validate_profile_field_modes(
+    raw_modes: object,
+    entity_type: str,
+) -> dict[str, str]:
+    """Validate mode values and reject fields unsupported for this type."""
+    if not isinstance(raw_modes, dict):
+        raise HTTPException(
+            400,
+            "Profile field modes must be an object.",
+        )
+
+    editable_fields = PROFILE_EDITABLE_FIELDS_BY_TYPE.get(
+        entity_type,
+        set(),
+    )
+
+    result: dict[str, str] = {}
+
+    for field_uri, mode in raw_modes.items():
+        if not isinstance(field_uri, str):
+            raise HTTPException(
+                400,
+                "Profile field identifiers must be strings.",
+            )
+
+        _sparql_iri(field_uri, "profile field URI")
+
+        if field_uri not in editable_fields:
+            raise HTTPException(
+                400,
+                f"Field {field_uri} is not editable for "
+                f"entity type {entity_type}.",
+            )
+
+        if mode not in {
+            PROFILE_FIELD_MODE_DEFAULT,
+            PROFILE_FIELD_MODE_OVERRIDE,
+        }:
+            raise HTTPException(
+                400,
+                f"Invalid field mode for {field_uri}: {mode}.",
+            )
+
+        result[field_uri] = mode
+
+    return result
+
+async def _persist_profile_field_modes(
+    entity_uri: str,
+    field_modes: dict[str, str],
+    profile_store=None,
+) -> None:
+    """
+    Replace field-mode records for the submitted fields.
+
+    Both default and override modes are persisted explicitly. This makes
+    an explicit reset distinguishable from unclassified legacy data.
+    """
+    if not field_modes:
+        return
+
+    target_store = profile_store or store
+    entity_ref = _sparql_iri(entity_uri, "profile entity URI")
+
+    state_refs: list[str] = []
+    inserts: list[str] = []
+
+    for field_uri, mode in field_modes.items():
+        _sparql_iri(field_uri, "profile field URI")
+
+        if mode not in {
+            PROFILE_FIELD_MODE_DEFAULT,
+            PROFILE_FIELD_MODE_OVERRIDE,
+        }:
+            raise HTTPException(
+                400,
+                f"Invalid field mode for {field_uri}: {mode}.",
+            )
+
+        state_uri = _profile_field_state_uri(
+            entity_uri,
+            field_uri,
+        ).n3()
+
+        field_ref = _sparql_iri(
+            field_uri,
+            "profile field URI",
+        )
+
+        state_refs.append(state_uri)
+
+        inserts.append(f"""
+            {state_uri}
+                <{PROFILE_FIELD_STATE_VOCAB.entity}> {entity_ref} ;
+                <{PROFILE_FIELD_STATE_VOCAB.field}> {field_ref} ;
+                <{PROFILE_FIELD_STATE_VOCAB.mode}> "{mode}" .
+        """)
+
+    delete_update = f"""
+        DELETE {{
+            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                ?state ?p ?o .
+            }}
+        }}
+        WHERE {{
+            VALUES ?state {{ {" ".join(state_refs)} }}
+            OPTIONAL {{
+                GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                    ?state ?p ?o .
+                }}
+            }}
+        }}
+    """
+
+    insert_update = f"""
+        INSERT DATA {{
+            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                {" ".join(inserts)}
+            }}
+        }}
+    """
+
+    await target_store.update(
+        delete_update + ";\n" + insert_update
+    )
+
+async def _delete_profile_field_modes_for_entity(
+    entity_uri: str,
+    profile_store=None,
+) -> None:
+    """Remove field-mode records when an editable profile entity is removed."""
+    target_store = profile_store or store
+    entity_ref = _sparql_iri(entity_uri, "profile entity URI")
+
+    await target_store.update(f"""
+        DELETE {{
+            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                ?state ?p ?o .
+            }}
+        }}
+        WHERE {{
+            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
+                ?state
+                    <{PROFILE_FIELD_STATE_VOCAB.entity}> {entity_ref} ;
+                    ?p ?o .
+            }}
+        }}
+    """)
+
+def _has_nonempty_constraint_value(value: object) -> bool:
+    if value is None:
+        return False
+
+    if isinstance(value, (list, tuple, set)):
+        return any(
+            _has_nonempty_constraint_value(item)
+            for item in value
+        )
+
+    if isinstance(value, str):
+        return bool(value.strip())
+
+    return True
+
+def _validate_profile_range_constraint_compatibility(
+    entity_type: str,
+    constraints: dict,
+    *,
+    entity_uri: str = "",
+    status_code: int = 400,
+) -> None:
+    """Reject SHACL range selectors incompatible with the property kind."""
+    class_value = constraints.get(
+        str(SH["class"]),
+        constraints.get("class"),
+    )
+
+    datatype_value = constraints.get(
+        str(SH.datatype),
+        constraints.get("datatype"),
+    )
+
+    if (
+        entity_type == "datatype_property"
+        and _has_nonempty_constraint_value(class_value)
+    ):
+        raise HTTPException(
+            status_code,
+            f"Datatype property {entity_uri} cannot have a "
+            f"sh:class constraint. Use Range Datatypes instead.",
+        )
+
+    if (
+        entity_type == "object_property"
+        and _has_nonempty_constraint_value(datatype_value)
+    ):
+        raise HTTPException(
+            status_code,
+            f"Object property {entity_uri} cannot have a "
+            f"sh:datatype constraint. Use Range Classes instead.",
+        )
+
 def validate_constraints(entity_uri: str, entity_type: str, proposed: dict):
     original = get_original_constraints(entity_uri, entity_type, state["combined_onto_graph"])
     for pred, new_vals in proposed.items():
@@ -3236,6 +3618,15 @@ class ApplicationProfile:
             card = get_property_cardinality(class_uri, prop_uri)
             shacl_constraints = await self._get_property_constraints(prop_uri)
 
+            property_entity_type = await self.get_entity_type(prop_uri)
+
+            _validate_profile_range_constraint_compatibility(
+                property_entity_type,
+                shacl_constraints,
+                entity_uri=prop_uri,
+                status_code=409,
+            )
+
             if "class" in shacl_constraints:
                 ptype = "object"
                 ranges = [shacl_constraints["class"]]
@@ -3524,6 +3915,47 @@ class SHACLProfile:
             )
         }
 
+        class_uris = {
+            str(class_uri)
+            for property_shape in shapes_graph.subjects(
+                SH.path,
+                URIRef(prop_uri),
+            )
+            for class_uri in shapes_graph.objects(
+                property_shape,
+                SH["class"],
+            )
+        }
+
+        property_uri = URIRef(prop_uri)
+        ontology_graph = state["combined_onto_graph"]
+
+        explicitly_object = (
+            property_uri,
+            RDF.type,
+            OWL.ObjectProperty,
+        ) in ontology_graph
+
+        explicitly_datatype = (
+            property_uri,
+            RDF.type,
+            OWL.DatatypeProperty,
+        ) in ontology_graph
+
+        if explicitly_object and datatype_uris:
+            raise HTTPException(
+                409,
+                f"Object property {prop_uri} has an incompatible "
+                f"sh:datatype constraint.",
+            )
+
+        if explicitly_datatype and class_uris:
+            raise HTTPException(
+                409,
+                f"Datatype property {prop_uri} has an incompatible "
+                f"sh:class constraint.",
+            )
+
         if len(datatype_uris) > 1:
             raise HTTPException(
                 500,
@@ -3627,7 +4059,14 @@ class SHACLProfile:
         self._changed()
 
     async def remove_class(self, class_uri: str):
-        await self.store.remove_class_shape(class_uri, state["prefix_map"])
+        await self.store.remove_class_shape(
+            class_uri,
+            state["prefix_map"],
+        )
+        await _delete_profile_field_modes_for_entity(
+            class_uri,
+            self.store,
+        )
         self._changed()
 
     async def add_property_to_class(self, class_uri: str, prop_uri: str):
@@ -3720,6 +4159,10 @@ class SHACLProfile:
             raise HTTPException(400, "Core annotation properties cannot be removed.")
         shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
         await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+        await _delete_profile_field_modes_for_entity(
+            prop_uri,
+            self.store,
+        )
         self._changed()
 
     async def get_active_classes(self) -> List[str]:
@@ -7300,17 +7743,52 @@ async def get_entity_constraints(entity_uri: str):
             if entity_uri in get_property_domains(prop_uri): original_props.append(prop_uri)
         original[str(SH.property)] = original_props
 
-    return {"uri": entity_uri, "type": etype, "original": original, "overrides": overrides}
+    stored_modes = await _load_stored_profile_field_modes(
+        entity_uri,
+    )
+
+    field_modes = _resolve_profile_field_modes(
+        etype,
+        original,
+        overrides,
+        stored_modes,
+    )
+
+    return {
+        "uri": entity_uri,
+        "type": etype,
+        "original": original,
+        "overrides": overrides,
+        "field_modes": field_modes,
+    }
 
 
 @app.put("/api/profile/constraints/{entity_uri:path}")
 async def set_entity_constraints(entity_uri: str, constraints: dict):
     etype = await ap.get_entity_type(entity_uri)
 
-    # Work with a copy because relationship keys must be removed before
-    # serializing the remaining entries as SHACL constraint triples.
+    # Extract UI state metadata before validating actual SHACL constraints.
     constraints = dict(constraints)
+    raw_field_modes = constraints.pop(
+        PROFILE_FIELD_MODES_KEY,
+        None,
+    )
+
+    field_modes = None
+
+    if raw_field_modes is not None:
+        field_modes = _validate_profile_field_modes(
+            raw_field_modes,
+            etype,
+        )
+
     validate_constraints(entity_uri, etype, constraints)
+
+    _validate_profile_range_constraint_compatibility(
+        etype,
+        constraints,
+        entity_uri=entity_uri,
+    )
 
     property_types = {
         "object_property",
@@ -7400,6 +7878,12 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
                 etype,
                 property_uris,
             )
+
+    if field_modes is not None:
+        await _persist_profile_field_modes(
+            entity_uri,
+            field_modes,
+        )
 
     invalidate_profile()
     return {"status": "ok"}
@@ -8024,6 +8508,9 @@ async def purge_all_data():
         try:
             await store.update("CLEAR DEFAULT")
             await store.update("CLEAR GRAPH <urn:profile:shapes>")
+            await store.update(
+                f"CLEAR GRAPH <{PROFILE_FIELD_STATE_GRAPH}>"
+            )
             await store.update("CLEAR GRAPH <urn:profile:constraints>")
         except Exception: raise HTTPException(500, "Could not clear Fuseki store.")
 
