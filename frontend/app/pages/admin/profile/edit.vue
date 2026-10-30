@@ -51,12 +51,48 @@
             <template v-else-if="config.type === 'class'">
               <EntitySelector entityType="class" :modelValue="formData[pred] || []"
                 @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search classes…" />
+
+              <p v-if="pred === 'urn:domainClasses' && !(formData[pred] || []).length"
+                class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                Empty = Universal: The property applies to all classes.
+              </p>
             </template>
 
             <!-- Property list -->
             <template v-else-if="config.type === 'property'">
-              <EntitySelector entityType="property" :modelValue="formData[pred] || []"
-                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search properties…" />
+              <EntitySelector entityType="property" :availableEntities="classPropertyOptions"
+                :modelValue="formData[pred] || []" @update:modelValue="(val: string[]) => setFieldValue(pred, val)"
+                placeholder="Search properties…" />
+
+              <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                This list manages class-specific associations. Properties inherited
+                from superclasses and universal properties do not require
+                individual class links.
+              </p>
+
+              <div v-if="inheritedProperties.length" class="mt-3">
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Inherited properties
+                </p>
+
+                <ul class="mt-1 list-disc list-inside text-sm text-gray-500 dark:text-gray-400">
+                  <li v-for="uri in inheritedProperties" :key="uri">
+                    {{ profileEntityLabel(uri) }}
+                  </li>
+                </ul>
+              </div>
+
+              <div v-if="universalProperties.length" class="mt-3">
+                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Universal properties
+                </p>
+
+                <ul class="mt-1 list-disc list-inside text-sm text-gray-500 dark:text-gray-400">
+                  <li v-for="uri in universalProperties" :key="uri">
+                    {{ profileEntityLabel(uri) }}
+                  </li>
+                </ul>
+              </div>
             </template>
 
             <!-- Dropdown -->
@@ -128,6 +164,33 @@ const entityDisplayLabel = computed(() => {
 })
 const original = ref<Record<string, string[]>>({})
 const overrides = ref<Record<string, string>>({})
+const universalProperties = ref<string[]>([])
+const inheritedProperties = ref<string[]>([])
+const classPropertyOptions = computed(() =>
+  store.profileEntities
+    .filter(entity =>
+      entity.active &&
+      [
+        'object_property',
+        'datatype_property',
+        'annotation_property',
+      ].includes(entity.type) &&
+      !universalProperties.value.includes(entity.uri)
+    )
+    .map(entity => ({
+      uri: entity.uri,
+      label: entity.label || entity.uri,
+    })),
+)
+
+function profileEntityLabel(uri: string): string {
+  const entity = store.profileEntities.find(
+    item => item.uri === uri,
+  )
+
+  return entity?.label || formatUri(uri) || uri
+}
+
 const loading = ref(true)
 const error = ref('')
 
@@ -344,6 +407,8 @@ async function fetchConstraints() {
   try {
     const res = await $fetch<any>(`${apiBase}/api/profile/constraints/${encodeURIComponent(entityUri.value)}`)
     entityType.value = res.type
+    universalProperties.value = res.universal_properties || []
+    inheritedProperties.value = res.inherited_properties || []
     original.value = res.original || {}
     overrides.value = res.overrides || {}
 

@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 
@@ -53,14 +54,18 @@ class UpdateInstanceTests(unittest.IsolatedAsyncioTestCase):
         self.original_shacl = main.shacl
         self.original_check_disjoint = main.check_disjoint_classes
         self.original_invalidate_profile = main.invalidate_profile
-
+        self.original_domain_resolver = main.ap._get_shacl_domains
         self.store = FakeStore()
         main.store = self.store
         main.shacl = FakeSHACL()
         main.check_disjoint_classes = self._check_disjoint
         main.invalidate_profile = lambda: None
-
         main.state["created_instances"].discard(TEST_URI)
+        main.ap._get_shacl_domains = AsyncMock(
+            return_value={
+                TEST_PROPERTY: [],
+            }
+        )
 
     async def _check_disjoint(self, class_uris):
         return None
@@ -70,6 +75,7 @@ class UpdateInstanceTests(unittest.IsolatedAsyncioTestCase):
         main.shacl = self.original_shacl
         main.check_disjoint_classes = self.original_check_disjoint
         main.invalidate_profile = self.original_invalidate_profile
+        main.ap._get_shacl_domains = self.original_domain_resolver
 
     async def test_validation_failure_does_not_modify_store(self):
         main.shacl = FakeSHACL(

@@ -18,8 +18,10 @@
     <!-- Domain (only for properties) -->
     <td v-if="showDomain" class="border border-gray-300 dark:border-gray-600 p-2 text-sm" :class="mutedTextClass">
       <span v-if="props.entity.domain?.length">{{props.entity.domain.map(d => displayEntityLabel(d)).join(', ')
-        }}</span>
-      <span v-else class="text-gray-400 dark:text-gray-500">—</span>
+      }}</span>
+      <span v-else class="italic">
+        Universal (all classes)
+      </span>
     </td>
 
     <!-- Source -->

@@ -20,7 +20,12 @@ INVALID_PROPERTY_URI = "http://example.org/unknownProperty"
 @pytest.mark.asyncio
 async def test_property_links_validate_before_mutation(monkeypatch):
     store = AsyncMock()
-    store.query.return_value = [{"class": CLASS_URI}]
+    store.query.return_value = [
+        {
+            "class": CLASS_URI,
+            "classShape": "urn:test:BookShape",
+        }
+    ]
 
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(
@@ -71,7 +76,12 @@ async def test_class_links_validate_before_mutation(monkeypatch):
 @pytest.mark.asyncio
 async def test_valid_link_replacement_uses_one_update(monkeypatch):
     store = AsyncMock()
-    store.query.return_value = [{"class": CLASS_URI}]
+    store.query.return_value = [
+        {
+            "class": OTHER_CLASS_URI,
+            "classShape": "urn:test:ArticleShape",
+        }
+    ]
 
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(
@@ -88,7 +98,7 @@ async def test_valid_link_replacement_uses_one_update(monkeypatch):
     store.update.assert_awaited_once()
 
     update = store.update.await_args.args[0]
-    assert "DELETE DATA" in update
+    assert "DELETE WHERE" in update
     assert "INSERT DATA" in update
 
 
@@ -138,6 +148,9 @@ async def test_saving_empty_domain_classes_clears_relationships(
         {
             "urn:domainClasses": [],
             str(main.SH.maxLength): 50,
+            main.PROFILE_FIELD_MODES_KEY: {
+                "urn:domainClasses": main.PROFILE_FIELD_MODE_OVERRIDE,
+            }
         },
     )
 
@@ -146,6 +159,8 @@ async def test_saving_empty_domain_classes_clears_relationships(
         PROPERTY_URI,
         "datatype_property",
         [],
+        profile_store=store,
+        activate_missing_classes=True,
     )
 
     apply_constraints.assert_awaited_once_with(
@@ -207,6 +222,7 @@ async def test_saving_empty_class_properties_clears_relationships(
         CLASS_URI,
         "class",
         [],
+        profile_store=main.store,
     )
 
     apply_constraints.assert_awaited_once_with(
@@ -225,7 +241,12 @@ async def test_empty_property_domain_list_deletes_existing_links(
     monkeypatch,
 ):
     store = AsyncMock()
-    store.query.return_value = [{"class": CLASS_URI}]
+    store.query.return_value = [
+        {
+            "class": CLASS_URI,
+            "classShape": "urn:test:BookShape",
+        }
+    ]
 
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(
@@ -243,7 +264,8 @@ async def test_empty_property_domain_list_deletes_existing_links(
     store.update.assert_awaited_once()
     update = store.update.await_args.args[0]
 
-    assert "DELETE DATA" in update
+    assert "DELETE WHERE" in update
+    assert "INSERT DATA" not in update
     assert "sh:property" in update
 
 
@@ -252,7 +274,45 @@ async def test_empty_class_property_list_deletes_existing_links(
     monkeypatch,
 ):
     store = AsyncMock()
+
+    store.query.side_effect = [
+        # Active classes.
+        [{"class": CLASS_URI}],
+
+        # Active properties.
+        [{"prop": PROPERTY_URI}],
+
+        # Class shapes queried by _replace_property_domain_links().
+        [{
+            "class": CLASS_URI,
+            "classShape": "urn:test:BookShape",
+        }],
+    ]
+
     monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda _: [CLASS_URI],
+    )
+
+    get_domains_mock = AsyncMock(
+        return_value={
+            PROPERTY_URI: [CLASS_URI],
+        }
+    )
+    monkeypatch.setattr(
+        main.ap,
+        "_get_shacl_domains",
+        get_domains_mock,
+    )
+
+    persist_modes_mock = AsyncMock()
+    monkeypatch.setattr(
+        main,
+        "_persist_profile_field_modes",
+        persist_modes_mock,
+    )
 
     await main._sync_entity_links(
         CLASS_URI,
@@ -261,8 +321,16 @@ async def test_empty_class_property_list_deletes_existing_links(
     )
 
     store.update.assert_awaited_once()
+
     update = store.update.await_args.args[0]
 
     assert "DELETE WHERE" in update
-    assert "sh:property" in update
     assert "INSERT DATA" not in update
+
+    persist_modes_mock.assert_awaited_once_with(
+        PROPERTY_URI,
+        {
+            "urn:domainClasses": main.PROFILE_FIELD_MODE_OVERRIDE,
+        },
+        store,
+    )

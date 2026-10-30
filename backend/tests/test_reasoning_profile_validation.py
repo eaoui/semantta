@@ -143,6 +143,16 @@ async def test_real_shacl_validation_blocks_invalid_update_before_write(
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(main, "shacl", profile)
     monkeypatch.setattr(main, "validation_ontology_graph", Graph())
+    get_domains_mock = AsyncMock(
+        return_value={
+            str(EX.title): [str(EX.Book)],
+        }
+    )
+    monkeypatch.setattr(
+        main.ap,
+        "_get_shacl_domains",
+        get_domains_mock,
+    )
     monkeypatch.setattr(
         main, "check_disjoint_classes", AsyncMock()
     )
