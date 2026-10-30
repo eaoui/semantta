@@ -705,10 +705,3 @@ class FusekiStore:
             f"<{class_shape}> sh:property <{shape_uri}> . "
             f"}} }}"
         )
-
-    async def remove_class_shape(self, class_uri: str, prefix_map: dict):
-        """Remove a class shape and all its attached property shapes."""
-        shape_uri = shape_uri_for_entity(class_uri, "class", prefix_map)
-        await self.update(
-            f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}"
-        )

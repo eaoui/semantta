@@ -119,10 +119,3 @@ class RDFStore(Protocol):
         prefix_map: dict,
     ) -> None:
         ...
-
-    async def remove_class_shape(
-        self,
-        class_uri: str,
-        prefix_map: dict,
-    ) -> None:
-        ...

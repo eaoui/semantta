@@ -3384,29 +3384,6 @@ async def _persist_profile_field_modes(
         delete_update + ";\n" + insert_update
     )
 
-async def _delete_profile_field_modes_for_entity(
-    entity_uri: str,
-    profile_store=None,
-) -> None:
-    """Remove field-mode records when an editable profile entity is removed."""
-    target_store = profile_store or store
-    entity_ref = _sparql_iri(entity_uri, "profile entity URI")
-
-    await target_store.update(f"""
-        DELETE {{
-            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
-                ?state ?p ?o .
-            }}
-        }}
-        WHERE {{
-            GRAPH <{PROFILE_FIELD_STATE_GRAPH}> {{
-                ?state
-                    <{PROFILE_FIELD_STATE_VOCAB.entity}> {entity_ref} ;
-                    ?p ?o .
-            }}
-        }}
-    """)
-
 def _has_nonempty_constraint_value(value: object) -> bool:
     if value is None:
         return False
@@ -3827,6 +3804,10 @@ class ApplicationProfile:
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?propShape sh:path ?propUri .
                     OPTIONAL {{ ?propShape sh:order ?order }}
+
+                    FILTER NOT EXISTS {{
+                        ?propShape sh:deactivated true
+                    }}
                 }}
             }}
             GROUP BY ?propUri
@@ -4367,6 +4348,47 @@ class SHACLProfile:
         if self._on_change:
             self._on_change()
 
+    async def _set_shape_deactivated(
+        self,
+        shape_uri: str,
+        deactivated: bool,
+    ) -> None:
+        """Set or clear sh:deactivated without modifying the shape."""
+        shape_ref = _sparql_iri(shape_uri, "SHACL shape URI")
+
+        if deactivated:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_ref} sh:deactivated ?existing .
+                    }}
+                }}
+                INSERT {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_ref} sh:deactivated true .
+                    }}
+                }}
+                WHERE {{
+                    OPTIONAL {{
+                        GRAPH <{SHAPES_GRAPH}> {{
+                            {shape_ref} sh:deactivated ?existing .
+                        }}
+                    }}
+                }}
+            """)
+        else:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        {shape_ref} sh:deactivated ?existing .
+                    }}
+                }}
+            """)
+
     async def _repair_legacy_datatype_constraints(
         self,
         shapes_graph: Graph,
@@ -4683,6 +4705,8 @@ class SHACLProfile:
         )
 
         await self.store.insert_shapes(triples)
+        await self._set_shape_deactivated(shape_uri, False)
+
         self._changed()
 
         await _synchronize_active_property_domain_links(
@@ -4690,14 +4714,13 @@ class SHACLProfile:
         )
 
     async def remove_class(self, class_uri: str):
-        await self.store.remove_class_shape(
+        shape_uri = shape_uri_for_entity(
             class_uri,
+            "class",
             state["prefix_map"],
         )
-        await _delete_profile_field_modes_for_entity(
-            class_uri,
-            self.store,
-        )
+
+        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def add_property_to_class(
@@ -4774,45 +4797,91 @@ class SHACLProfile:
         self._changed()
 
     async def add_datatype(self, uri: str):
-        shape_uri = shape_uri_for_entity(uri, "datatype", state["prefix_map"])
-        triples = f"<{shape_uri}> a sh:NodeShape ; sh:targetNode <{uri}> .\n"
+        shape_uri = shape_uri_for_entity(
+            uri,
+            "datatype",
+            state["prefix_map"],
+        )
+
+        triples = (
+            f"<{shape_uri}> a sh:NodeShape ; "
+            f"sh:targetNode <{uri}> .\n"
+        )
+
         await self.store.insert_shapes(triples)
+        await self._set_shape_deactivated(shape_uri, False)
         self._changed()
 
     async def remove_datatype(self, uri: str):
-        shape_uri = shape_uri_for_entity(uri, "datatype", state["prefix_map"])
-        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+        shape_uri = shape_uri_for_entity(
+            uri,
+            "datatype",
+            state["prefix_map"],
+        )
+
+        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def add_individual(self, uri: str):
-        shape_uri = shape_uri_for_entity(uri, "individual", state["prefix_map"])
-        triples = f"<{shape_uri}> a sh:NodeShape ; sh:targetNode <{uri}> .\n"
+        shape_uri = shape_uri_for_entity(
+            uri,
+            "individual",
+            state["prefix_map"],
+        )
+
+        triples = (
+            f"<{shape_uri}> a sh:NodeShape ; "
+            f"sh:targetNode <{uri}> .\n"
+        )
+
         await self.store.insert_shapes(triples)
+        await self._set_shape_deactivated(shape_uri, False)
         self._changed()
 
     async def remove_individual(self, uri: str):
         if uri in CORE_ACTIVE_DATATYPES:
-            raise HTTPException(400, "Core datatypes cannot be removed.")
-        shape_uri = shape_uri_for_entity(uri, "individual", state["prefix_map"])
-        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
+            raise HTTPException(
+                400,
+                "Core datatypes cannot be removed.",
+            )
+
+        shape_uri = shape_uri_for_entity(
+            uri,
+            "individual",
+            state["prefix_map"],
+        )
+
+        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def add_property_global(self, prop_uri: str):
-        shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
+        shape_uri = shape_uri_for_entity(
+            prop_uri,
+            "property",
+            state["prefix_map"],
+        )
+
         await self.store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
+
             INSERT {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    <{shape_uri}> a sh:PropertyShape ; sh:path <{prop_uri}> .
+                    <{shape_uri}>
+                        a sh:PropertyShape ;
+                        sh:path <{prop_uri}> .
                 }}
             }}
             WHERE {{
                 FILTER NOT EXISTS {{
-                    GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> a sh:PropertyShape }}
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        <{shape_uri}> a sh:PropertyShape .
+                    }}
                 }}
             }}
         """)
+
         await self._set_default_constraints(prop_uri)
+        await self._set_shape_deactivated(shape_uri, False)
 
         self._changed()
 
@@ -4823,18 +4892,18 @@ class SHACLProfile:
 
     async def remove_property_global(self, prop_uri: str):
         if prop_uri in CORE_ACTIVE_ANNOTATION_PROPERTIES:
-            raise HTTPException(400, "Core annotation properties cannot be removed.")
-        await _replace_property_domain_links(
+            raise HTTPException(
+                400,
+                "Core annotation properties cannot be removed.",
+            )
+
+        shape_uri = shape_uri_for_entity(
             prop_uri,
-            [],
-            profile_store=self.store,
+            "property",
+            state["prefix_map"],
         )
-        shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
-        await self.store.update(f"DELETE WHERE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}")
-        await _delete_profile_field_modes_for_entity(
-            prop_uri,
-            self.store,
-        )
+
+        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def get_active_classes(self) -> List[str]:
@@ -4842,7 +4911,12 @@ class SHACLProfile:
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             SELECT DISTINCT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape a sh:NodeShape ; sh:targetClass ?class .
+                    ?shape a sh:NodeShape ;
+                           sh:targetClass ?class .
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true
+                    }}
                 }}
             }}
         """)
@@ -4854,6 +4928,10 @@ class SHACLProfile:
             SELECT DISTINCT ?prop WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?shape sh:path ?prop .
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true
+                    }}
                 }}
             }}
         """)
@@ -4874,6 +4952,10 @@ class SHACLProfile:
                             "urn:shape:datatype:"
                         )
                     )
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true
+                    }}
                 }}
             }}
         """)
@@ -4895,6 +4977,10 @@ class SHACLProfile:
                             "urn:shape:individual:"
                         )
                     )
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true
+                    }}
                 }}
             }}
         """)
@@ -5712,6 +5798,10 @@ async def _sync_entity_links(
                 ?shape
                     a sh:NodeShape ;
                     sh:targetClass ?class .
+
+                FILTER NOT EXISTS {{
+                    ?classShape sh:deactivated true
+                }}
             }}
         }}
     """)
@@ -5732,6 +5822,10 @@ async def _sync_entity_links(
         SELECT DISTINCT ?prop WHERE {{
             GRAPH <{SHAPES_GRAPH}> {{
                 ?propShape sh:path ?prop .
+
+                FILTER NOT EXISTS {{
+                    ?propShape sh:deactivated true
+                }}
             }}
         }}
     """)
@@ -8304,6 +8398,10 @@ async def get_metadata_integration_status():
                     )
                     BIND("individual" AS ?role)
                 }}
+
+                FILTER NOT EXISTS {{
+                    ?shape sh:deactivated true
+                }}
             }}
 
             FILTER(isIRI(?uri))
@@ -9020,8 +9118,8 @@ async def _get_metadata_entity_usage_index() -> Dict[str, Set[str]]:
 
     return usage_index
 
-@app.post("/api/profile/remove-unused-entities")
-async def remove_unused_entities_endpoint():
+@app.post("/api/profile/deactivate-unused-entities")
+async def deactivate_unused_entities_endpoint():
     """Remove unused active Application Profile entities, not metadata."""
     usage_index = await _get_metadata_entity_usage_index()
 
@@ -9050,21 +9148,21 @@ async def remove_unused_entities_endpoint():
         for role, entities in active_entities.items()
     }
 
-    removed = [
+    deactivated = [
         {"uri": uri, "type": role}
         for role in ("class", "property", "datatype", "individual")
         for uri in unused_by_role[role]
     ]
 
-    if not removed:
+    if not deactivated:
         return {
             "status": "ok",
-            "removed_count": 0,
-            "removed": [],
+            "deactivated_count": 0,
+            "deactivated": [],
         }
 
-    # Build one atomic update. Target entity identities rather than
-    # assuming that every active SHACL shape uses a particular URI.
+    # Match the existing SHACL shapes by entity identity.
+    # Their complete RDF configuration and incoming links are preserved.
     branches = []
 
     if unused_by_role["class"]:
@@ -9111,39 +9209,17 @@ async def remove_unused_entities_endpoint():
 
     shape_match = "\nUNION\n".join(branches)
 
-    # Delete the selected shapes and their incoming class/property links.
-    # The update touches only the shapes graph: imported metadata graphs,
-    # the default data graph, and created metadata remain unchanged.
-    delete_operations = []
+    await store.update(f"""
+        PREFIX sh: <{SH}>
 
-    # First, remove every class-shape reference to an unused property shape.
-    # This must happen explicitly before deleting the property shapes.
-    if unused_by_role["property"]:
-        unused_property_values = " ".join(
-            _sparql_iri(uri, "property URI")
-            for uri in unused_by_role["property"]
-        )
-
-        delete_operations.append(f"""
-            DELETE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?classShape sh:property ?propertyShape .
-                }}
-            }}
-            WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    VALUES ?entity {{ {unused_property_values} }}
-                    ?propertyShape sh:path ?entity .
-                    ?classShape sh:property ?propertyShape .
-                }}
-            }}
-        """)
-
-    # Next, delete the shapes belonging to all unused entities.
-    delete_operations.append(f"""
         DELETE {{
             GRAPH <{SHAPES_GRAPH}> {{
-                ?shape ?shapePredicate ?shapeObject .
+                ?shape sh:deactivated ?existing .
+            }}
+        }}
+        INSERT {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?shape sh:deactivated true .
             }}
         }}
         WHERE {{
@@ -9151,25 +9227,20 @@ async def remove_unused_entities_endpoint():
                 {{
                     {shape_match}
                 }}
-                ?shape ?shapePredicate ?shapeObject .
+
+                OPTIONAL {{
+                    ?shape sh:deactivated ?existing .
+                }}
             }}
         }}
-    """)
-
-    # Execute both operations in order within one SPARQL update request.
-    combined_updates = ";\n".join(delete_operations)
-
-    await store.update(f"""
-        PREFIX sh: <{SH}>
-        {combined_updates}
     """)
 
     invalidate_profile()
 
     return {
         "status": "ok",
-        "removed_count": len(removed),
-        "removed": removed,
+        "deactivated_count": len(deactivated),
+        "deactivated": deactivated,
     }
 
 @app.post("/api/profile/generate")

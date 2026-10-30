@@ -80,7 +80,7 @@ def add_active_shape(shapes_graph, role: str, uri: str) -> URIRef:
 
 
 @pytest.mark.asyncio
-async def test_remove_unused_entities_uses_indexes_and_preserves_metadata(
+async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
     monkeypatch,
 ):
     dataset = Dataset()
@@ -179,6 +179,45 @@ async def test_remove_unused_entities_uses_indexes_and_preserves_metadata(
         Literal("created value", datatype=URIRef(created_datatype)),
     ))
 
+    field_state_graph = dataset.graph(
+        URIRef(main.PROFILE_FIELD_STATE_GRAPH)
+    )
+
+    # These records must survive entity deactivation.
+    field_state_records = []
+
+    for entity_uri, field_uri in (
+        (unused_class, str(main.SH.minCount)),
+        (unused_property, "urn:domainClasses"),
+    ):
+        record_uri = main._profile_field_state_uri(
+            entity_uri,
+            field_uri,
+        )
+
+        vocab = main.PROFILE_FIELD_STATE_VOCAB
+
+        field_state_graph.add((
+            record_uri,
+            vocab.entity,
+            URIRef(entity_uri),
+        ))
+        field_state_graph.add((
+            record_uri,
+            vocab.field,
+            URIRef(field_uri),
+        ))
+        field_state_graph.add((
+            record_uri,
+            vocab.mode,
+            Literal(main.PROFILE_FIELD_MODE_OVERRIDE),
+        ))
+
+        field_state_records.append(record_uri)
+
+    field_state_before = set(field_state_graph)
+    shapes_before = set(shapes_graph)
+
     imported_before = set(imported_graph)
     created_before = set(created_graph)
 
@@ -200,13 +239,13 @@ async def test_remove_unused_entities_uses_indexes_and_preserves_metadata(
         created_graph,
     )
 
-    result = await main.remove_unused_entities_endpoint()
+    result = await main.deactivate_unused_entities_endpoint()
 
     assert result["status"] == "ok"
-    assert result["removed_count"] == 4
+    assert result["deactivated_count"] == 4
     assert {
         (item["type"], item["uri"])
-        for item in result["removed"]
+        for item in result["deactivated"]
     } == {
         ("class", unused_class),
         ("property", unused_property),
@@ -242,37 +281,51 @@ async def test_remove_unused_entities_uses_indexes_and_preserves_metadata(
             None,
         )))
 
-    # Unused shapes are removed, including their incoming property links.
-    assert not list(shapes_graph.triples((
-        class_shapes[unused_class],
-        None,
-        None,
-    )))
-    assert not list(shapes_graph.triples((
-        property_shapes[unused_property],
-        None,
-        None,
-    )))
+    # All unused shapes remain in the shapes graph and are deactivated.
+    unused_shapes = {
+        ("class", unused_class),
+        ("property", unused_property),
+        ("datatype", unused_datatype),
+        ("individual", unused_individual),
+    }
+
+    for role, uri in unused_shapes:
+        shape_uri = URIRef(
+            main.shape_uri_for_entity(uri, role, {})
+        )
+
+        assert list(shapes_graph.triples((
+            shape_uri,
+            None,
+            None,
+        )))
+
+        assert set(shapes_graph.objects(
+            shape_uri,
+            SH.deactivated,
+        )) == {Literal(True)}
+
+    # The unused property's association with the class is retained.
     assert (
         class_shapes[used_class],
         SH.property,
         property_shapes[unused_property],
-    ) not in shapes_graph
+    ) in shapes_graph
 
-    assert not list(shapes_graph.triples((
-        URIRef(main.shape_uri_for_entity(
-            unused_datatype, "datatype", {}
-        )),
-        None,
-        None,
-    )))
-    assert not list(shapes_graph.triples((
-        URIRef(main.shape_uri_for_entity(
-            unused_individual, "individual", {}
-        )),
-        None,
-        None,
-    )))
+    # No existing SHACL information was deleted or modified.
+    # The only permitted changes are deactivation markers.
+    assert {
+        triple
+        for triple in shapes_graph
+        if triple[1] != SH.deactivated
+    } == {
+        triple
+        for triple in shapes_before
+        if triple[1] != SH.deactivated
+    }
+
+    # Field-mode state survives cleanup.
+    assert set(field_state_graph) == field_state_before
 
     # Core defaults remain active even though this test doesn't use them.
     for uri in (
@@ -291,13 +344,15 @@ async def test_remove_unused_entities_uses_indexes_and_preserves_metadata(
     assert set(imported_graph) == imported_before
     assert set(created_graph) == created_before
 
-    # All selected shapes are removed in one update.
+    # All selected entities are deactivated in one atomic update.
     assert len(store.update_calls) == 1
     assert f"GRAPH <{main.SHAPES_GRAPH}>" in store.update_calls[0]
 
+    assert "sh:deactivated" in store.update_calls[0]
+
 
 @pytest.mark.asyncio
-async def test_index_failure_aborts_cleanup_without_mutation(monkeypatch):
+async def test_index_failure_aborts_deactivation_without_mutation(monkeypatch):
     from unittest.mock import AsyncMock
 
     store = AsyncMock()
@@ -309,6 +364,6 @@ async def test_index_failure_aborts_cleanup_without_mutation(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="Index unavailable"):
-        await main.remove_unused_entities_endpoint()
+        await main.deactivate_unused_entities_endpoint()
 
     store.update.assert_not_awaited()

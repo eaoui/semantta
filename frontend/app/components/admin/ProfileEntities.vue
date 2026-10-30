@@ -65,9 +65,9 @@
       </div>
 
       <div class="mb-6">
-        <button type="button" @click="confirmRemoveUnused = true"
+        <button type="button" @click="confirmDeactivateUnused = true"
           class="w-full rounded bg-fuchsia-600 px-4 py-2 text-white hover:bg-fuchsia-700">
-          Remove unused entities
+          Deactivate unused entities
         </button>
       </div>
 
@@ -106,9 +106,9 @@
     <LoadingOverlay :show="!!loadingMsg" :message="loadingMsg" />
   </div>
 
-  <ConfirmDialog :show="confirmRemoveUnused"
-    message="Remove all active Application Profile entities that are unused in imported metadata or metadata records created in Semantta? Core default entities will be preserved. Metadata records and their values will not be deleted. If no metadata is available, every other active entity will be considered unused."
-    @cancel="confirmRemoveUnused = false" @confirm="removeUnusedEntities" />
+  <ConfirmDialog :show="confirmDeactivateUnused"
+    message="Deactivate all active Application Profile entities that are unused in imported metadata or metadata records created in Semantta? Core default entities will be preserved. Their SHACL shapes, constraints, relationships and profile configuration will remain stored and can be restored by reactivating the entities. Metadata records and their values will not be deleted."
+    @cancel="confirmDeactivateUnused = false" @confirm="deactivateUnusedEntities" />
 </template>
 
 <script setup lang="ts">
@@ -130,7 +130,7 @@ const apiBase = useRuntimeConfig().public.apiBase
 const route = useRoute()
 const router = useRouter()
 const loadingMsg = ref('')
-const confirmRemoveUnused = ref(false)
+const confirmDeactivateUnused = ref(false)
 const toast = useToast()
 
 function displayEntityLabel(entity: ProfileEntityItem): string {
@@ -295,33 +295,34 @@ async function generateProfile() {
   }
 }
 
-async function removeUnusedEntities() {
-  confirmRemoveUnused.value = false
-  loadingMsg.value = 'Checking metadata indexes and removing unused entities…'
+async function deactivateUnusedEntities() {
+  confirmDeactivateUnused.value = false
+  loadingMsg.value = 'Checking metadata indexes and deactivating unused entities…'
 
   try {
     const result = await $fetch<{
-      removed_count: number
-      removed: { uri: string; type: string }[]
-    }>(`${apiBase}/api/profile/remove-unused-entities`, {
+      deactivated_count: number
+      deactivated: { uri: string; type: string }[]
+    }>(`${apiBase}/api/profile/deactivate-unused-entities`, {
       method: 'POST',
     })
 
     await store.fetchState()
 
-    if (result.removed_count === 0) {
+    if (result.deactivated_count === 0) {
       toast.info('No unused active entities found')
     } else {
-      const noun = result.removed_count === 1 ? 'entity' : 'entities'
+      const noun = result.deactivated_count === 1 ? 'entity' : 'entities'
+
       toast.success(
-        `Removed ${result.removed_count} unused active ${noun} from the Application Profile`,
+        `Deactivated ${result.deactivated_count} unused active ${noun} from the Application Profile`,
       )
     }
   } catch (error: any) {
     toast.error(
       error?.data?.detail ||
       error?.message ||
-      'Failed to remove unused entities',
+      'Failed to deactivate unused entities',
     )
   } finally {
     loadingMsg.value = ''
