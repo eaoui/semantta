@@ -108,6 +108,11 @@
               <input v-model="formData[pred]" type="text" @input="markOverride(pred)"
                 class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
             </template>
+
+            <p v-if="isOverrideEqualToDefault(pred)" class="mt-2 text-xs text-blue-700 dark:text-blue-300">
+              This value matches the current ontology default.
+              It remains an explicit override until you reset it.
+            </p>
           </div>
         </div>
 
@@ -127,6 +132,11 @@
             </div>
             <input v-model.number="formData[pred]" type="number" min="0" step="1" @input="markOverride(pred)"
               class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
+
+            <p v-if="isOverrideEqualToDefault(pred)" class="mt-2 text-xs text-blue-700 dark:text-blue-300">
+              This value matches the current ontology default.
+              It remains an explicit override until you reset it.
+            </p>
           </div>
         </div>
       </div>
@@ -135,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from '@/composables/useDisplay'
 import { useAppStore } from '@/stores/app'
@@ -294,7 +304,20 @@ function hasFieldChanges(pred: string): boolean {
 }
 
 function isFieldHighlighted(pred: string): boolean {
-  return hasFieldChanges(pred) || !isDefault(pred)
+  return fieldModes[pred] === 'override'
+}
+
+function isOverrideEqualToDefault(pred: string): boolean {
+  if (isDefault(pred)) return false
+
+  const config = relevantConstraints.value[pred]
+  if (!config) return false
+
+  return valuesAreEqual(
+    formData[pred],
+    getDefaultValue(pred),
+    config.type,
+  )
 }
 
 const hasChanges = computed(() =>
@@ -351,47 +374,18 @@ async function restoreDefault(pred: string) {
   }
 }
 
-function syncFieldModeWithValue(pred: string) {
-  const config = constraintConfig[pred]
-  if (!config) return
-
-  fieldModes[pred] = valuesAreEqual(
-    formData[pred],
-    getDefaultValue(pred),
-    config.type,
-  )
-    ? 'default'
-    : 'override'
-}
-
-function syncAllFieldModesWithValues() {
-  for (const pred in relevantConstraints.value) {
-    syncFieldModeWithValue(pred)
-  }
-}
-
 function setFieldValue(pred: string, value: any) {
   formData[pred] = value
-  syncFieldModeWithValue(pred)
+  markOverride(pred)
 }
 
 function markOverride(pred: string) {
-  // The changed value might actually equal the current default.
-  syncFieldModeWithValue(pred)
+  if (!relevantConstraints.value[pred]) return
+
+  // A user edit creates an explicit override even when the value equals
+  // the current ontology default. Only restoreDefault() returns to default mode.
+  fieldModes[pred] = 'override'
 }
-
-watch(
-  formData,
-  () => {
-    if (loading.value) return
-
-    syncAllFieldModesWithValues()
-  },
-  {
-    deep: true,
-    flush: 'sync',
-  },
-)
 
 onMounted(() => {
   const rawUri = route.query.uri
@@ -469,10 +463,8 @@ async function fetchConstraints() {
       }
     }
 
-    // Normalize modes after all ontology defaults and stored overrides
-    // have been applied. Values equal to their current defaults are default.
-    syncAllFieldModesWithValues()
-
+    // Preserve the modes returned by the backend. Value equality must not
+    // change an explicitly stored override into default mode.
     snapshotFormData()
   } catch (e: any) {
     error.value = e.message || 'Failed to load constraints'
