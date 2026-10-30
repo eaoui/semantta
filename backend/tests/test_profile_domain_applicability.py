@@ -852,3 +852,28 @@ async def test_membership_accepts_universal_property_for_any_selected_class(
             UNIVERSAL_PROPERTY: ["global-id"],
         },
     )
+    
+
+@pytest.mark.asyncio
+async def test_list_active_properties_uses_distinct_aggregate_alias(
+    monkeypatch,
+):
+    store = AsyncMock()
+    store.query.return_value = []
+
+    profile = main.ApplicationProfile(store)
+
+    monkeypatch.setattr(
+        profile,
+        "_get_shacl_domains",
+        AsyncMock(return_value={}),
+    )
+
+    result = await profile._list_active_properties(BOOK)
+
+    assert result == []
+
+    query = store.query.await_args.args[0]
+
+    assert "SAMPLE(?order) AS ?sortOrder" in query
+    assert "SAMPLE(?order) AS ?order" not in query
