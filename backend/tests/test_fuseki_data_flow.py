@@ -88,6 +88,7 @@ async def test_ontology_to_profile_to_metadata_persists_only_valid_data(
     monkeypatch.setitem(main.state, "combined_onto_graph", ontology)
     monkeypatch.setitem(main.state, "prefix_map", {})
     monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main.ap, "store", store)
 
     # Rebuild the ontology indexes used to generate profile constraints.
     monkeypatch.setattr(main, "load_indexes", lambda: False)
