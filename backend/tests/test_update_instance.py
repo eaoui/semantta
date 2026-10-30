@@ -38,6 +38,7 @@ class FakeSHACL:
     async def get_property_datatype(
         self,
         prop_uri: str,
+        value: object | None = None,
     ) -> str | None:
         return None
 

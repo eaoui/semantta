@@ -584,6 +584,14 @@ watch(
   },
 )
 
+function isIriValue(value: string): boolean {
+  return (
+    value.startsWith('http://') ||
+    value.startsWith('https://') ||
+    value.startsWith('urn:')
+  )
+}
+
 function getFieldErrors(propUri: string): string[] {
   const propDef = properties.value.find(p => p.uri === propUri)
   if (!propDef) return []
@@ -642,7 +650,14 @@ function getFieldErrors(propUri: string): string[] {
   }
 
   for (const val of values) {
-    if (propDef.type === 'datatype' && datatype) {
+    const usesLiteralDatatype =
+      propDef.type === 'datatype' ||
+      (
+        propDef.type === 'mixed' &&
+        !isIriValue(val)
+      )
+
+    if (usesLiteralDatatype && datatype) {
       const datatypeName = datatypeLocalName(datatype)
       if (numericDatatypeNames.has(datatypeName)) {
         if (

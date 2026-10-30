@@ -462,6 +462,31 @@ def _is_iri_value(value: object) -> bool:
         ("http://", "https://", "urn:")
     )
 
+def _is_annotation_property(prop_uri: str) -> bool:
+    """Determine whether a property is an OWL annotation property."""
+    if prop_uri in SYSTEM_ANNOTATION_PROPERTIES:
+        return True
+
+    property_ref = URIRef(prop_uri)
+    ontology_graph = state.get("combined_onto_graph")
+
+    if (
+        ontology_graph is not None
+        and (
+            property_ref,
+            RDF.type,
+            OWL.AnnotationProperty,
+        ) in ontology_graph
+    ):
+        return True
+
+    return any(
+        entity.get("uri") == prop_uri
+        and entity.get("type") == "annotation_property"
+        for ontology in state.get("ontologies", [])
+        for entity in ontology.get("entities", [])
+    )
+
 def _metadata_literal(
     value: object,
     prop_uri: str,
@@ -2053,6 +2078,101 @@ def _build_instance_validation_shapes(
         validation_shapes.bind(prefix, namespace, replace=True)
 
     validation_shapes += source_shapes
+
+    # On annotation properties, class and datatype ranges are
+    # alternatives, not simultaneous requirements.
+    for property_shape in set(
+        validation_shapes.subjects(SH.path, None)
+    ):
+        property_uri = validation_shapes.value(
+            property_shape,
+            SH.path,
+        )
+
+        if (
+            not isinstance(property_uri, URIRef)
+            or not _is_annotation_property(str(property_uri))
+        ):
+            continue
+
+        class_ranges = set(
+            validation_shapes.objects(
+                property_shape,
+                SH["class"],
+            )
+        )
+        datatype_ranges = set(
+            validation_shapes.objects(
+                property_shape,
+                SH.datatype,
+            )
+        )
+
+        if not class_ranges or not datatype_ranges:
+            continue
+
+        alternatives = []
+
+        for class_uri in sorted(class_ranges, key=str):
+            branch = BNode()
+
+            validation_shapes.add((
+                branch,
+                RDF.type,
+                SH.NodeShape,
+            ))
+            validation_shapes.add((
+                branch,
+                SH["class"],
+                class_uri,
+            ))
+
+            alternatives.append(branch)
+
+        for datatype_uri in sorted(datatype_ranges, key=str):
+            branch = BNode()
+
+            validation_shapes.add((
+                branch,
+                RDF.type,
+                SH.NodeShape,
+            ))
+            validation_shapes.add((
+                branch,
+                SH.datatype,
+                datatype_uri,
+            ))
+
+            alternatives.append(branch)
+
+        # Remove the original conjunctive constraints from the
+        # derived graph only. The persisted profile remains unchanged.
+        for class_uri in class_ranges:
+            validation_shapes.remove((
+                property_shape,
+                SH["class"],
+                class_uri,
+            ))
+
+        for datatype_uri in datatype_ranges:
+            validation_shapes.remove((
+                property_shape,
+                SH.datatype,
+                datatype_uri,
+            ))
+
+        alternatives_list = BNode()
+        Collection(
+            validation_shapes,
+            alternatives_list,
+            alternatives,
+        )
+
+        validation_shapes.add((
+            property_shape,
+            SH["or"],
+            alternatives_list,
+        ))
 
     property_shapes = set(validation_shapes.subjects(SH.path, None))
     linked_shapes = set(validation_shapes.objects(None, SH.property))
@@ -3703,7 +3823,7 @@ class ApplicationProfile:
     ) -> List[dict]:
         rows = await self.store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT ?propUri (SAMPLE(?order) AS ?order) WHERE {{
+            SELECT ?propUri (SAMPLE(?order) AS ?sortOrder) WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?propShape sh:path ?propUri .
                     OPTIONAL {{ ?propShape sh:order ?order }}
@@ -3729,7 +3849,7 @@ class ApplicationProfile:
             ):
                 continue
 
-            raw_order = row.get("order")
+            raw_order = row.get("sortOrder")
 
             properties_by_uri[prop_uri] = {
                 "uri": prop_uri,
@@ -3943,20 +4063,33 @@ class ApplicationProfile:
                 )
 
                 if class_ranges and datatype_ranges:
-                    raise HTTPException(
-                        409,
-                        f"Annotation property {prop_uri} has both class "
-                        "and datatype range constraints. The current form "
-                        "cannot represent both value kinds simultaneously.",
+                    if len(datatype_ranges) > 1:
+                        raise HTTPException(
+                            409,
+                            f"Annotation property {prop_uri} has multiple "
+                            "effective datatype ranges, which cannot yet "
+                            "be represented by the current metadata form.",
+                        )
+
+                    # A mixed annotation property accepts either a
+                    # resource in one of its class ranges or a literal
+                    # in its datatype range.
+                    ptype = "mixed"
+                    ranges = class_ranges
+                    datatype = str(datatype_ranges[0])
+                    suggestions = await get_instance_suggestions(
+                        ranges
                     )
 
-                if class_ranges:
+                elif class_ranges:
                     ptype = "object"
                     ranges = class_ranges
                     datatype = (
                         "http://www.w3.org/2001/XMLSchema#string"
                     )
-                    suggestions = await get_instance_suggestions(ranges)
+                    suggestions = await get_instance_suggestions(
+                        ranges
+                    )
 
                 elif datatype_ranges:
                     if len(datatype_ranges) > 1:
@@ -4348,8 +4481,9 @@ class SHACLProfile:
         self,
         shapes_graph: Graph,
         prop_uri: str,
+        value: object | None = None,
     ) -> Optional[str]:
-        """Resolve a property's datatype from SHACL, then ontology ranges."""
+        """Resolve the literal datatype for a submitted property value."""
         property_uri = URIRef(prop_uri)
 
         datatype_uris = {
@@ -4364,34 +4498,41 @@ class SHACLProfile:
             )
         }
 
+        class_uris = {
+            str(class_uri)
+            for property_shape in shapes_graph.subjects(
+                SH.path,
+                property_uri,
+            )
+            for class_uri in shapes_graph.objects(
+                property_shape,
+                SH["class"],
+            )
+        }
+
         if len(datatype_uris) > 1:
             raise HTTPException(
                 400,
                 f"Conflicting SHACL datatype constraints for {prop_uri}.",
             )
 
-        # An explicit SHACL datatype determines literal construction.
+        if (
+            _is_annotation_property(prop_uri)
+            and class_uris
+            and datatype_uris
+            and value is not None
+            and _is_iri_value(value)
+        ):
+            # An IRI value uses the resource alternative of the
+            # annotation property's effective range.
+            return None
+
         if datatype_uris:
             return next(iter(datatype_uris))
 
-        # An explicit SHACL class constraint indicates resource-valued objects.
-        has_class_constraint = any(
-            True
-            for property_shape in shapes_graph.subjects(
-                SH.path,
-                property_uri,
-            )
-            for _ in shapes_graph.objects(
-                property_shape,
-                SH["class"],
-            )
-        )
-
-        if has_class_constraint:
+        if class_uris:
             return None
 
-        # Fall back to ontology information only when SHACL has not
-        # specified a datatype or class constraint.
         if _get_property_type(prop_uri) == "datatype":
             ranges = get_property_ranges(prop_uri)
             if ranges:
@@ -4402,6 +4543,7 @@ class SHACLProfile:
     async def get_property_datatype(
         self,
         prop_uri: str,
+        value: object | None = None,
     ) -> Optional[str]:
         """Return the effective datatype for a metadata property."""
         try:
@@ -4415,6 +4557,9 @@ class SHACLProfile:
             effective_profile = profile_data.get("effective")
 
             if isinstance(effective_profile, dict):
+                class_values = _effective_profile_field_values(
+                    effective_profile.get(str(SH["class"]), [])
+                )
                 datatype_values = _effective_profile_field_values(
                     effective_profile.get(str(SH.datatype), [])
                 )
@@ -4428,6 +4573,16 @@ class SHACLProfile:
                             "by the current metadata form."
                         ),
                     )
+
+                if (
+                    profile_data.get("type") == "annotation_property"
+                    and class_values
+                    and datatype_values
+                    and value is not None
+                    and _is_iri_value(value)
+                ):
+                    # Resource-valued annotation property value.
+                    return None
 
                 if datatype_values:
                     return str(datatype_values[0])
@@ -4445,6 +4600,7 @@ class SHACLProfile:
         return await self._property_datatype_from_shapes(
             shapes_graph,
             prop_uri,
+            value=value,
         )
 
     def invalidate_shapes_cache(self):
@@ -5071,12 +5227,13 @@ class SHACLProfile:
             if not isinstance(vals, list):
                 vals = [vals]
 
-            datatype_uri = await self._property_datatype_from_shapes(
-                explicit_shapes,
-                pred,
-            )
-
             for val in vals:
+                datatype_uri = await self._property_datatype_from_shapes(
+                    explicit_shapes,
+                    pred,
+                    value=val,
+                )
+
                 if datatype_uri is not None:
                     literal = _metadata_literal(
                         val,
@@ -5112,17 +5269,15 @@ class SHACLProfile:
             if not isinstance(vals, list):
                 vals = [vals]
 
-            datatype_uri = await self._property_datatype_from_shapes(
-                explicit_shapes,
-                pred,
-            )
-
-            # A value with an explicit literal datatype is not a resource,
-            # even if its lexical value looks like a URL.
-            if datatype_uri is None:
-                reference_uris.update(
-                    val for val in vals if _is_iri_value(val)
+            for val in vals:
+                datatype_uri = await self._property_datatype_from_shapes(
+                    explicit_shapes,
+                    pred,
+                    value=val,
                 )
+
+                if datatype_uri is None and _is_iri_value(val):
+                    reference_uris.add(val)
 
         if reference_uris:
             reference_terms = " ".join(
@@ -7271,9 +7426,12 @@ async def create_instance(data: dict):
         if not isinstance(vals, list):
             vals = [vals]
 
-        datatype_uri = await shacl.get_property_datatype(pred)
-
         for val in vals:
+            datatype_uri = await shacl.get_property_datatype(
+                pred,
+                value=val,
+            )
+
             if datatype_uri is not None:
                 literal = _metadata_literal(
                     val,
@@ -7888,9 +8046,12 @@ async def update_instance(uri: str, data: dict):
         if not isinstance(vals, list):
             vals = [vals]
 
-        datatype_uri = await shacl.get_property_datatype(pred)
-
         for val in vals:
+            datatype_uri = await shacl.get_property_datatype(
+                pred,
+                value=val,
+            )
+
             if datatype_uri is not None:
                 literal = _metadata_literal(
                     val,
