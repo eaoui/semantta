@@ -812,7 +812,11 @@ async def _validate_metadata_profile_membership(
             )
 
         if not any(
-            _property_applies_to_class(class_uri, domains)
+            _property_applies_to_class(
+                class_uri,
+                domains,
+                active_classes,
+            )
             for class_uri in class_uris
         ):
             raise HTTPException(
@@ -985,6 +989,33 @@ def get_property_domains(prop: str) -> List[str]:
 def get_property_ranges(prop: str) -> List[str]:
     return _property_ranges.get(prop, [])
 
+async def _get_active_profile_classes(
+    profile_store: Optional[RDFStore] = None,
+) -> Set[str]:
+    """Return class URIs whose profile NodeShapes are not deactivated."""
+    target_store = profile_store or store
+
+    rows = await target_store.query(f"""
+        PREFIX sh: <http://www.w3.org/ns/shacl#>
+
+        SELECT DISTINCT ?class WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?shape
+                    a sh:NodeShape ;
+                    sh:targetClass ?class .
+
+                FILTER NOT EXISTS {{
+                    ?shape sh:deactivated true .
+                }}
+            }}
+        }}
+    """)
+
+    return {
+        row["class"]
+        for row in rows
+    }
+
 def is_subclass(cls: str, parents: list) -> bool:
     if not parents:
         return True
@@ -993,15 +1024,34 @@ def is_subclass(cls: str, parents: list) -> bool:
 def _property_applies_to_class(
     class_uri: str,
     effective_domains: List[str],
+    active_domain_classes: Optional[Set[str]] = None,
 ) -> bool:
-    """Check whether a property applies directly, by inheritance, or universally."""
+    """
+    Check direct or inherited applicability through active domain classes.
+
+    An empty domain retains the current universal interpretation.
+    This will change in Commit 4 when Universal becomes an explicit
+    SHACL PropertyGroup.
+    """
     if not effective_domains:
         return True
+
+    domains = effective_domains
+
+    if active_domain_classes is not None:
+        domains = [
+            domain
+            for domain in effective_domains
+            if domain in active_domain_classes
+        ]
+
+        if not domains:
+            return False
 
     return any(
         class_uri == domain_uri
         or is_subclass(class_uri, [domain_uri])
-        for domain_uri in effective_domains
+        for domain_uri in domains
     )
 
 def _get_class_ancestor_index() -> Dict[str, List[str]]:
@@ -3815,6 +3865,10 @@ class ApplicationProfile:
 
         effective_domains = await self._get_shacl_domains()
 
+        active_domain_classes = await _get_active_profile_classes(
+            self.store,
+        )
+
         properties_by_uri = {}
 
         for row in rows:
@@ -3827,6 +3881,7 @@ class ApplicationProfile:
             if not _property_applies_to_class(
                 class_uri,
                 domains,
+                active_domain_classes,
             ):
                 continue
 
@@ -4227,6 +4282,7 @@ class ApplicationProfile:
         self,
         profile_store: Optional[RDFStore] = None,
     ) -> Dict[str, List[str]]:
+        """Resolve effective property domains from ontology defaults or SHACL overrides."""
         target_store = profile_store or self.store
         use_cache = target_store is self.store
 
@@ -4238,6 +4294,7 @@ class ApplicationProfile:
             SELECT DISTINCT ?propUri ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?propShape sh:path ?propUri .
+
                     OPTIONAL {{
                         ?classShape
                             sh:targetClass ?class ;
@@ -4277,6 +4334,7 @@ class ApplicationProfile:
             mode = row["mode"]
 
             previous = stored_modes.get(prop_uri)
+
             if previous is not None and previous != mode:
                 raise HTTPException(
                     500,
@@ -4284,51 +4342,38 @@ class ApplicationProfile:
                     f"property {prop_uri}.",
                 )
 
+            if mode not in {
+                PROFILE_FIELD_MODE_DEFAULT,
+                PROFILE_FIELD_MODE_OVERRIDE,
+            }:
+                raise HTTPException(
+                    500,
+                    f"Invalid stored domain field mode for property {prop_uri}.",
+                )
+
             stored_modes[prop_uri] = mode
+
+        # A stored domain-mode record can exist independently of the
+        # property's current ontology index or shape discovery.
+        property_uris.update(stored_modes)
 
         mapping: Dict[str, List[str]] = {}
 
         for prop_uri in sorted(property_uris):
-            ontology_domains = sorted(
-                set(get_property_domains(prop_uri))
+            mode = stored_modes.get(
+                prop_uri,
+                PROFILE_FIELD_MODE_DEFAULT,
             )
 
-            original = {
-                "urn:domainClasses": ontology_domains,
-            }
-
-            overrides = {}
-
-            if linked_domains.get(prop_uri):
-                overrides["urn:domainClasses"] = sorted(
-                    linked_domains[prop_uri]
+            if mode == PROFILE_FIELD_MODE_DEFAULT:
+                mapping[prop_uri] = sorted(
+                    set(get_property_domains(prop_uri))
                 )
 
-            modes = {}
-
-            if prop_uri in stored_modes:
-                modes["urn:domainClasses"] = stored_modes[prop_uri]
-
-            field_modes = _resolve_profile_field_modes(
-                "object_property",
-                original,
-                overrides,
-                modes,
-            )
-
-            effective = _resolve_effective_profile_constraints(
-                "object_property",
-                original,
-                overrides,
-                field_modes,
-            )
-
-            mapping[prop_uri] = sorted(set(
-                str(domain)
-                for domain in _effective_profile_field_values(
-                    effective.get("urn:domainClasses", [])
+            else:
+                mapping[prop_uri] = sorted(
+                    linked_domains.get(prop_uri, set())
                 )
-            ))
 
         if use_cache:
             self._cached_domains = mapping
@@ -4709,7 +4754,7 @@ class SHACLProfile:
 
         self._changed()
 
-        await _synchronize_active_property_domain_links(
+        await _reconcile_property_domain_links(
             profile_store=self.store,
         )
 
@@ -4736,6 +4781,7 @@ class SHACLProfile:
 
         await self.store.update(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
+
             INSERT {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     <{prop_shape_uri}>
@@ -4752,6 +4798,13 @@ class SHACLProfile:
             }}
         """)
 
+        # Adding a property to a class explicitly activates its
+        # global PropertyShape, if it was previously deactivated.
+        await self._set_shape_deactivated(
+            prop_shape_uri,
+            False,
+        )
+
         await self._set_default_constraints(
             prop_uri,
             class_uri,
@@ -4763,37 +4816,83 @@ class SHACLProfile:
             profile_store=self.store,
         )
 
-        new_domains = set(
+        current_domains = set(
             effective_domains.get(
                 prop_uri,
                 get_property_domains(prop_uri),
             )
         )
-        new_domains.add(class_uri)
 
-        mode = (
-            PROFILE_FIELD_MODE_DEFAULT
-            if new_domains == set(get_property_domains(prop_uri))
-            else PROFILE_FIELD_MODE_OVERRIDE
+        new_domains = current_domains | {class_uri}
+
+        stored_modes = await _load_stored_profile_field_modes(
+            prop_uri,
+            self.store,
         )
+
+        mode = stored_modes.get(
+            "urn:domainClasses",
+            PROFILE_FIELD_MODE_DEFAULT,
+        )
+
+        # Preserve an existing override, including one equal to the
+        # current ontology default. A changed domain selection is an
+        # explicit override.
+        if new_domains != current_domains:
+            mode = PROFILE_FIELD_MODE_OVERRIDE
 
         await _replace_property_domain_links(
             prop_uri,
             sorted(new_domains),
             profile_store=self.store,
-            activate_missing_classes=True,
         )
 
         await _persist_profile_field_modes(
             prop_uri,
-            {"urn:domainClasses": mode},
+            {
+                "urn:domainClasses": mode,
+            },
             self.store,
         )
 
         self._changed()
 
-    async def remove_property_from_class(self, class_uri: str, prop_uri: str):
-        await self.store.remove_property_shape(class_uri, prop_uri, state["prefix_map"])
+    async def remove_property_from_class(
+        self,
+        class_uri: str,
+        prop_uri: str,
+    ):
+        effective_domains = await ap._get_shacl_domains(
+            profile_store=self.store,
+        )
+
+        current_domains = set(
+            effective_domains.get(prop_uri, [])
+        )
+
+        if class_uri not in current_domains:
+            raise HTTPException(
+                400,
+                f"Property {prop_uri} is not directly associated "
+                f"with class {class_uri}.",
+            )
+
+        current_domains.remove(class_uri)
+
+        await _replace_property_domain_links(
+            prop_uri,
+            sorted(current_domains),
+            profile_store=self.store,
+        )
+
+        await _persist_profile_field_modes(
+            prop_uri,
+            {
+                "urn:domainClasses": PROFILE_FIELD_MODE_OVERRIDE,
+            },
+            self.store,
+        )
+
         self._changed()
 
     async def add_datatype(self, uri: str):
@@ -4885,7 +4984,7 @@ class SHACLProfile:
 
         self._changed()
 
-        await _synchronize_active_property_domain_links(
+        await _reconcile_property_domain_links(
             profile_store=self.store,
             property_uris={prop_uri},
         )
@@ -5082,6 +5181,7 @@ class SHACLProfile:
         """)
 
         pairs = defaultdict(set)
+        observed_domains_by_property = defaultdict(set)
 
         for row in pair_rows:
             class_uri = row.get("class")
@@ -5092,6 +5192,36 @@ class SHACLProfile:
                 and prop_uri in property_uris
             ):
                 pairs[class_uri].add(prop_uri)
+                observed_domains_by_property[prop_uri].add(class_uri)
+
+        metadata_domain_overrides = set()
+
+        for prop_uri in sorted(observed_domains_by_property):
+            stored_modes = await _load_stored_profile_field_modes(
+                prop_uri,
+                profile_store=self.store,
+            )
+
+            # Preserve every existing explicit default or override.
+            if "urn:domainClasses" in stored_modes:
+                continue
+
+            # Nonempty ontology domains remain authoritative defaults.
+            if get_property_domains(prop_uri):
+                continue
+
+            # Metadata usage provides the initial profile-specific
+            # domain selection when no ontology domain exists.
+            metadata_domain_overrides.add(prop_uri)
+
+            await _persist_profile_field_modes(
+                prop_uri,
+                {
+                    "urn:domainClasses":
+                        PROFILE_FIELD_MODE_OVERRIDE,
+                },
+                profile_store=self.store,
+            )
 
         shape_triples = []
 
@@ -5159,18 +5289,14 @@ class SHACLProfile:
                 f"{_sparql_iri(individual_uri, 'individual URI')} ."
             )
 
-        # Profile generation is additive. Do not call _sync_entity_links()
-        # here because its class-editing behavior replaces the complete
-        # property-link set.
+        # Only newly generated, unconfigured properties receive
+        # metadata-derived domain overrides.
+        #
+        # Existing defaults and overrides are reconstructed by the
+        # centralized domain reconciler.
         for class_uri, props in pairs.items():
             for prop_uri in sorted(props):
-                domains = get_property_domains(prop_uri)
-
-                if domains and not any(
-                    is_subclass(class_uri, [domain])
-                    or class_uri == domain
-                    for domain in domains
-                ):
+                if prop_uri not in metadata_domain_overrides:
                     continue
 
                 class_shape_uri = _sparql_iri(
@@ -5203,6 +5329,39 @@ class SHACLProfile:
                 INSERT DATA {{
                     GRAPH <{SHAPES_GRAPH}> {{
                         {" ".join(shape_triples)}
+                    }}
+                }}
+            """)
+
+        activated_shape_uris = {
+            shape_uri_for_entity(uri, role, state["prefix_map"])
+            for role, uris in (
+                ("class", class_uris),
+                ("property", property_uris),
+                ("datatype", datatype_uris),
+                ("individual", individual_uris),
+            )
+            for uri in uris
+        }
+
+        if activated_shape_uris:
+            shape_values = " ".join(
+                _sparql_iri(uri, "SHACL shape URI")
+                for uri in sorted(activated_shape_uris)
+            )
+
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:deactivated ?existing .
+                    }}
+                }}
+                WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        VALUES ?shape {{ {shape_values} }}
+                        ?shape sh:deactivated ?existing .
                     }}
                 }}
             """)
@@ -5279,6 +5438,10 @@ class SHACLProfile:
             state["non_integrated_uris"].discard(uri)
 
         self._changed()
+        await _reconcile_property_domain_links(
+            profile_store=self.store,
+            property_uris=property_uris,
+        )
         return entities
 
     async def generate_from_metadata(self):
@@ -5536,20 +5699,47 @@ class SHACLProfile:
 #  Sync Entity Links
 # ---------------------------------------------------------------------------
 
+async def _get_profile_class_shape_map(
+    profile_store: RDFStore,
+) -> Dict[str, Set[str]]:
+    """Return all class NodeShapes, including deactivated shapes."""
+    rows = await profile_store.query(f"""
+        PREFIX sh: <http://www.w3.org/ns/shacl#>
+
+        SELECT DISTINCT ?class ?classShape WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?classShape
+                    a sh:NodeShape ;
+                    sh:targetClass ?class .
+            }}
+        }}
+    """)
+
+    result: Dict[str, Set[str]] = defaultdict(set)
+
+    for row in rows:
+        result[row["class"]].add(row["classShape"])
+
+    return result
+
 async def _replace_property_domain_links(
     prop_uri: str,
     domain_classes: List[str],
     profile_store: Optional[RDFStore] = None,
-    activate_missing_classes: bool = False,
 ) -> None:
-    """Replace the direct class associations of a property."""
+    """Replace a property's complete direct class-domain associations."""
     target_store = profile_store or store
 
-    if not isinstance(domain_classes, list):
+    if (
+        not isinstance(domain_classes, list)
+        or any(not isinstance(uri, str) for uri in domain_classes)
+    ):
         raise HTTPException(
             400,
-            "Domain Classes must be a list.",
+            "Domain Classes must be a list of class URIs.",
         )
+
+    _sparql_iri(prop_uri, "property URI")
 
     domain_classes = sorted(set(domain_classes))
 
@@ -5561,93 +5751,98 @@ async def _replace_property_domain_links(
         "property",
         state["prefix_map"],
     )
+
     prop_shape_ref = _sparql_iri(
         prop_shape_uri,
         "property shape URI",
     )
 
-    class_rows = await target_store.query(f"""
-        PREFIX sh: <http://www.w3.org/ns/shacl#>
-        SELECT DISTINCT ?class ?classShape WHERE {{
-            GRAPH <{SHAPES_GRAPH}> {{
-                ?classShape
-                    a sh:NodeShape ;
-                    sh:targetClass ?class .
-            }}
-        }}
-    """)
+    class_shapes = await _get_profile_class_shape_map(
+        target_store,
+    )
 
-    class_shapes: Dict[str, set[str]] = defaultdict(set)
-
-    for row in class_rows:
-        class_shapes[row["class"]].add(row["classShape"])
-
-    inactive_domains = set(domain_classes) - set(class_shapes)
-
-    if inactive_domains and not activate_missing_classes:
-        raise HTTPException(
-            400,
-            (
-                "Domain Classes must be active in the Application "
-                "Profile: "
-                + ", ".join(sorted(inactive_domains))
-            ),
-        )
-
-    triples = []
+    insert_triples: set[str] = set()
 
     for class_uri in domain_classes:
         existing_shapes = class_shapes.get(class_uri)
 
-        if existing_shapes:
-            for class_shape_uri in existing_shapes:
-                triples.append(
-                    f"{_sparql_iri(class_shape_uri, 'class shape URI')} "
-                    f"sh:property {prop_shape_ref} ."
-                )
-        else:
-            # This is permitted for explicit associations, but not for
-            # default-domain reconciliation.
+        if not existing_shapes:
+            # Preserve this domain without activating its class.
             class_shape_uri = shape_uri_for_entity(
                 class_uri,
                 "class",
                 state["prefix_map"],
             )
 
-            triples.append(
-                f"{_sparql_iri(class_shape_uri, 'class shape URI')} "
+            class_shapes[class_uri] = {class_shape_uri}
+
+            class_shape_ref = _sparql_iri(
+                class_shape_uri,
+                "class shape URI",
+            )
+
+            class_ref = _sparql_iri(
+                class_uri,
+                "domain class URI",
+            )
+
+            insert_triples.add(
+                f"{class_shape_ref} "
                 f"a sh:NodeShape ; "
-                f"sh:targetClass "
-                f"{_sparql_iri(class_uri, 'domain class URI')} ; "
+                f"sh:targetClass {class_ref} ; "
+                f"sh:deactivated true ."
+            )
+
+            existing_shapes = class_shapes[class_uri]
+
+        for class_shape_uri in existing_shapes:
+            insert_triples.add(
+                f"{_sparql_iri(class_shape_uri, 'class shape URI')} "
                 f"sh:property {prop_shape_ref} ."
             )
 
     updates = [f"""
         PREFIX sh: <http://www.w3.org/ns/shacl#>
-        DELETE WHERE {{
+
+        DELETE {{
             GRAPH <{SHAPES_GRAPH}> {{
                 ?classShape sh:property {prop_shape_ref} .
             }}
         }}
+        WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?classShape
+                    a sh:NodeShape ;
+                    sh:targetClass ?class ;
+                    sh:property {prop_shape_ref} .
+            }}
+        }}
     """]
 
-    if triples:
+    if insert_triples:
         updates.append(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
+
             INSERT DATA {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    {" ".join(sorted(set(triples)))}
+                    {" ".join(sorted(insert_triples))}
                 }}
             }}
         """)
 
     await target_store.update(";\n".join(updates))
 
-async def _synchronize_active_property_domain_links(
+async def _reconcile_property_domain_links(
     profile_store: Optional[RDFStore] = None,
     property_uris: Optional[Set[str]] = None,
 ) -> None:
-    """Reconcile SHACL class-property links with effective property domains."""
+    """
+    Rebuild SHACL class-property associations from effective domains.
+
+    Domain values come from the Application Profile resolver.
+    Missing class shapes are materialized as deactivated NodeShapes.
+    Existing inactive class and property shapes remain preserved.
+    """
     target_store = profile_store or store
 
     if target_store is ap.store:
@@ -5657,19 +5852,13 @@ async def _synchronize_active_property_domain_links(
         profile_store=target_store,
     )
 
-    class_rows = await target_store.query(f"""
-        PREFIX sh: <http://www.w3.org/ns/shacl#>
-        SELECT DISTINCT ?class ?classShape WHERE {{
-            GRAPH <{SHAPES_GRAPH}> {{
-                ?classShape
-                    a sh:NodeShape ;
-                    sh:targetClass ?class .
-            }}
-        }}
-    """)
+    class_shapes = await _get_profile_class_shape_map(
+        target_store,
+    )
 
     property_rows = await target_store.query(f"""
         PREFIX sh: <http://www.w3.org/ns/shacl#>
+
         SELECT DISTINCT ?propUri ?propShape WHERE {{
             GRAPH <{SHAPES_GRAPH}> {{
                 ?propShape sh:path ?propUri .
@@ -5677,12 +5866,7 @@ async def _synchronize_active_property_domain_links(
         }}
     """)
 
-    class_shapes: Dict[str, set[str]] = defaultdict(set)
-
-    for row in class_rows:
-        class_shapes[row["class"]].add(row["classShape"])
-
-    property_shapes: Dict[str, set[str]] = defaultdict(set)
+    property_shapes: Dict[str, Set[str]] = defaultdict(set)
 
     for row in property_rows:
         prop_uri = row["propUri"]
@@ -5706,17 +5890,35 @@ async def _synchronize_active_property_domain_links(
         for uri in all_shape_uris
     )
 
-    triples = []
+    insert_triples: set[str] = set()
 
     for prop_uri, prop_shapes in property_shapes.items():
         domains = effective_domains.get(prop_uri, [])
 
         for domain_uri in domains:
-            # Default domains that are not active must remain ontology
-            # defaults; do not activate those classes here.
-            for class_shape_uri in class_shapes.get(domain_uri, set()):
+            domain_shapes = class_shapes.get(domain_uri)
+
+            if not domain_shapes:
+                class_shape_uri = shape_uri_for_entity(
+                    domain_uri,
+                    "class",
+                    state["prefix_map"],
+                )
+
+                class_shapes[domain_uri] = {class_shape_uri}
+                domain_shapes = class_shapes[domain_uri]
+
+                insert_triples.add(
+                    f"{_sparql_iri(class_shape_uri, 'class shape URI')} "
+                    f"a sh:NodeShape ; "
+                    f"sh:targetClass "
+                    f"{_sparql_iri(domain_uri, 'domain class URI')} ; "
+                    f"sh:deactivated true ."
+                )
+
+            for class_shape_uri in domain_shapes:
                 for prop_shape_uri in prop_shapes:
-                    triples.append(
+                    insert_triples.add(
                         f"{_sparql_iri(class_shape_uri, 'class shape URI')} "
                         f"sh:property "
                         f"{_sparql_iri(prop_shape_uri, 'property shape URI')} ."
@@ -5724,6 +5926,7 @@ async def _synchronize_active_property_domain_links(
 
     updates = [f"""
         PREFIX sh: <http://www.w3.org/ns/shacl#>
+
         DELETE {{
             GRAPH <{SHAPES_GRAPH}> {{
                 ?classShape sh:property ?propShape .
@@ -5732,29 +5935,36 @@ async def _synchronize_active_property_domain_links(
         WHERE {{
             GRAPH <{SHAPES_GRAPH}> {{
                 VALUES ?propShape {{ {shape_values} }}
-                ?classShape sh:property ?propShape .
+
+                ?classShape
+                    a sh:NodeShape ;
+                    sh:targetClass ?class ;
+                    sh:property ?propShape .
             }}
         }}
     """]
 
-    if triples:
+    if insert_triples:
         updates.append(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
+
             INSERT DATA {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    {" ".join(sorted(set(triples)))}
+                    {" ".join(sorted(insert_triples))}
                 }}
             }}
         """)
 
     await target_store.update(";\n".join(updates))
 
+    if target_store is ap.store:
+        ap.invalidate()
+
 async def _sync_entity_links(
     entity_uri: str,
     etype: str,
     linked_uris: List[str],
     profile_store: Optional[RDFStore] = None,
-    activate_missing_classes: bool = False,
 ):
     property_types = {
         "object_property",
@@ -5786,7 +5996,6 @@ async def _sync_entity_links(
             entity_uri,
             linked_uris,
             profile_store=target_store,
-            activate_missing_classes=activate_missing_classes,
         )
         return
 
@@ -5800,7 +6009,7 @@ async def _sync_entity_links(
                     sh:targetClass ?class .
 
                 FILTER NOT EXISTS {{
-                    ?classShape sh:deactivated true
+                    ?shape sh:deactivated true
                 }}
             }}
         }}
@@ -5871,9 +6080,7 @@ async def _sync_entity_links(
                 ),
             )
 
-    changed_properties = (
-        current_properties ^ desired_properties
-    )
+    changed_properties = current_properties ^ desired_properties
 
     for prop_uri in sorted(changed_properties):
         new_domains = set(
@@ -5885,29 +6092,16 @@ async def _sync_entity_links(
         else:
             new_domains.discard(entity_uri)
 
-        ontology_domains = set(
-            get_property_domains(prop_uri)
-        )
-
-        mode = (
-            PROFILE_FIELD_MODE_DEFAULT
-            if new_domains == ontology_domains
-            else PROFILE_FIELD_MODE_OVERRIDE
-        )
-
         await _replace_property_domain_links(
             prop_uri,
             sorted(new_domains),
             profile_store=target_store,
-            activate_missing_classes=(
-                mode == PROFILE_FIELD_MODE_OVERRIDE
-            ),
         )
 
         await _persist_profile_field_modes(
             prop_uri,
             {
-                "urn:domainClasses": mode,
+                "urn:domainClasses": PROFILE_FIELD_MODE_OVERRIDE,
             },
             target_store,
         )
@@ -6407,7 +6601,7 @@ async def lifespan(app: FastAPI):
         set_active_theme(active_theme)
 
         await seed_core_active_entities()
-        await _synchronize_active_property_domain_links(
+        await _reconcile_property_domain_links(
             profile_store=store,
         )
 
@@ -6752,7 +6946,7 @@ async def upload_ontology(file: UploadFile = File(...)):
         await ap.resolve_entity_with_ontology(e["uri"])
     invalidate_caches()
     ap.invalidate()
-    await _synchronize_active_property_domain_links(
+    await _reconcile_property_domain_links(
         profile_store=store,
     )
     return {"status": "ok", "filename": filename}
@@ -6821,7 +7015,7 @@ async def delete_ontology(filename: str):
     active_props = await shacl.get_active_properties()
     for prop_uri in active_props:
         await shacl._set_default_constraints(prop_uri, class_uri=None)
-    await _synchronize_active_property_domain_links(
+    await _reconcile_property_domain_links(
         profile_store=store,
     )
     return {"status": "ok"}
@@ -8642,12 +8836,17 @@ async def get_entity_constraints(entity_uri: str):
     inherited_properties = []
 
     if etype in ("object_property", "datatype_property", "annotation_property"):
+        property_ref = _sparql_iri(
+            entity_uri,
+            "property URI",
+        )
+
         rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
             SELECT ?pred ?val WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?ps sh:path <{entity_uri}> ; ?pred ?val .
+                    ?ps sh:path {property_ref} ; ?pred ?val .
                     FILTER(?pred NOT IN (sh:path, sh:order, rdf:type))
                 }}
             }}
@@ -8659,17 +8858,30 @@ async def get_entity_constraints(entity_uri: str):
             if pred in multi_valued or len(vals) > 1: overrides[pred] = vals
             else: overrides[pred] = vals[0]
 
-        prop_shape_uri = shape_uri_for_entity(entity_uri, "property", state["prefix_map"])
         domain_rows = await store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT ?class WHERE {{
+
+            SELECT DISTINCT ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?classShape sh:targetClass ?class ; sh:property <{prop_shape_uri}> .
+                    ?propertyShape
+                        sh:path {property_ref} .
+
+                    ?classShape
+                        a sh:NodeShape ;
+                        sh:targetClass ?class ;
+                        sh:property ?propertyShape .
                 }}
             }}
         """)
-        domain_classes = [r["class"] for r in domain_rows]
-        if domain_classes: overrides["urn:domainClasses"] = domain_classes
+
+        domain_classes = sorted({
+            row["class"]
+            for row in domain_rows
+        })
+
+        if domain_classes:
+            overrides["urn:domainClasses"] = domain_classes
+            
         orig_domains = get_property_domains(entity_uri)
         original["urn:domainClasses"] = orig_domains if orig_domains else []
 
@@ -8723,6 +8935,10 @@ async def get_entity_constraints(entity_uri: str):
 
         active_properties = await shacl.get_active_properties()
 
+        active_domain_classes = set(
+            await shacl.get_active_classes()
+        )
+
         effective_domains = await ap._get_shacl_domains()
 
         original_props = sorted(
@@ -8752,6 +8968,7 @@ async def get_entity_constraints(entity_uri: str):
                 and _property_applies_to_class(
                     entity_uri,
                     effective_domains[prop_uri],
+                    active_domain_classes,
                 )
             )
         )
@@ -8762,6 +8979,18 @@ async def get_entity_constraints(entity_uri: str):
     stored_modes = await _load_stored_profile_field_modes(
         entity_uri,
     )
+
+    if etype in {
+        "object_property",
+        "datatype_property",
+        "annotation_property",
+    }:
+        # Domain Classes are ontology-derived by default.
+        # Incomplete SHACL links must not imply an override.
+        stored_modes.setdefault(
+            "urn:domainClasses",
+            PROFILE_FIELD_MODE_DEFAULT,
+        )
 
     if etype == "class":
         # Ignore legacy class-side relationship modes.
@@ -8892,51 +9121,42 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
 
             domain_classes = sorted(set(domain_classes))
 
+            existing_modes = await _load_stored_profile_field_modes(
+                entity_uri,
+                profile_store=store,
+            )
+
             if field_modes is None:
                 field_modes = {}
 
-            ontology_domains = set(
-                get_property_domains(entity_uri)
-            )
-
+            # Missing state means default. Never infer the domain mode
+            # from equality between values and ontology defaults.
             domain_mode = field_modes.get(
-                domain_classes_key
+                domain_classes_key,
+                existing_modes.get(
+                    domain_classes_key,
+                    PROFILE_FIELD_MODE_DEFAULT,
+                ),
             )
 
-            if domain_mode is None:
-                domain_mode = (
-                    PROFILE_FIELD_MODE_DEFAULT
-                    if set(domain_classes) == ontology_domains
-                    else PROFILE_FIELD_MODE_OVERRIDE
-                )
+            ontology_domains = sorted(
+                set(get_property_domains(entity_uri))
+            )
 
-            if domain_mode == PROFILE_FIELD_MODE_DEFAULT:
-                # The ontology remains authoritative in default mode.
-                effective_domains = sorted(ontology_domains)
-
-                active_classes = set(
-                    await shacl.get_active_classes()
-                )
-
-                domains_to_sync = [
-                    uri
-                    for uri in effective_domains
-                    if uri in active_classes
-                ]
-
-            else:
-                # Explicit overrides may create class shapes for
-                # selected domain classes that are not active yet.
-                domains_to_sync = domain_classes
+            # Default mode always synchronizes the complete ontology
+            # domain list, including inactive and never-activated classes.
+            # Override mode synchronizes the explicitly selected values.
+            domains_to_sync = (
+                ontology_domains
+                if domain_mode == PROFILE_FIELD_MODE_DEFAULT
+                else domain_classes
+            )
 
             await _sync_entity_links(
                 entity_uri,
                 etype,
                 domains_to_sync,
                 profile_store=store,
-                activate_missing_classes=(
-                    domain_mode == PROFILE_FIELD_MODE_OVERRIDE
-                ),
             )
 
             field_modes[domain_classes_key] = domain_mode

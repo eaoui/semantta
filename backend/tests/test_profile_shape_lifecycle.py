@@ -237,7 +237,7 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
     sync_domains = AsyncMock()
     monkeypatch.setattr(
         main,
-        "_synchronize_active_property_domain_links",
+        "_reconcile_property_domain_links",
         sync_domains,
     )
 
@@ -510,6 +510,13 @@ async def test_domain_resolution_retains_links_to_deactivated_classes(
         Literal(True),
     ))
 
+    add_field_mode_record(
+        dataset,
+        property_uri,
+        "urn:domainClasses",
+        main.PROFILE_FIELD_MODE_OVERRIDE,
+    )
+
     monkeypatch.setattr(
         main,
         "get_property_domains",
@@ -624,7 +631,7 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
     )
     monkeypatch.setattr(
         main,
-        "_synchronize_active_property_domain_links",
+        "_reconcile_property_domain_links",
         synchronize_domains,
     )
 

@@ -202,6 +202,14 @@ async def test_list_active_properties_includes_direct_inherited_and_universal(
         },
     )
 
+    monkeypatch.setattr(
+        main,
+        "_get_active_profile_classes",
+        AsyncMock(
+            return_value={BOOK, RESOURCE, ARTICLE}
+        ),
+    )
+
     result = await profile._list_active_properties(BOOK)
 
     result_uris = [item["uri"] for item in result]
@@ -238,6 +246,12 @@ async def test_unlinked_property_with_nonempty_default_domain_is_not_universal(
         ),
     )
 
+    monkeypatch.setattr(
+        main,
+        "_get_active_profile_classes",
+        AsyncMock(return_value=set()),
+    )
+
     result = await profile._list_active_properties(BOOK)
 
     assert result == []
@@ -246,64 +260,6 @@ async def test_unlinked_property_with_nonempty_default_domain_is_not_universal(
 # ---------------------------------------------------------------------------
 # Materializing and removing SHACL associations
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_default_domain_reconciliation_links_only_active_domain_classes(
-    monkeypatch,
-):
-    store = AsyncMock()
-
-    store.query.side_effect = [
-        [
-            {
-                "class": BOOK,
-                "classShape": BOOK_SHAPE,
-            },
-            {
-                "class": ARTICLE,
-                "classShape": ARTICLE_SHAPE,
-            },
-        ],
-        [
-            {
-                "propUri": DIRECT_PROPERTY,
-                "propShape": TITLE_SHAPE,
-            },
-            {
-                "propUri": UNIVERSAL_PROPERTY,
-                "propShape": GLOBAL_SHAPE,
-            },
-        ],
-    ]
-
-    monkeypatch.setattr(
-        main.ap,
-        "_get_shacl_domains",
-        AsyncMock(
-            return_value={
-                DIRECT_PROPERTY: [BOOK],
-                UNIVERSAL_PROPERTY: [],
-            }
-        ),
-    )
-
-    await main._synchronize_active_property_domain_links(
-        profile_store=store,
-    )
-
-    store.update.assert_awaited_once()
-
-    update = store.update.await_args.args[0]
-
-    assert "INSERT DATA" in update
-    assert BOOK_SHAPE in update
-    assert TITLE_SHAPE in update
-
-    # The universal property must not receive a class association.
-    insert_section = update.split("INSERT DATA", 1)[1]
-    assert GLOBAL_SHAPE not in insert_section
-    assert ARTICLE_SHAPE not in insert_section
-
 
 @pytest.mark.asyncio
 async def test_replace_property_domain_links_writes_inverse_association(
@@ -336,7 +292,8 @@ async def test_replace_property_domain_links_writes_inverse_association(
 
     update = store.update.await_args.args[0]
 
-    assert "DELETE WHERE" in update
+    assert "DELETE {" in update
+    assert "WHERE" in update
     assert "INSERT DATA" in update
     assert BOOK_SHAPE in update
     assert TITLE_SHAPE in update
@@ -368,7 +325,8 @@ async def test_empty_domain_override_removes_all_class_links(
 
     update = store.update.await_args.args[0]
 
-    assert "DELETE WHERE" in update
+    assert "DELETE {" in update
+    assert "WHERE" in update
     assert "sh:property" in update
     assert "INSERT DATA" not in update
 
@@ -617,6 +575,22 @@ async def test_add_property_to_class_does_not_require_preexisting_profile_entity
         persist_modes,
     )
 
+    set_deactivated_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        profile,
+        "_set_shape_deactivated",
+        set_deactivated_mock,
+    )
+
+    load_modes_mock = AsyncMock(return_value={})
+
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        load_modes_mock,
+    )
+
     await profile.add_property_to_class(
         BOOK,
         DIRECT_PROPERTY,
@@ -624,6 +598,29 @@ async def test_add_property_to_class_does_not_require_preexisting_profile_entity
 
     get_entity_type_mock.assert_not_awaited()
     set_default_constraints_mock.assert_awaited_once()
+
+    set_deactivated_mock.assert_awaited_once_with(
+        main.shape_uri_for_entity(
+            DIRECT_PROPERTY,
+            "property",
+            main.state["prefix_map"],
+        ),
+        False,
+    )
+
+    replace_links.assert_awaited_once_with(
+        DIRECT_PROPERTY,
+        [BOOK],
+        profile_store=store,
+    )
+
+    persist_modes.assert_awaited_once_with(
+        DIRECT_PROPERTY,
+        {
+            "urn:domainClasses": main.PROFILE_FIELD_MODE_DEFAULT,
+        },
+        store,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +701,19 @@ async def test_class_constraints_expose_direct_inherited_and_universal_propertie
         {
             (BOOK, RESOURCE),
         },
+    )
+
+    monkeypatch.setattr(
+        main.shacl,
+        "get_active_classes",
+        AsyncMock(
+            return_value=[
+                BOOK,
+                RESOURCE,
+                ARTICLE,
+                PERSON,
+            ]
+        ),
     )
 
     result = await main.get_entity_constraints(BOOK)
@@ -869,11 +879,17 @@ async def test_list_active_properties_uses_distinct_aggregate_alias(
         AsyncMock(return_value={}),
     )
 
+    monkeypatch.setattr(
+        main,
+        "_get_active_profile_classes",
+        AsyncMock(return_value=set()),
+    )
+
     result = await profile._list_active_properties(BOOK)
 
     assert result == []
 
-    query = store.query.await_args.args[0]
+    query = store.query.await_args_list[0].args[0]
 
     assert "SAMPLE(?order) AS ?sortOrder" in query
     assert "SAMPLE(?order) AS ?order" not in query

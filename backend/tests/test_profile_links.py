@@ -18,34 +18,40 @@ INVALID_PROPERTY_URI = "http://example.org/unknownProperty"
 
 
 @pytest.mark.asyncio
-async def test_property_links_validate_before_mutation(monkeypatch):
+async def test_property_links_can_materialize_inactive_domain_class(
+    monkeypatch,
+):
     store = AsyncMock()
-    store.query.return_value = [
-        {
-            "class": CLASS_URI,
-            "classShape": "urn:test:BookShape",
-        }
-    ]
+    store.query.return_value = []
 
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(
-        main, "get_property_domains",
-        lambda _: [CLASS_URI],
+        main,
+        "shape_uri_for_entity",
+        lambda uri, role, prefix_map: (
+            "urn:test:property-shape"
+            if role == "property"
+            else "urn:test:class-shape"
+        ),
     )
-    monkeypatch.setattr(
-        main, "is_subclass",
-        lambda child, parents: False,
+    monkeypatch.setitem(main.state, "prefix_map", {})
+
+    await main._sync_entity_links(
+        PROPERTY_URI,
+        "object_property",
+        [OTHER_CLASS_URI],
+        profile_store=store,
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await main._sync_entity_links(
-            PROPERTY_URI,
-            "object_property",
-            [OTHER_CLASS_URI],
-        )
+    store.update.assert_awaited_once()
 
-    assert exc_info.value.status_code == 400
-    store.update.assert_not_awaited()
+    update = store.update.await_args.args[0]
+
+    assert OTHER_CLASS_URI in update
+    assert "urn:test:class-shape" in update
+    assert "urn:test:property-shape" in update
+    assert "sh:deactivated true" in update
+    assert "sh:property" in update
 
 
 @pytest.mark.asyncio
@@ -98,7 +104,8 @@ async def test_valid_link_replacement_uses_one_update(monkeypatch):
     store.update.assert_awaited_once()
 
     update = store.update.await_args.args[0]
-    assert "DELETE WHERE" in update
+    assert "DELETE {" in update
+    assert "WHERE" in update
     assert "INSERT DATA" in update
 
 
@@ -142,6 +149,11 @@ async def test_saving_empty_domain_classes_clears_relationships(
         "invalidate_profile",
         lambda: None
     )
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        AsyncMock(return_value={}),
+    )
 
     await main.set_entity_constraints(
         PROPERTY_URI,
@@ -160,7 +172,6 @@ async def test_saving_empty_domain_classes_clears_relationships(
         "datatype_property",
         [],
         profile_store=store,
-        activate_missing_classes=True,
     )
 
     apply_constraints.assert_awaited_once_with(
@@ -264,7 +275,8 @@ async def test_empty_property_domain_list_deletes_existing_links(
     store.update.assert_awaited_once()
     update = store.update.await_args.args[0]
 
-    assert "DELETE WHERE" in update
+    assert "DELETE {" in update
+    assert "WHERE" in update
     assert "INSERT DATA" not in update
     assert "sh:property" in update
 
@@ -324,7 +336,8 @@ async def test_empty_class_property_list_deletes_existing_links(
 
     update = store.update.await_args.args[0]
 
-    assert "DELETE WHERE" in update
+    assert "DELETE {" in update
+    assert "WHERE" in update
     assert "INSERT DATA" not in update
 
     persist_modes_mock.assert_awaited_once_with(
