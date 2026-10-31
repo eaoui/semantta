@@ -4674,7 +4674,15 @@ class SHACLProfile:
         self._shapes_cache = None
 
     async def _set_default_constraints(self, prop_uri: str, class_uri: Optional[str] = None):
-        shape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
+        shape_uri = shape_uri_for_entity(
+            prop_uri,
+            "property",
+            state["prefix_map"],
+        )
+        stored_modes = await _load_stored_profile_field_modes(
+            prop_uri,
+            profile_store=self.store,
+        )
         active_datatypes = set(await self.get_active_datatypes())
         ptype = _get_property_type(prop_uri, active_datatypes)
         ranges = get_property_ranges(prop_uri)
@@ -4725,6 +4733,11 @@ class SHACLProfile:
                 constraints[str(SH.maxCount)] = maxc
 
         for pred, val in constraints.items():
+            # An explicit override may intentionally have no SHACL value.
+            # Do not restore the ontology default in that case.
+            if stored_modes.get(pred) == PROFILE_FIELD_MODE_OVERRIDE:
+                continue
+
             val_triple = _format_constraint_value(pred, val)
             await self.store.update(f"""
                 INSERT {{
@@ -5164,61 +5177,58 @@ class SHACLProfile:
                 "No vocabulary entities found in metadata files.",
             )
 
-        graph_values = _metadata_graph_values(graph_uris)
+        existing_domains_by_property = defaultdict(set)
 
-        pair_rows = await self.store.query(f"""
-            PREFIX rdf: <{RDF}>
+        if property_uris:
+            property_values = " ".join(
+                _sparql_iri(prop_uri, "property URI")
+                for prop_uri in sorted(property_uris)
+            )
 
-            SELECT DISTINCT ?class ?prop WHERE {{
-                VALUES ?graph {{ {graph_values} }}
+            existing_domain_rows = await self.store.query(f"""
+                PREFIX sh: <http://www.w3.org/ns/shacl#>
 
-                GRAPH ?graph {{
-                    ?instance rdf:type ?class .
-                    ?instance ?prop ?value .
-                    FILTER(?prop != rdf:type)
+                SELECT DISTINCT ?propUri ?class WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        VALUES ?propUri {{ {property_values} }}
+
+                        ?propertyShape sh:path ?propUri .
+
+                        ?classShape
+                            a sh:NodeShape ;
+                            sh:targetClass ?class ;
+                            sh:property ?propertyShape .
+                    }}
                 }}
-            }}
-        """)
+            """)
 
-        pairs = defaultdict(set)
-        observed_domains_by_property = defaultdict(set)
+            for row in existing_domain_rows:
+                existing_domains_by_property[row["propUri"]].add(
+                    row["class"]
+                )
 
-        for row in pair_rows:
-            class_uri = row.get("class")
-            prop_uri = row.get("prop")
-
-            if (
-                class_uri in class_uris
-                and prop_uri in property_uris
-            ):
-                pairs[class_uri].add(prop_uri)
-                observed_domains_by_property[prop_uri].add(class_uri)
-
-        metadata_domain_overrides = set()
-
-        for prop_uri in sorted(observed_domains_by_property):
+        # Metadata occurrence does not establish a property's semantic
+        # domain. Preserve existing profile associations when no mode has
+        # been recorded; otherwise use the ontology-derived default.
+        for prop_uri in sorted(property_uris):
             stored_modes = await _load_stored_profile_field_modes(
                 prop_uri,
                 profile_store=self.store,
             )
 
-            # Preserve every existing explicit default or override.
             if "urn:domainClasses" in stored_modes:
                 continue
 
-            # Nonempty ontology domains remain authoritative defaults.
-            if get_property_domains(prop_uri):
-                continue
-
-            # Metadata usage provides the initial profile-specific
-            # domain selection when no ontology domain exists.
-            metadata_domain_overrides.add(prop_uri)
+            domain_mode = (
+                PROFILE_FIELD_MODE_OVERRIDE
+                if existing_domains_by_property.get(prop_uri)
+                else PROFILE_FIELD_MODE_DEFAULT
+            )
 
             await _persist_profile_field_modes(
                 prop_uri,
                 {
-                    "urn:domainClasses":
-                        PROFILE_FIELD_MODE_OVERRIDE,
+                    "urn:domainClasses": domain_mode,
                 },
                 profile_store=self.store,
             )
@@ -5288,39 +5298,6 @@ class SHACLProfile:
                 f"sh:targetNode "
                 f"{_sparql_iri(individual_uri, 'individual URI')} ."
             )
-
-        # Only newly generated, unconfigured properties receive
-        # metadata-derived domain overrides.
-        #
-        # Existing defaults and overrides are reconstructed by the
-        # centralized domain reconciler.
-        for class_uri, props in pairs.items():
-            for prop_uri in sorted(props):
-                if prop_uri not in metadata_domain_overrides:
-                    continue
-
-                class_shape_uri = _sparql_iri(
-                    shape_uri_for_entity(
-                        class_uri,
-                        "class",
-                        state["prefix_map"],
-                    ),
-                    "class shape URI",
-                )
-
-                property_shape_uri = _sparql_iri(
-                    shape_uri_for_entity(
-                        prop_uri,
-                        "property",
-                        state["prefix_map"],
-                    ),
-                    "property shape URI",
-                )
-
-                shape_triples.append(
-                    f"{class_shape_uri} sh:property "
-                    f"{property_shape_uri} ."
-                )
 
         if shape_triples:
             await self.store.update(f"""

@@ -205,7 +205,7 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
                 "role": "datatype",
             },
         ],
-        [{"class": str(EX.Book), "prop": str(EX.title)}],
+        [],
     ]
 
     profile = main.SHACLProfile(store)
@@ -268,9 +268,17 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
 
     assert len(queries) == 2
 
-    for query in queries:
-        assert GRAPH_ONE in query
-        assert GRAPH_TWO in query
+    assert GRAPH_ONE in queries[0]
+    assert GRAPH_TWO in queries[0]
+    assert main.SHAPES_GRAPH in queries[1]
+
+    persist_modes.assert_awaited_once_with(
+        str(EX.title),
+        {
+            "urn:domainClasses": main.PROFILE_FIELD_MODE_DEFAULT,
+        },
+        profile_store=store,
+    )
 
     updates = [
         call.args[0]
@@ -657,7 +665,7 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         EX.manualProperty,
     ) in shapes_graph
 
-    # Integration adds the expected class-property link.
+    # Integration does not add the generated class-property link.
     generated_property_shape = URIRef(
         main.shape_uri_for_entity(
             str(EX.title),
@@ -665,13 +673,41 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
             {},
         )
     )
+
+    # Metadata vocabulary entities must still generate their SHACL shapes.
+    assert (
+        class_shape,
+        RDF.type,
+        SH.NodeShape,
+    ) in shapes_graph
+
+    assert (
+        class_shape,
+        SH.targetClass,
+        EX.Book,
+    ) in shapes_graph
+
+    assert (
+        generated_property_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ) in shapes_graph
+
+    assert (
+        generated_property_shape,
+        SH.path,
+        EX.title,
+    ) in shapes_graph
+
+    # A universal property must not receive a class-specific association
+    # merely because metadata uses it with that class.
     assert (
         class_shape,
         SH.property,
         generated_property_shape,
-    ) in shapes_graph
+    ) not in shapes_graph
 
-    # Metadata-derived domains become explicit overrides when
+    # Metadata-derived domains become default mode when
     # the ontology provides no domain declarations.
     domain_state_uri = main._profile_field_state_uri(
         str(EX.title),
@@ -695,20 +731,13 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
     assert (
         domain_state_uri,
         vocab.mode,
-        Literal(main.PROFILE_FIELD_MODE_OVERRIDE),
+        Literal(main.PROFILE_FIELD_MODE_DEFAULT),
     ) in field_state_graph
 
     assert second_state_snapshot == first_state_snapshot
 
     # Both runs issue the same additive update.
     assert store.update_calls
-
-    # Shape insertion and domain reconciliation are performed.
-    assert any(
-        "INSERT DATA" in update
-        and main.SHAPES_GRAPH in update
-        for update in store.update_calls
-    )
 
     assert any(
         "DELETE" in update.upper()
@@ -910,4 +939,260 @@ async def test_metadata_integration_preserves_existing_domain_mode(
         record_uri,
         vocab.mode,
         Literal(existing_mode),
+    ) in state_graph
+
+
+@pytest.mark.asyncio
+async def test_default_constraints_do_not_restore_overridden_empty_fields(
+    monkeypatch,
+):
+    dataset = Dataset()
+    store = DatasetBackedStore(dataset)
+    profile = main.SHACLProfile(cast(main.RDFStore, store))
+
+    property_uri = str(EX.objectProperty)
+    class_uri = str(EX.Book)
+    shape_uri = URIRef(
+        main.shape_uri_for_entity(property_uri, "property", {})
+    )
+    shapes_graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    monkeypatch.setitem(main.state, "prefix_map", {})
+    monkeypatch.setattr(
+        profile,
+        "get_active_datatypes",
+        AsyncMock(return_value=set()),
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_property_type",
+        lambda *_args, **_kwargs: "object",
+    )
+    monkeypatch.setattr(
+        main,
+        "get_property_ranges",
+        lambda _uri: [str(EX.Person)],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_property_cardinality",
+        lambda *_args: {
+            "minCardinality": 1,
+            "maxCardinality": 3,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        AsyncMock(
+            return_value={
+                str(SH["class"]): main.PROFILE_FIELD_MODE_OVERRIDE,
+                str(SH.minCount): main.PROFILE_FIELD_MODE_OVERRIDE,
+                str(SH.maxCount): main.PROFILE_FIELD_MODE_DEFAULT,
+            }
+        ),
+    )
+
+    await profile._set_default_constraints(
+        property_uri,
+        class_uri,
+    )
+
+    # Empty overrides must suppress ontology-derived defaults.
+    assert not list(shapes_graph.objects(shape_uri, SH["class"]))
+    assert not list(shapes_graph.objects(shape_uri, SH.minCount))
+
+    # A field in default mode can still receive its ontology default.
+    assert set(shapes_graph.objects(shape_uri, SH.maxCount)) == {
+        Literal(3, datatype=URIRef(main.XSD_INTEGER)),
+    }
+
+@pytest.mark.asyncio
+async def test_metadata_integration_preserves_domain_links_without_state_record(
+    monkeypatch,
+):
+    dataset = Dataset()
+    metadata_graph = dataset.graph(URIRef(GRAPH_ONE))
+    shapes_graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+    state_graph = dataset.graph(URIRef(main.PROFILE_FIELD_STATE_GRAPH))
+
+    # The metadata uses Book -> title, but the existing profile associates
+    # title with Article. There is deliberately no Domain Classes state.
+    metadata_graph.add((EX.book1, RDF.type, EX.Book))
+    metadata_graph.add((EX.book1, EX.title, Literal("Example")))
+    metadata_graph.add((EX.Book, RDF.type, OWL.Class))
+    metadata_graph.add((EX.title, RDF.type, OWL.DatatypeProperty))
+
+    book_shape = URIRef(
+        main.shape_uri_for_entity(str(EX.Book), "class", {})
+    )
+    article_shape = URIRef(
+        main.shape_uri_for_entity(str(EX2.Article), "class", {})
+    )
+    property_shape = URIRef(
+        main.shape_uri_for_entity(str(EX.title), "property", {})
+    )
+
+    for shape_uri, class_uri in (
+        (book_shape, EX.Book),
+        (article_shape, EX2.Article),
+    ):
+        shapes_graph.add((shape_uri, RDF.type, SH.NodeShape))
+        shapes_graph.add((shape_uri, SH.targetClass, class_uri))
+
+    shapes_graph.add((property_shape, RDF.type, SH.PropertyShape))
+    shapes_graph.add((property_shape, SH.path, EX.title))
+    shapes_graph.add((article_shape, SH.property, property_shape))
+
+    store = DatasetBackedStore(dataset)
+    profile = main.SHACLProfile(cast(main.RDFStore, store))
+
+    for key, value in (
+        ("ontologies", []),
+        ("prefix_map", {}),
+        ("metadata_only_sources", {}),
+        ("non_integrated_uris", set()),
+    ):
+        monkeypatch.setitem(main.state, key, value)
+
+    # Ontology defaults differ from the existing profile association.
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda uri: [str(EX.Book)] if uri == str(EX.title) else [],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_global_property_order",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        profile,
+        "_set_default_constraints",
+        AsyncMock(),
+    )
+
+    await profile.integrate_metadata_graphs(
+        [GRAPH_ONE],
+        source="catalog.ttl",
+    )
+
+    record_uri = main._profile_field_state_uri(
+        str(EX.title),
+        "urn:domainClasses",
+    )
+    vocab = main.PROFILE_FIELD_STATE_VOCAB
+
+    # The old association is retained as a legacy profile override.
+    assert (
+        record_uri,
+        vocab.mode,
+        Literal(main.PROFILE_FIELD_MODE_OVERRIDE),
+    ) in state_graph
+
+    domains = await main.ap._get_shacl_domains(
+        profile_store=cast(main.RDFStore, store),
+    )
+    assert domains[str(EX.title)] == [str(EX2.Article)]
+
+    linked_domains = {
+        str(class_uri)
+        for class_shape in shapes_graph.subjects(
+            SH.property,
+            property_shape,
+        )
+        for class_uri in shapes_graph.objects(
+            class_shape,
+            SH.targetClass,
+        )
+    }
+    assert linked_domains == {str(EX2.Article)}
+
+    # Observed Book -> title usage is not treated as a semantic domain.
+    assert (
+        book_shape,
+        SH.property,
+        property_shape,
+    ) not in shapes_graph
+
+
+@pytest.mark.asyncio
+async def test_metadata_generation_preserves_explicit_empty_domain_override(
+    monkeypatch,
+):
+    dataset = Dataset()
+    metadata_graph = dataset.graph(URIRef(GRAPH_ONE))
+    shapes_graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+    state_graph = dataset.graph(URIRef(main.PROFILE_FIELD_STATE_GRAPH))
+
+    metadata_graph.add((EX.book1, RDF.type, EX.Book))
+    metadata_graph.add((EX.book1, EX.title, Literal("Example")))
+    metadata_graph.add((EX.Book, RDF.type, OWL.Class))
+    metadata_graph.add((EX.title, RDF.type, OWL.DatatypeProperty))
+
+    book_shape = URIRef(
+        main.shape_uri_for_entity(str(EX.Book), "class", {})
+    )
+    property_shape = URIRef(
+        main.shape_uri_for_entity(str(EX.title), "property", {})
+    )
+    shapes_graph.add((book_shape, RDF.type, SH.NodeShape))
+    shapes_graph.add((book_shape, SH.targetClass, EX.Book))
+    shapes_graph.add((property_shape, RDF.type, SH.PropertyShape))
+    shapes_graph.add((property_shape, SH.path, EX.title))
+
+    record_uri = main._profile_field_state_uri(
+        str(EX.title),
+        "urn:domainClasses",
+    )
+    vocab = main.PROFILE_FIELD_STATE_VOCAB
+    state_graph.add((record_uri, vocab.entity, EX.title))
+    state_graph.add((record_uri, vocab.field, URIRef("urn:domainClasses")))
+    state_graph.add((
+        record_uri,
+        vocab.mode,
+        Literal(main.PROFILE_FIELD_MODE_OVERRIDE),
+    ))
+
+    store = DatasetBackedStore(dataset)
+    profile = main.SHACLProfile(cast(main.RDFStore, store))
+
+    for key, value in (
+        ("ontologies", []),
+        ("prefix_map", {}),
+        ("metadata_only_sources", {}),
+        ("non_integrated_uris", set()),
+    ):
+        monkeypatch.setitem(main.state, key, value)
+
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda uri: [str(EX.Book)] if uri == str(EX.title) else [],
+    )
+    monkeypatch.setattr(
+        main,
+        "get_global_property_order",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        profile,
+        "_set_default_constraints",
+        AsyncMock(),
+    )
+
+    await profile.integrate_metadata_graphs(
+        [GRAPH_ONE],
+        source="catalog.ttl",
+    )
+
+    domains = await main.ap._get_shacl_domains(
+        profile_store=cast(main.RDFStore, store),
+    )
+    assert domains[str(EX.title)] == []
+    assert not list(shapes_graph.subjects(SH.property, property_shape))
+    assert (
+        record_uri,
+        vocab.mode,
+        Literal(main.PROFILE_FIELD_MODE_OVERRIDE),
     ) in state_graph

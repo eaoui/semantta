@@ -297,12 +297,8 @@ export const useAppStore = defineStore('app', () => {
 
   // ── Profile generation ────────────────────────────────
   async function generateProfileFromMetadata() {
-    try {
-      await $fetch(`${apiBase}/api/profile/generate`, { method: 'POST' })
-      await fetchState()
-    } catch (e: any) {
-      alert('Generation failed: ' + (e?.data?.detail || e.message))
-    }
+    await $fetch(`${apiBase}/api/profile/generate`, { method: 'POST' })
+    await fetchState()
   }
 
   // ── Settings mutations ────────────────────────────────

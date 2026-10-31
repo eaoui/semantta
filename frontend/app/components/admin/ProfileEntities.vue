@@ -58,7 +58,7 @@
     <aside class="order-first w-full shrink-0 md:order-last md:self-start md:w-56 lg:w-64 max-w-96 mx-auto">
       <h3 class="text-lg font-semibold mb-2 text-gray-900 dark:text-gray-100">Bulk Actions</h3>
       <div class="mb-4">
-        <button v-if="store.metadataFiles.length > 0" @click="generateProfile"
+        <button v-if="store.metadataFiles.length > 0" @click="confirmGenerateProfile = true"
           class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 w-full">
           Generate profile from metadata
         </button>
@@ -106,6 +106,11 @@
     <LoadingOverlay :show="!!loadingMsg" :message="loadingMsg" />
   </div>
 
+  <ConfirmDialog :show="confirmGenerateProfile"
+    message="Generate the Application Profile from all imported metadata files? This adds vocabulary entities and their profile relationships, and fills in missing ontology-based constraints. It also reactivates entities found in the metadata, including entities you previously deactivated. Existing field overrides and manually configured Domain Classes associations are preserved."
+    confirm-label="Generate" confirm-tone="primary" @cancel="confirmGenerateProfile = false"
+    @confirm="generateProfile" />
+
   <ConfirmDialog :show="confirmDeactivateUnused"
     message="Deactivate all active Application Profile entities that are unused in imported metadata or metadata records created in Semantta? Core default entities will be preserved. Their SHACL shapes, constraints, relationships and profile configuration will remain stored and can be restored by reactivating the entities. Metadata records and their values will not be deleted."
     @cancel="confirmDeactivateUnused = false" @confirm="deactivateUnusedEntities" />
@@ -131,6 +136,7 @@ const route = useRoute()
 const router = useRouter()
 const loadingMsg = ref('')
 const confirmDeactivateUnused = ref(false)
+const confirmGenerateProfile = ref(false)
 const toast = useToast()
 
 function displayEntityLabel(entity: ProfileEntityItem): string {
@@ -282,14 +288,18 @@ async function removeEntity(uri: string) {
 }
 
 async function generateProfile() {
+  confirmGenerateProfile.value = false
   loadingMsg.value = 'Generating application profile from metadata…'
+
   try {
     await store.generateProfileFromMetadata()
-    await store.fetchState()
     toast.success('Profile generated from metadata')
-  }
-  catch {
-    toast.error('Generation failed')
+  } catch (error: any) {
+    toast.error(
+      error?.data?.detail ||
+      error?.message ||
+      'Generation failed',
+    )
   } finally {
     loadingMsg.value = ''
   }
