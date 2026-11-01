@@ -7,7 +7,7 @@ from typing import cast
 from types import SimpleNamespace
 
 import pytest
-from rdflib import Dataset, Literal, Namespace, URIRef
+from rdflib import Dataset, Literal, Namespace, URIRef, Graph
 from rdflib.namespace import OWL, RDF, RDFS
 from rdflib.query import Result
 
@@ -59,6 +59,15 @@ class DatasetBackedStore:
     async def update(self, sparql: str) -> None:
         self.update_calls.append(sparql)
         self.dataset.update(sparql)
+
+    async def insert_shapes(self, triples: str) -> None:
+        graph = self.dataset.graph(
+            URIRef(main.SHAPES_GRAPH)
+        )
+        graph.parse(
+            data=triples,
+            format="turtle",
+        )
 
 def test_metadata_vocabulary_query_uses_uri_and_role():
     dataset = Dataset()
@@ -210,6 +219,14 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
 
     profile = main.SHACLProfile(store)
 
+    assign_property_groups = AsyncMock()
+
+    monkeypatch.setattr(
+        profile,
+        "_assign_property_groups",
+        assign_property_groups,
+    )
+
     monkeypatch.setattr(
         main,
         "_get_active_profile_classes",
@@ -255,6 +272,10 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
     )
 
     await profile.generate_from_metadata()
+
+    assign_property_groups.assert_awaited_once_with(
+        {str(EX.title)}
+    )
 
     reconciliation.assert_awaited_once_with(
         profile_store=store,
@@ -590,6 +611,20 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         "ontologies",
         [],
     )
+
+    ontology_graph = Graph()
+    ontology_graph.add((
+        EX.title,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology_graph,
+    )
+    
     monkeypatch.setitem(
         main.state,
         "prefix_map",
@@ -698,6 +733,22 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         SH.path,
         EX.title,
     ) in shapes_graph
+
+    # Metadata integration assigns the existing backend property type.
+    assert (
+        generated_property_shape,
+        SH.group,
+        main.PROPERTY_GROUP_DATATYPE,
+    ) in shapes_graph
+
+    assert set(
+        shapes_graph.objects(
+            generated_property_shape,
+            SH.group,
+        )
+    ) == {
+        main.PROPERTY_GROUP_DATATYPE,
+    }
 
     # A universal property must not receive a class-specific association
     # merely because metadata uses it with that class.

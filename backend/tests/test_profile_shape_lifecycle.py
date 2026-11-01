@@ -298,8 +298,40 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
     # its constraints or discard other RDF statements.
     await add_methods[role](uri)
 
+    expected_shape_graph = set(original_shape_graph)
+
+    if role == "property":
+        expected_group = main._get_property_group_uri(uri)
+
+        expected_shape_graph.add((
+            shape_uri,
+            SH.group,
+            expected_group,
+        ))
+
+        for group_uri, label, order in (
+            main.PROPERTY_GROUP_DEFINITIONS
+        ):
+            expected_shape_graph.update({
+                (
+                    group_uri,
+                    RDF.type,
+                    SH.PropertyGroup,
+                ),
+                (
+                    group_uri,
+                    RDFS.label,
+                    Literal(label, lang="en"),
+                ),
+                (
+                    group_uri,
+                    SH.order,
+                    Literal(order),
+                ),
+            })
+
     assert without_deactivation_markers(shapes_graph) == (
-        original_shape_graph
+        expected_shape_graph
     )
 
     assert not list(shapes_graph.objects(
@@ -613,10 +645,11 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
     existing_constraints = {
         triple
         for triple in graph.triples((shape_uri, None, None))
-        if triple[1] not in {
-            RDF.type,
-            SH.deactivated,
-        }
+            if triple[1] not in {
+                RDF.type,
+                SH.deactivated,
+                SH.group,
+            }
     }
 
     profile = main.SHACLProfile(store)
@@ -640,14 +673,21 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
     restored_constraints = {
         triple
         for triple in graph.triples((shape_uri, None, None))
-        if triple[1] not in {
-            RDF.type,
-            SH.deactivated,
-        }
+            if triple[1] not in {
+                RDF.type,
+                SH.deactivated,
+                SH.group,
+            }
     }
 
     assert restored_constraints == existing_constraints
 
+    assert set(
+        graph.objects(shape_uri, SH.group)
+    ) == {
+        main._get_property_group_uri(prop_uri)
+    }
+    
     assert not list(graph.objects(
         shape_uri,
         SH.deactivated,

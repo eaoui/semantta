@@ -123,6 +123,35 @@ INDEX_CACHE_VERSION = 1
 REASONED_CACHE_VERSION = 1
 
 SH = Namespace("http://www.w3.org/ns/shacl#")
+
+PROPERTY_GROUP_OBJECT = URIRef(
+    "urn:semantta:property-group:object-properties"
+)
+PROPERTY_GROUP_DATATYPE = URIRef(
+    "urn:semantta:property-group:datatype-properties"
+)
+PROPERTY_GROUP_ANNOTATION = URIRef(
+    "urn:semantta:property-group:annotation-properties"
+)
+
+PROPERTY_GROUP_DEFINITIONS = (
+    (
+        PROPERTY_GROUP_OBJECT,
+        "Object Properties",
+        1,
+    ),
+    (
+        PROPERTY_GROUP_DATATYPE,
+        "Datatype Properties",
+        2,
+    ),
+    (
+        PROPERTY_GROUP_ANNOTATION,
+        "Annotation Properties",
+        3,
+    ),
+)
+
 PROFILE_FIELD_STATE_VOCAB = Namespace(
     "urn:semantta:profile-field-state#"
 )
@@ -1618,6 +1647,19 @@ def _get_property_type(
         return "datatype"
 
     return "object"
+
+def _get_property_group_uri(
+    prop_uri: str,
+    active_datatypes: Optional[Set[str]] = None,
+) -> URIRef:
+    """Return the SHACL PropertyGroup corresponding to a property's type."""
+    if _is_annotation_property(prop_uri):
+        return PROPERTY_GROUP_ANNOTATION
+
+    if _get_property_type(prop_uri, active_datatypes) == "datatype":
+        return PROPERTY_GROUP_DATATYPE
+
+    return PROPERTY_GROUP_OBJECT
 
 def _normalize_namespace_delimiters(uri: str) -> str:
     """Remove trailing namespace delimiters for comparison only."""
@@ -4393,6 +4435,139 @@ class SHACLProfile:
         if self._on_change:
             self._on_change()
 
+    async def _ensure_property_groups(self) -> None:
+        """Ensure that the three standard property groups exist."""
+        triples = []
+
+        for group_uri, label, order in PROPERTY_GROUP_DEFINITIONS:
+            triples.append(
+                f"{group_uri.n3()} "
+                f"a {SH.PropertyGroup.n3()} ; "
+                f"{RDFS.label.n3()} "
+                f"{Literal(label, lang='en').n3()} ; "
+                f"{SH.order.n3()} "
+                f"{Literal(order).n3()} ."
+            )
+
+        await self.store.insert_shapes(
+            "\n".join(triples)
+        )
+
+        self.invalidate_shapes_cache()
+
+    async def _assign_property_groups(
+        self,
+        property_uris: Optional[Set[str]] = None,
+    ) -> int:
+        """
+        Assign every matching property shape to its ontology-type group.
+
+        When property_uris is None, all property shapes in the profile
+        are processed. Existing sh:group memberships are replaced so
+        every property shape has exactly one type group.
+        """
+        if property_uris is not None:
+            normalized_uris = sorted(set(property_uris))
+
+            if not normalized_uris:
+                return 0
+
+            property_values = "VALUES ?propUri { " + " ".join(
+                _sparql_iri(uri, "property URI")
+                for uri in normalized_uris
+            ) + " }"
+        else:
+            property_values = ""
+
+        await self._ensure_property_groups()
+
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?propertyShape ?propUri WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    {property_values}
+
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+                }}
+            }}
+        """)
+
+        if not rows:
+            return 0
+
+        active_datatypes = set(
+            await self.get_active_datatypes()
+        )
+
+        groups_by_shape: Dict[str, URIRef] = {}
+
+        for row in rows:
+            shape_uri = row["propertyShape"]
+            prop_uri = row["propUri"]
+
+            group_uri = _get_property_group_uri(
+                prop_uri,
+                active_datatypes,
+            )
+
+            existing_group = groups_by_shape.get(shape_uri)
+
+            if (
+                existing_group is not None
+                and existing_group != group_uri
+            ):
+                raise RuntimeError(
+                    "A property shape has conflicting property paths: "
+                    f"{shape_uri}"
+                )
+
+            groups_by_shape[shape_uri] = group_uri
+
+        assignment_values = " ".join(
+            (
+                f"({_sparql_iri(shape_uri, 'property shape URI')} "
+                f"{group_uri.n3()})"
+            )
+            for shape_uri, group_uri in sorted(
+                groups_by_shape.items()
+            )
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:group ?existingGroup .
+                }}
+            }}
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:group ?group .
+                }}
+            }}
+            WHERE {{
+                VALUES (?propertyShape ?group) {{
+                    {assignment_values}
+                }}
+
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape a sh:PropertyShape .
+
+                    OPTIONAL {{
+                        ?propertyShape sh:group ?existingGroup .
+                    }}
+                }}
+            }}
+        """)
+
+        self.invalidate_shapes_cache()
+
+        return len(groups_by_shape)
+
     async def _set_shape_deactivated(
         self,
         shape_uri: str,
@@ -4818,6 +4993,10 @@ class SHACLProfile:
             False,
         )
 
+        await self._assign_property_groups(
+            {prop_uri}
+        )
+
         await self._set_default_constraints(
             prop_uri,
             class_uri,
@@ -4994,6 +5173,9 @@ class SHACLProfile:
 
         await self._set_default_constraints(prop_uri)
         await self._set_shape_deactivated(shape_uri, False)
+        await self._assign_property_groups(
+            {prop_uri}
+        )
 
         self._changed()
 
@@ -5342,6 +5524,9 @@ class SHACLProfile:
                     }}
                 }}
             """)
+
+        # Assign each integrated property shape to its ontology-type group.
+        await self._assign_property_groups(property_uris)
 
         # Add default constraints only where they do not already exist.
         for prop_uri in sorted(property_uris):
