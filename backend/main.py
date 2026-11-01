@@ -2443,20 +2443,41 @@ def invalidate_everything():
 #  Async Utilities
 # ---------------------------------------------------------------------------
 async def get_global_property_order() -> Dict[str, int]:
-    order_map = {}
+    """Return the current orders of active, grouped properties."""
+    order_map: Dict[str, int] = {}
+
     try:
         rows = await store.query(f"""
+            PREFIX sh: <{SH}>
+
             SELECT ?propUri (SAMPLE(?order) AS ?ord) WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propShape <{SH}path> ?propUri ;
-                               <{SH}order> ?order .
+                    ?propShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri ;
+                        sh:group ?group ;
+                        sh:order ?order .
+
+                    ?group
+                        a sh:PropertyGroup ;
+                        sh:order ?groupOrder .
+
+                    FILTER NOT EXISTS {{
+                        ?propShape sh:deactivated true .
+                    }}
                 }}
-            }} GROUP BY ?propUri
+            }}
+            GROUP BY ?propUri
         """)
-        for r in rows:
-            order_map[r["propUri"]] = int(r["ord"])
+
+        for row in rows:
+            order_map[row["propUri"]] = int(row["ord"])
+
     except Exception:
-        pass
+        logger.exception(
+            "Failed to retrieve active property ordering."
+        )
+
     return order_map
 
 async def rebuild_used_uris():
@@ -3644,20 +3665,41 @@ class ApplicationProfile:
     async def _ensure_order_map(self):
         if self._order_loaded:
             return
+
         self._order_map.clear()
+
         try:
             rows = await self.store.query(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
+                PREFIX sh: <{SH}>
+
                 SELECT ?propUri (SAMPLE(?order) AS ?ord) WHERE {{
                     GRAPH <{SHAPES_GRAPH}> {{
-                        ?shape sh:path ?propUri ; sh:order ?order .
+                        ?propShape
+                            a sh:PropertyShape ;
+                            sh:path ?propUri ;
+                            sh:group ?group ;
+                            sh:order ?order .
+
+                        ?group
+                            a sh:PropertyGroup ;
+                            sh:order ?groupOrder .
+
+                        FILTER NOT EXISTS {{
+                            ?propShape sh:deactivated true .
+                        }}
                     }}
-                }} GROUP BY ?propUri
+                }}
+                GROUP BY ?propUri
             """)
-            for r in rows:
-                self._order_map[r["propUri"]] = int(r["ord"])
+
+            for row in rows:
+                self._order_map[row["propUri"]] = int(row["ord"])
+
         except Exception:
-            pass
+            logger.exception(
+                "Failed to load active property order map."
+            )
+
         self._order_loaded = True
 
     async def get_entity_type(self, uri: str) -> str:
@@ -3854,11 +3896,16 @@ class ApplicationProfile:
                 sources=list(dict.fromkeys(cand["sources"])),
                 ontology=cand["sources"][0] if cand["sources"] else None,
             )
-            if etype in ("object_property", "datatype_property", "annotation_property"):
+            if etype in (
+                "object_property",
+                "datatype_property",
+                "annotation_property",
+            ):
                 item.domain = get_property_domains(uri)
-            if etype in ("object_property", "datatype_property", "annotation_property"):
-                await self._ensure_order_map()
-                item.order = self._order_map.get(uri)
+
+                if active:
+                    await self._ensure_order_map()
+                    item.order = self._order_map.get(uri)
             if etype == "individual":
                 onto_entity = next(
                     (e for o in state["ontologies"] for e in o["entities"] if e["uri"] == uri),
@@ -3891,14 +3938,29 @@ class ApplicationProfile:
         class_uri: str,
     ) -> List[dict]:
         rows = await self.store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT ?propUri (SAMPLE(?order) AS ?sortOrder) WHERE {{
+            PREFIX sh: <{SH}>
+
+            SELECT
+                ?propUri
+                (SAMPLE(?order) AS ?sortOrder)
+                (SAMPLE(?groupOrder) AS ?sortGroupOrder)
+            WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propShape sh:path ?propUri .
-                    OPTIONAL {{ ?propShape sh:order ?order }}
+                    ?propShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri ;
+                        sh:group ?group .
+
+                    ?group
+                        a sh:PropertyGroup ;
+                        sh:order ?groupOrder .
+
+                    OPTIONAL {{
+                        ?propShape sh:order ?order .
+                    }}
 
                     FILTER NOT EXISTS {{
-                        ?propShape sh:deactivated true
+                        ?propShape sh:deactivated true .
                     }}
                 }}
             }}
@@ -3928,19 +3990,41 @@ class ApplicationProfile:
                 continue
 
             raw_order = row.get("sortOrder")
+            raw_group_order = row.get("sortGroupOrder")
 
             properties_by_uri[prop_uri] = {
                 "uri": prop_uri,
-                "order": int(raw_order) if raw_order else None,
+                "order": (
+                    int(raw_order)
+                    if raw_order is not None
+                    else None
+                ),
+                "_group_order": (
+                    int(raw_group_order)
+                    if raw_group_order is not None
+                    else 999
+                ),
             }
 
-        return sorted(
-            properties_by_uri.values(),
-            key=lambda item: (
-                item["order"] is None,
-                item["order"] or 0,
-            ),
-        )
+        return [
+            {
+                "uri": item["uri"],
+                "order": item["order"],
+            }
+            for item in sorted(
+                properties_by_uri.values(),
+                key=lambda item: (
+                    item["_group_order"],
+                    item["order"] is None,
+                    (
+                        item["order"]
+                        if item["order"] is not None
+                        else 0
+                    ),
+                    item["uri"],
+                ),
+            )
+        ]
 
     async def _get_property_constraints(
         self,
@@ -9009,7 +9093,7 @@ async def get_entity_constraints(entity_uri: str):
             SELECT ?pred ?val WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?ps sh:path {property_ref} ; ?pred ?val .
-                    FILTER(?pred NOT IN (sh:path, sh:order, rdf:type))
+                    FILTER(?pred NOT IN (sh:path, sh:order, sh:group, rdf:type))
                 }}
             }}
         """)
@@ -9268,6 +9352,7 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
                     RDF.type,
                     SH.path,
                     SH.order,
+                    SH.group,
                     SH.property,
                 },
             )
@@ -9643,25 +9728,232 @@ async def generate_profile_from_metadata():
 
 @app.post("/api/profile/update-order")
 async def update_profile_order(data: dict):
-    items = data.get("items", [])
+    items = data.get("items")
+
+    if not isinstance(items, list):
+        raise HTTPException(
+            400,
+            "Items must be a list of property ordering entries.",
+        )
+
+    if not items:
+        return {"status": "ok"}
+
+    uris = []
+    order_by_uri = {}
+
     for item in items:
-        uri = item["uri"]
-        order_val = item["order"]
-        shape_uri = shape_uri_for_entity(uri, "property", state["prefix_map"])
+        if not isinstance(item, dict):
+            raise HTTPException(
+                400,
+                "Each ordering entry must be an object.",
+            )
 
-        await store.update(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order ?old }} }}
-            WHERE  {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order ?old }} }}
-        """)
+        uri = item.get("uri")
+        order_value = item.get("order")
 
-        ord_triple = _format_constraint_value(str(SH.order), order_val)
-        await store.update(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            INSERT DATA {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> sh:order {ord_triple} }} }}
-        """)
+        if not isinstance(uri, str) or not uri:
+            raise HTTPException(
+                400,
+                "Every ordering entry must contain a property URI.",
+            )
+
+        _sparql_iri(uri, "property URI")
+
+        if uri in order_by_uri:
+            raise HTTPException(
+                400,
+                f"Duplicate property URI in ordering request: {uri}",
+            )
+
+        if type(order_value) is not int or order_value < 0:
+            raise HTTPException(
+                400,
+                "Property order values must be non-negative integers.",
+            )
+
+        uris.append(uri)
+        order_by_uri[uri] = order_value
+
+    expected_orders = list(range(len(items)))
+
+    if sorted(order_by_uri.values()) != expected_orders:
+        raise HTTPException(
+            400,
+            "Property order values must be unique and contiguous, "
+            "starting at zero.",
+        )
+
+    property_values = " ".join(
+        _sparql_iri(uri, "property URI")
+        for uri in sorted(uris)
+    )
+
+    active_rows = await store.query(f"""
+        PREFIX sh: <{SH}>
+
+        SELECT DISTINCT ?propUri ?group WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                VALUES ?propUri {{ {property_values} }}
+
+                ?propertyShape
+                    a sh:PropertyShape ;
+                    sh:path ?propUri ;
+                    sh:group ?group .
+
+                ?group
+                    a sh:PropertyGroup ;
+                    sh:order ?groupOrder .
+
+                FILTER NOT EXISTS {{
+                    ?propertyShape sh:deactivated true .
+                }}
+            }}
+        }}
+    """)
+
+    groups_by_property: Dict[str, Set[str]] = {}
+
+    for row in active_rows:
+        groups_by_property.setdefault(
+            row["propUri"],
+            set(),
+        ).add(row["group"])
+
+    missing_properties = set(uris) - set(groups_by_property)
+
+    if missing_properties:
+        raise HTTPException(
+            400,
+            "The ordering request contains inactive properties "
+            "or properties without a valid property group: "
+            + ", ".join(sorted(missing_properties)),
+        )
+
+    for uri, groups in groups_by_property.items():
+        if len(groups) != 1:
+            raise HTTPException(
+                400,
+                f"Property has multiple property groups: {uri}",
+            )
+
+    requested_groups = {
+        next(iter(groups))
+        for groups in groups_by_property.values()
+    }
+
+    if len(requested_groups) != 1:
+        raise HTTPException(
+            400,
+            "Properties from different property groups "
+            "cannot be reordered together.",
+        )
+
+    group_uri = next(iter(requested_groups))
+
+    valid_groups = {
+        str(group_uri)
+        for group_uri, _, _ in PROPERTY_GROUP_DEFINITIONS
+    }
+
+    if group_uri not in valid_groups:
+        raise HTTPException(
+            400,
+            "The selected property group is not supported.",
+        )
+
+    safe_group_uri = _sparql_iri(
+        group_uri,
+        "property group URI",
+    )
+
+    group_rows = await store.query(f"""
+        PREFIX sh: <{SH}>
+
+        SELECT DISTINCT ?propUri WHERE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?propertyShape
+                    a sh:PropertyShape ;
+                    sh:path ?propUri ;
+                    sh:group {safe_group_uri} .
+
+                FILTER NOT EXISTS {{
+                    ?propertyShape sh:deactivated true .
+                }}
+            }}
+        }}
+    """)
+
+    active_group_properties = {
+        row["propUri"]
+        for row in group_rows
+    }
+
+    submitted_properties = set(uris)
+
+    if active_group_properties != submitted_properties:
+        omitted_properties = (
+            active_group_properties - submitted_properties
+        )
+        unexpected_properties = (
+            submitted_properties - active_group_properties
+        )
+
+        raise HTTPException(
+            400,
+            (
+                "Property ordering does not match the active group. "
+                f"Omitted active properties: {sorted(omitted_properties)}. "
+                f"Properties not belonging to this group: "
+                f"{sorted(unexpected_properties)}."
+            ),
+        )
+
+    values = " ".join(
+        (
+            f"({_sparql_iri(uri, 'property URI')} "
+            f"{Literal(order_by_uri[uri]).n3()})"
+        )
+        for uri in sorted(uris)
+    )
+
+    await store.update(f"""
+        PREFIX sh: <{SH}>
+
+        DELETE {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?propertyShape sh:order ?oldOrder .
+            }}
+        }}
+        INSERT {{
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?propertyShape sh:order ?newOrder .
+            }}
+        }}
+        WHERE {{
+            VALUES (?propUri ?newOrder) {{
+                {values}
+            }}
+
+            GRAPH <{SHAPES_GRAPH}> {{
+                ?propertyShape
+                    a sh:PropertyShape ;
+                    sh:path ?propUri ;
+                    sh:group {safe_group_uri} .
+
+                OPTIONAL {{
+                    ?propertyShape sh:order ?oldOrder .
+                }}
+
+                FILTER NOT EXISTS {{
+                    ?propertyShape sh:deactivated true .
+                }}
+            }}
+        }}
+    """)
 
     invalidate_profile()
+
     return {"status": "ok"}
 
 @app.post("/api/instances/exists")

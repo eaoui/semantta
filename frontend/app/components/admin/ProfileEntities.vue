@@ -340,17 +340,71 @@ async function deactivateUnusedEntities() {
 }
 
 async function saveNewOrder(list: ProfileEntityItem[]) {
-  const filteredUris = new Set(filteredLocalEntities.value.map(e => e.uri))
-  const nonFiltered = localEntities.value.filter(e => !filteredUris.has(e.uri))
-  localEntities.value = [...nonFiltered, ...list]
+  const visibleEntities = filteredLocalEntities.value
+  const visibleUris = new Set(
+    visibleEntities.map(entity => entity.uri)
+  )
+  const reorderedUris = new Set(
+    list.map(entity => entity.uri)
+  )
 
-  const items = localEntities.value.map((entity, index) => ({ uri: entity.uri, order: index }))
-  if (!items.length) return
-  await $fetch(`${apiBase}/api/profile/update-order`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items })
+  // The sortable component must return exactly the visible properties.
+  if (
+    list.length !== visibleUris.size ||
+    reorderedUris.size !== visibleUris.size ||
+    [...visibleUris].some(uri => !reorderedUris.has(uri))
+  ) {
+    toast.error('The reordered property list is inconsistent.')
+    return
+  }
+
+  let reorderedIndex = 0
+
+  const completeGroupOrder = localEntities.value.map(entity => {
+    if (!visibleUris.has(entity.uri)) {
+      return entity
+    }
+
+    const reorderedEntity = list[reorderedIndex++]
+    return reorderedEntity ?? entity
   })
-  await store.fetchState()
+
+  localEntities.value = completeGroupOrder
+
+  const items = completeGroupOrder.map((entity, index) => ({
+    uri: entity.uri,
+    order: index,
+  }))
+
+  if (!items.length) return
+
+  try {
+    await $fetch(`${apiBase}/api/profile/update-order`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items }),
+    })
+
+    await store.fetchState()
+    toast.success('Property order updated')
+  } catch (error: any) {
+    console.error('Property ordering failed:', {
+      activeTab: activeTab.value,
+      submittedItems: items,
+      detail: error?.data?.detail,
+      error,
+    })
+
+    toast.error(
+      error?.data?.detail ||
+      error?.message ||
+      'Failed to update property order',
+    )
+
+    // Restore the order from the persisted profile.
+    await store.fetchState()
+  }
 }
 </script>

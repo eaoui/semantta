@@ -173,10 +173,26 @@ async def test_list_active_properties_includes_direct_inherited_and_universal(
 ):
     store = AsyncMock()
     store.query.return_value = [
-        {"propUri": DIRECT_PROPERTY, "order": "1"},
-        {"propUri": INHERITED_PROPERTY, "order": "2"},
-        {"propUri": ORPHAN_PROPERTY, "order": "3"},
-        {"propUri": UNIVERSAL_PROPERTY, "order": "4"},
+        {
+            "propUri": DIRECT_PROPERTY,
+            "sortOrder": "1",
+            "sortGroupOrder": "1",
+        },
+        {
+            "propUri": INHERITED_PROPERTY,
+            "sortOrder": "2",
+            "sortGroupOrder": "1",
+        },
+        {
+            "propUri": ORPHAN_PROPERTY,
+            "sortOrder": "3",
+            "sortGroupOrder": "1",
+        },
+        {
+            "propUri": UNIVERSAL_PROPERTY,
+            "sortOrder": "4",
+            "sortGroupOrder": "1",
+        },
     ]
 
     profile = main.ApplicationProfile(store)
@@ -893,3 +909,10 @@ async def test_list_active_properties_uses_distinct_aggregate_alias(
 
     assert "SAMPLE(?order) AS ?sortOrder" in query
     assert "SAMPLE(?order) AS ?order" not in query
+    assert "SAMPLE(?groupOrder) AS ?sortGroupOrder" in query
+    assert "sh:group ?group" in query
+    assert "sh:deactivated true" in query
+    assert "SAMPLE(?groupOrder) AS ?sortGroupOrder" in query
+    assert "sh:group ?group" in query
+    assert "sh:PropertyGroup" in query
+    assert "sh:deactivated true" in query

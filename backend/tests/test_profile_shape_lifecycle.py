@@ -421,9 +421,40 @@ async def test_profile_form_property_list_excludes_deactivated_properties(
         inactive_property,
     )
 
-    graph.add((active_shape, SH.order, Literal(1)))
-    graph.add((inactive_shape, SH.order, Literal(2)))
-    graph.add((inactive_shape, SH.deactivated, Literal(True)))
+    graph.add((
+        main.PROPERTY_GROUP_OBJECT,
+        RDF.type,
+        SH.PropertyGroup,
+    ))
+    graph.add((
+        main.PROPERTY_GROUP_OBJECT,
+        SH.order,
+        Literal(1),
+    ))
+
+    graph.add((
+        active_shape,
+        SH.group,
+        main.PROPERTY_GROUP_OBJECT,
+    ))
+    graph.add((
+        inactive_shape,
+        SH.group,
+        main.PROPERTY_GROUP_OBJECT,
+    ))
+    graph.add((
+        active_shape,
+        SH.order,
+        Literal(1),
+    ))
+    graph.add((
+        inactive_shape,
+        SH.order,Literal(2),
+    ))
+    graph.add((inactive_shape,
+        SH.deactivated,
+        Literal(True),
+    ))
 
     profile = main.ApplicationProfile(store)
 

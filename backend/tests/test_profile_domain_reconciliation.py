@@ -457,6 +457,21 @@ async def test_inactive_domain_class_does_not_enable_inherited_property(
         graph,
         str(EX.identifier),
     )
+    graph.add((
+        main.PROPERTY_GROUP_OBJECT,
+        RDF.type,
+        SH.PropertyGroup,
+    ))
+    graph.add((
+        main.PROPERTY_GROUP_OBJECT,
+        SH.order,
+        Literal(1),
+    ))
+    graph.add((
+        identifier_shape,
+        SH.group,
+        main.PROPERTY_GROUP_OBJECT,
+    ))
     graph.add((resource_shape, SH.property, identifier_shape))
 
     profile = main.ApplicationProfile(store)

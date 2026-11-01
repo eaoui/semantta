@@ -585,6 +585,10 @@ async def test_create_form_exposes_saved_profile_constraints(
     )
 
     await fuseki_store.insert_shapes(f"""
+        <{main.PROPERTY_GROUP_DATATYPE}>
+            a sh:PropertyGroup ;
+            sh:order 2 .
+
         <{class_shape}>
             a sh:NodeShape ;
             sh:targetClass <{class_uri}> ;
@@ -593,6 +597,7 @@ async def test_create_form_exposes_saved_profile_constraints(
         <{property_shape}>
             a sh:PropertyShape ;
             sh:path <{property_uri}> ;
+            sh:group <{main.PROPERTY_GROUP_DATATYPE}> ;
             sh:datatype <{XSD.string}> ;
             sh:minCount 1 ;
             sh:maxCount 1 .
@@ -694,3 +699,73 @@ async def test_create_form_exposes_saved_profile_constraints(
     assert title["constraints"]["minCount"] == 1
     assert title["constraints"]["maxCount"] == 1
     assert title["allowMultiple"] is False
+
+@pytest.mark.asyncio
+async def test_updating_property_constraints_preserves_group_membership(
+    fuseki_store,
+    monkeypatch,
+):
+    property_uri = str(EX.title)
+    property_shape = URIRef("urn:test:TitlePropertyShape")
+    property_group = main.PROPERTY_GROUP_DATATYPE
+
+    await fuseki_store.insert_shapes(f"""
+        <{property_group}>
+            a sh:PropertyGroup ;
+            sh:order 2 .
+
+        <{property_shape}>
+            a sh:PropertyShape ;
+            sh:path <{property_uri}> ;
+            sh:group <{property_group}> ;
+            sh:minCount 1 .
+    """)
+
+    monkeypatch.setattr(
+        main,
+        "store",
+        fuseki_store,
+    )
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value="datatype_property"),
+    )
+    monkeypatch.setattr(
+        main,
+        "validate_constraints",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_validate_profile_range_constraint_compatibility",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None,
+    )
+
+    result = await main.set_entity_constraints(
+        property_uri,
+        {
+            str(SH.minCount): 2,
+        },
+    )
+
+    assert result == {"status": "ok"}
+
+    shapes_graph = await fuseki_store.load_shapes_graph()
+
+    assert (
+        property_shape,
+        SH.group,
+        property_group,
+    ) in shapes_graph
+
+    assert (
+        property_shape,
+        SH.minCount,
+        Literal(2),
+    ) in shapes_graph
