@@ -110,18 +110,58 @@ async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
         for uri in (used_class, created_class, unused_class)
     }
 
+    # Also add the standard property group definitions
+    for group_uri, label, group_order in main.PROPERTY_GROUP_DEFINITIONS:
+        shapes_graph.add((
+            group_uri,
+            RDF.type,
+            SH.PropertyGroup,
+        ))
+        shapes_graph.add((
+            group_uri,
+            SH.order,
+            Literal(group_order),
+        ))
+
     # Properties all have global property shapes. Their relationships
     # to the used class let the test verify dangling links are removed.
     property_shapes = {}
+    property_group_orders = {}
+
     for uri in (
         used_property,
+        unused_property,
         created_property,
         created_datatype_property,
-        unused_property,
-        *main.CORE_ACTIVE_ANNOTATION_PROPERTIES,
+        *sorted(main.CORE_ACTIVE_ANNOTATION_PROPERTIES),
     ):
-        shape = add_active_shape(shapes_graph, "property", uri)
+        shape = add_active_shape(
+            shapes_graph,
+            "property",
+            uri,
+        )
         property_shapes[uri] = shape
+
+        group_uri = (
+            main.PROPERTY_GROUP_ANNOTATION
+            if uri in main.CORE_ACTIVE_ANNOTATION_PROPERTIES
+            else main.PROPERTY_GROUP_OBJECT
+        )
+
+        order = property_group_orders.get(group_uri, 0)
+        property_group_orders[group_uri] = order + 1
+
+        shapes_graph.add((
+            shape,
+            SH.group,
+            group_uri,
+        ))
+        shapes_graph.add((
+            shape,
+            SH.order,
+            Literal(order),
+        ))
+
         shapes_graph.add((
             class_shapes[used_class],
             SH.property,
@@ -312,17 +352,45 @@ async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
         property_shapes[unused_property],
     ) in shapes_graph
 
-    # No existing SHACL information was deleted or modified.
-    # The only permitted changes are deactivation markers.
+    # Constraints, group memberships, and relationships are preserved.
+    # Property orders are allowed to change when an active property is
+    # deactivated.
     assert {
         triple
         for triple in shapes_graph
-        if triple[1] != SH.deactivated
+        if triple[1] not in {SH.deactivated, SH.order}
     } == {
         triple
         for triple in shapes_before
-        if triple[1] != SH.deactivated
+        if triple[1] not in {SH.deactivated, SH.order}
     }
+
+    # The deactivated property retains its group but loses its order.
+    assert (
+        property_shapes[unused_property],
+        SH.group,
+        main.PROPERTY_GROUP_OBJECT,
+    ) in shapes_graph
+
+    assert not list(
+        shapes_graph.objects(
+            property_shapes[unused_property],
+            SH.order,
+        )
+    )
+
+    # The remaining object properties have contiguous zero-based orders.
+    for uri, expected_order in (
+        (used_property, 0),
+        (created_property, 1),
+        (created_datatype_property, 2),
+    ):
+        assert set(
+            shapes_graph.objects(
+                property_shapes[uri],
+                SH.order,
+            )
+        ) == {Literal(expected_order)}
 
     # Field-mode state survives cleanup.
     assert set(field_state_graph) == field_state_before
@@ -344,8 +412,14 @@ async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
     assert set(imported_graph) == imported_before
     assert set(created_graph) == created_before
 
-    # All selected entities are deactivated in one atomic update.
-    assert len(store.update_calls) == 1
+    assert len(store.update_calls) >= 2
+
+    assert any(
+        "sh:deactivated" in update
+        and "sh:order" in update
+        for update in store.update_calls
+    )
+    
     assert f"GRAPH <{main.SHAPES_GRAPH}>" in store.update_calls[0]
 
     assert "sh:deactivated" in store.update_calls[0]

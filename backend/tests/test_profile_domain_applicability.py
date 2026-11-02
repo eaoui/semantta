@@ -591,12 +591,12 @@ async def test_add_property_to_class_does_not_require_preexisting_profile_entity
         persist_modes,
     )
 
-    set_deactivated_mock = AsyncMock()
+    activate_properties_mock = AsyncMock()
 
     monkeypatch.setattr(
         profile,
-        "_set_shape_deactivated",
-        set_deactivated_mock,
+        "activate_properties",
+        activate_properties_mock,
     )
 
     load_modes_mock = AsyncMock(return_value={})
@@ -615,13 +615,8 @@ async def test_add_property_to_class_does_not_require_preexisting_profile_entity
     get_entity_type_mock.assert_not_awaited()
     set_default_constraints_mock.assert_awaited_once()
 
-    set_deactivated_mock.assert_awaited_once_with(
-        main.shape_uri_for_entity(
-            DIRECT_PROPERTY,
-            "property",
-            main.state["prefix_map"],
-        ),
-        False,
+    activate_properties_mock.assert_awaited_once_with(
+        {DIRECT_PROPERTY}
     )
 
     replace_links.assert_awaited_once_with(

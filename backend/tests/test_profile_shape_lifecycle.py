@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
-from rdflib import Dataset, Literal, Namespace, URIRef
-from rdflib.namespace import RDF, RDFS
+from rdflib import Dataset, Graph, Literal, Namespace, URIRef
+from rdflib.namespace import OWL, RDF, RDFS
 from rdflib.query import Result
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -267,9 +267,21 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
 
     await remove_methods[role](uri)
 
-    # Deactivation changes only the activation marker.
+    expected_deactivated_graph = set(original_shape_graph)
+
+    if role == "property":
+        expected_deactivated_graph = {
+            triple
+            for triple in expected_deactivated_graph
+            if not (
+                triple[0] == shape_uri
+                and triple[1] == SH.order
+            )
+        }
+
+    # Property deactivation also removes its ordering value.
     assert without_deactivation_markers(shapes_graph) == (
-        original_shape_graph
+        expected_deactivated_graph
     )
 
     assert set(state_graph) == original_state_graph
@@ -299,6 +311,22 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
     await add_methods[role](uri)
 
     expected_shape_graph = set(original_shape_graph)
+
+    if role == "property":
+        expected_shape_graph = {
+            triple
+            for triple in expected_shape_graph
+            if not (
+                triple[0] == shape_uri
+                and triple[1] == SH.order
+            )
+        }
+
+        expected_shape_graph.add((
+            shape_uri,
+            SH.order,
+            Literal(0),
+        ))
 
     if role == "property":
         expected_group = main._get_property_group_uri(uri)
@@ -380,6 +408,14 @@ async def test_active_entity_queries_exclude_deactivated_shapes(
             Literal(True),
         ))
 
+    untyped_property = str(EX.untypedProperty)
+
+    graph.add((
+        URIRef("urn:test:untyped-property-shape"),
+        SH.path,
+        URIRef(untyped_property),
+    ))
+
     profile = main.SHACLProfile(store)
 
     getters = {
@@ -394,6 +430,8 @@ async def test_active_entity_queries_exclude_deactivated_shapes(
 
         assert set(result) == {active_entities[role]}
         assert inactive_entities[role] not in result
+        
+    assert untyped_property not in await profile.get_active_properties()
 
 
 @pytest.mark.asyncio
@@ -680,6 +718,7 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
                 RDF.type,
                 SH.deactivated,
                 SH.group,
+                SH.order,
             }
     }
 
@@ -708,6 +747,7 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
                 RDF.type,
                 SH.deactivated,
                 SH.group,
+                SH.order,
             }
     }
 
@@ -724,5 +764,360 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
         SH.deactivated,
     ))
 
+    assert set(
+        graph.objects(shape_uri, SH.order)
+    ) == {Literal(0)}
+
     initialize_defaults.assert_awaited_once_with(prop_uri)
     synchronize_domains.assert_awaited_once()
+
+
+def prepare_property_type_map(monkeypatch, property_types):
+    """Prepare the canonical property type mapping for lifecycle tests."""
+    graph = Graph()
+
+    declarations = {
+        "object_property": OWL.ObjectProperty,
+        "datatype_property": OWL.DatatypeProperty,
+        "annotation_property": OWL.AnnotationProperty,
+    }
+
+    for uri, entity_type in property_types.items():
+        graph.add((
+            URIRef(uri),
+            RDF.type,
+            declarations[entity_type],
+        ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        graph,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "ontology_property_type_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_property_type_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "property_type_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "property_type_map_signature",
+        None,
+    )
+
+    main._refresh_property_type_map()
+
+
+@pytest.mark.asyncio
+async def test_property_activation_and_deactivation_maintain_group_order(
+    dataset_store,
+    monkeypatch,
+):
+    dataset, store = dataset_store
+    graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {},
+    )
+
+    object_first = str(EX.ObjectFirst)
+    object_second = str(EX.ObjectSecond)
+    datatype_property = str(EX.DatatypeProperty)
+
+    prepare_property_type_map(
+        monkeypatch,
+        {
+            object_first: "object_property",
+            object_second: "object_property",
+            datatype_property: "datatype_property",
+        },
+    )
+
+    profile = main.SHACLProfile(store)
+
+    monkeypatch.setattr(
+        profile,
+        "_set_default_constraints",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_reconcile_property_domain_links",
+        AsyncMock(),
+    )
+
+    def shape_for(uri):
+        return URIRef(
+            main.shape_uri_for_entity(
+                uri,
+                "property",
+                {},
+            )
+        )
+
+    def order_for(uri):
+        values = set(
+            graph.objects(
+                shape_for(uri),
+                SH.order,
+            )
+        )
+
+        assert len(values) == 1
+
+        return int(next(iter(values)))
+
+    # Add the first object property.
+    await profile.add_property_global(object_first)
+
+    assert order_for(object_first) == 0
+
+    # A newly added property is placed before existing group members.
+    await profile.add_property_global(object_second)
+
+    assert order_for(object_second) == 0
+    assert order_for(object_first) == 1
+
+    # Property ordering is independent across type groups.
+    await profile.add_property_global(datatype_property)
+
+    assert order_for(datatype_property) == 0
+
+    assert (
+        shape_for(datatype_property),
+        SH.group,
+        main.PROPERTY_GROUP_DATATYPE,
+    ) in graph
+
+    # Deactivation removes the order and closes the gap.
+    await profile.remove_property_global(object_second)
+
+    assert not list(
+        graph.objects(
+            shape_for(object_second),
+            SH.order,
+        )
+    )
+
+    assert set(
+        graph.objects(
+            shape_for(object_second),
+            SH.deactivated,
+        )
+    ) == {Literal(True)}
+
+    assert order_for(object_first) == 0
+    assert order_for(datatype_property) == 0
+
+    # Reactivation places the property at the top again.
+    await profile.add_property_global(object_second)
+
+    assert order_for(object_second) == 0
+    assert order_for(object_first) == 1
+    assert order_for(datatype_property) == 0
+
+    # Adding an already-active property must not move it.
+    await profile.add_property_global(object_first)
+
+    assert order_for(object_second) == 0
+    assert order_for(object_first) == 1
+
+    assert not list(
+        graph.objects(
+            shape_for(object_second),
+            SH.deactivated,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_property_activation_and_deactivation_preserve_order(
+    dataset_store,
+    monkeypatch,
+):
+    dataset, store = dataset_store
+    graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {},
+    )
+
+    existing_first = str(EX.xExistingFirst)
+    existing_second = str(EX.yExistingSecond)
+    reactivated = str(EX.bReactivated)
+    new_property = str(EX.aNewProperty)
+
+    property_uris = {
+        existing_first,
+        existing_second,
+        reactivated,
+        new_property,
+    }
+
+    prepare_property_type_map(
+        monkeypatch,
+        {
+            uri: "object_property"
+            for uri in property_uris
+        },
+    )
+
+    group_uri = main.PROPERTY_GROUP_OBJECT
+
+    def shape_for(uri):
+        return URIRef(
+            main.shape_uri_for_entity(
+                uri,
+                "property",
+                {},
+            )
+        )
+
+    # Two properties are already active and ordered.
+    for uri, order in (
+        (existing_first, 4),
+        (existing_second, 9),
+    ):
+        shape_uri = shape_for(uri)
+
+        graph.add((shape_uri, RDF.type, SH.PropertyShape))
+        graph.add((shape_uri, SH.path, URIRef(uri)))
+        graph.add((shape_uri, SH.group, group_uri))
+        graph.add((shape_uri, SH.order, Literal(order)))
+
+    # This property is retained but deactivated.
+    reactivated_shape = shape_for(reactivated)
+
+    graph.add((
+        reactivated_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    graph.add((
+        reactivated_shape,
+        SH.path,
+        URIRef(reactivated),
+    ))
+    graph.add((
+        reactivated_shape,
+        SH.group,
+        group_uri,
+    ))
+    graph.add((
+        reactivated_shape,
+        SH.order,
+        Literal(99),
+    ))
+    graph.add((
+        reactivated_shape,
+        SH.deactivated,
+        Literal(True),
+    ))
+
+    profile = main.SHACLProfile(store)
+
+    # Activate both a previously deactivated property and a new property.
+    await profile.activate_properties({
+        reactivated,
+        new_property,
+    })
+
+    # Newly activated properties are prepended deterministically.
+    expected_order = [
+        new_property,
+        reactivated,
+        existing_first,
+        existing_second,
+    ]
+
+    for order, uri in enumerate(expected_order):
+        assert set(
+            graph.objects(
+                shape_for(uri),
+                SH.order,
+            )
+        ) == {Literal(order)}
+
+    for uri in (reactivated, new_property):
+        assert (
+            shape_for(uri),
+            SH.group,
+            group_uri,
+        ) in graph
+
+        assert not list(
+            graph.objects(
+                shape_for(uri),
+                SH.deactivated,
+            )
+        )
+
+    # Repeated activation must not alter the ordering.
+    first_snapshot = set(graph)
+
+    await profile.activate_properties({
+        reactivated,
+        new_property,
+    })
+
+    assert set(graph) == first_snapshot
+
+    # Batch deactivation removes both orders and compacts the group.
+    await profile.deactivate_properties({
+        reactivated,
+        new_property,
+    })
+
+    for uri in (reactivated, new_property):
+        assert (
+            shape_for(uri),
+            SH.group,
+            group_uri,
+        ) in graph
+
+        assert set(
+            graph.objects(
+                shape_for(uri),
+                SH.deactivated,
+            )
+        ) == {Literal(True)}
+
+        assert not list(
+            graph.objects(
+                shape_for(uri),
+                SH.order,
+            )
+        )
+
+    assert set(
+        graph.objects(
+            shape_for(existing_first),
+            SH.order,
+        )
+    ) == {Literal(0)}
+
+    assert set(
+        graph.objects(
+            shape_for(existing_second),
+            SH.order,
+        )
+    ) == {Literal(1)}

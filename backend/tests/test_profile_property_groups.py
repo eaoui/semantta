@@ -233,6 +233,12 @@ async def test_add_property_global_assigns_ontology_type_group(
 
     assert (
         shape_uri,
+        main.SH.order,
+        Literal(0),
+    ) in graph
+
+    assert (
+        shape_uri,
         main.SH.deactivated,
         Literal(True),
     ) not in graph
@@ -311,4 +317,10 @@ async def test_add_property_to_class_assigns_ontology_type_group(
         shape_uri,
         main.SH.group,
         main.PROPERTY_GROUP_OBJECT,
+    ) in graph
+
+    assert (
+        shape_uri,
+        main.SH.order,
+        Literal(0),
     ) in graph

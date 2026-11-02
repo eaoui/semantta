@@ -4976,6 +4976,434 @@ class SHACLProfile:
 
         return len(groups_by_shape)
 
+    async def _get_property_shape_state(
+        self,
+        property_uris: Set[str],
+    ) -> tuple[Set[str], Dict[str, Set[str]]]:
+        """Return active properties and existing SHACL group memberships."""
+        normalized_uris = sorted(set(property_uris))
+
+        if not normalized_uris:
+            return set(), {}
+
+        property_values = " ".join(
+            _sparql_iri(uri, "property URI")
+            for uri in normalized_uris
+        )
+
+        group_rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?propUri ?group WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    VALUES ?propUri {{ {property_values} }}
+
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+
+                    OPTIONAL {{
+                        ?propertyShape sh:group ?group .
+                    }}
+                }}
+            }}
+        """)
+
+        groups_by_property: Dict[str, Set[str]] = {}
+
+        for row in group_rows:
+            group_uri = row.get("group")
+
+            if group_uri:
+                groups_by_property.setdefault(
+                    row["propUri"],
+                    set(),
+                ).add(group_uri)
+
+        active_rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?propUri WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    VALUES ?propUri {{ {property_values} }}
+
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+
+                    FILTER NOT EXISTS {{
+                        ?propertyShape sh:deactivated true .
+                    }}
+                }}
+            }}
+        """)
+
+        active_properties = {
+            row["propUri"]
+            for row in active_rows
+        }
+
+        return active_properties, groups_by_property
+
+    async def _normalize_property_group_order(
+        self,
+        group_uri: str,
+        prepend_uris: Optional[Set[str]] = None,
+    ) -> None:
+        """Assign contiguous zero-based order to active members of a group."""
+        group_ref = _sparql_iri(
+            group_uri,
+            "property group URI",
+        )
+
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?propertyShape ?propUri ?order WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri ;
+                        sh:group {group_ref} .
+
+                    OPTIONAL {{
+                        ?propertyShape sh:order ?order .
+                    }}
+
+                    FILTER NOT EXISTS {{
+                        ?propertyShape sh:deactivated true .
+                    }}
+                }}
+            }}
+        """)
+
+        shape_by_property: Dict[str, str] = {}
+        property_by_shape: Dict[str, str] = {}
+        existing_orders: Dict[str, Set[int]] = {}
+
+        for row in rows:
+            property_uri = row["propUri"]
+            shape_uri = row["propertyShape"]
+
+            existing_shape = shape_by_property.get(property_uri)
+
+            if existing_shape is not None and existing_shape != shape_uri:
+                raise RuntimeError(
+                    "Multiple active PropertyShapes found for property "
+                    f"{property_uri}."
+                )
+
+            existing_property = property_by_shape.get(shape_uri)
+
+            if (
+                existing_property is not None
+                and existing_property != property_uri
+            ):
+                raise RuntimeError(
+                    "A PropertyShape has multiple property paths: "
+                    f"{shape_uri}."
+                )
+
+            shape_by_property[property_uri] = shape_uri
+            property_by_shape[shape_uri] = property_uri
+
+            raw_order = row.get("order")
+
+            if raw_order is not None:
+                try:
+                    order_value = int(raw_order)
+                except (TypeError, ValueError):
+                    continue
+
+                if order_value >= 0:
+                    existing_orders.setdefault(
+                        property_uri,
+                        set(),
+                    ).add(order_value)
+
+        if not shape_by_property:
+            return
+
+        promoted = set(prepend_uris or set())
+        missing_promoted = promoted - set(shape_by_property)
+
+        if missing_promoted:
+            raise RuntimeError(
+                "Cannot prepend properties that are not active members "
+                f"of group {group_uri}: {sorted(missing_promoted)}"
+            )
+
+        # Newly activated properties come first.
+        ordered_properties = sorted(promoted)
+
+        # Preserve the relative order of all other active properties.
+        remaining_properties = sorted(
+            set(shape_by_property) - promoted,
+            key=lambda uri: (
+                min(
+                    existing_orders.get(uri, set()),
+                    default=float("inf"),
+                ),
+                uri,
+            ),
+        )
+
+        ordered_properties.extend(remaining_properties)
+
+        shape_values = ", ".join(
+            _sparql_iri(
+                shape_by_property[prop_uri],
+                "property shape URI",
+            )
+            for prop_uri in ordered_properties
+        )
+
+        # Remove all existing order values from the active group members.
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:order ?oldOrder .
+                }}
+            }}
+            WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:order ?oldOrder .
+
+                    FILTER (
+                        ?propertyShape IN ({shape_values})
+                    )
+                }}
+            }}
+        """)
+
+        # Insert one contiguous, zero-based order for every active member.
+        order_triples = "\n".join(
+            (
+                f"{_sparql_iri(shape_by_property[prop_uri], 'property shape URI')} "
+                f"sh:order {Literal(order).n3()} ."
+            )
+            for order, prop_uri in enumerate(ordered_properties)
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            INSERT DATA {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    {order_triples}
+                }}
+            }}
+        """)
+
+    async def activate_properties(
+        self,
+        property_uris: Set[str],
+        *,
+        previous_state: Optional[
+            tuple[Set[str], Dict[str, Set[str]]]
+        ] = None,
+    ) -> None:
+        """Activate property shapes and maintain group-local ordering."""
+        normalized_uris = sorted(set(property_uris))
+
+        if not normalized_uris:
+            return
+
+        if previous_state is None:
+            active_before, groups_before = (
+                await self._get_property_shape_state(
+                    set(normalized_uris)
+                )
+            )
+        else:
+            active_before, groups_before = previous_state
+
+            active_before = set(active_before)
+            groups_before = {
+                uri: set(groups)
+                for uri, groups in groups_before.items()
+            }
+
+        shape_values = " ".join(
+            (
+                f"({_sparql_iri(shape_uri_for_entity(uri, 'property', state['prefix_map']), 'property shape URI')} "
+                f"{_sparql_iri(uri, 'property URI')})"
+            )
+            for uri in normalized_uris
+        )
+
+        # Create missing PropertyShapes without replacing existing shapes.
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+                }}
+            }}
+            WHERE {{
+                VALUES (?propertyShape ?propUri) {{
+                    {shape_values}
+                }}
+
+                FILTER NOT EXISTS {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?propertyShape
+                            a sh:PropertyShape ;
+                            sh:path ?propUri .
+                    }}
+                }}
+            }}
+        """)
+
+        # Resolve groups exclusively through the Commit 4.3 mapping.
+        await self._assign_property_groups(
+            set(normalized_uris)
+        )
+
+        # Remove deactivation markers from the selected PropertyShapes.
+        property_values = ", ".join(
+            _sparql_iri(uri, "property URI")
+            for uri in normalized_uris
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:deactivated ?existing .
+                }}
+            }}
+            WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri ;
+                        sh:deactivated ?existing .
+
+                    FILTER (
+                        ?propUri IN ({property_values})
+                    )
+                }}
+            }}
+        """)
+
+        _, groups_after = await self._get_property_shape_state(
+            set(normalized_uris)
+        )
+
+        affected_groups = set()
+        promoted_by_group: Dict[str, Set[str]] = {}
+
+        for prop_uri in normalized_uris:
+            old_groups = groups_before.get(prop_uri, set())
+            new_groups = groups_after.get(prop_uri, set())
+
+            if not new_groups:
+                raise RuntimeError(
+                    "Property activation did not assign a SHACL group "
+                    f"to property {prop_uri}."
+                )
+
+            # A property is promoted when it becomes active or changes group.
+            if prop_uri not in active_before or old_groups != new_groups:
+                affected_groups.update(old_groups)
+                affected_groups.update(new_groups)
+
+                for group_uri in new_groups:
+                    if (
+                        prop_uri not in active_before
+                        or group_uri not in old_groups
+                    ):
+                        promoted_by_group.setdefault(
+                            group_uri,
+                            set(),
+                        ).add(prop_uri)
+
+        # Normalize each affected group once.
+        for group_uri in sorted(affected_groups):
+            await self._normalize_property_group_order(
+                group_uri,
+                promoted_by_group.get(group_uri, set()),
+            )
+
+        self.invalidate_shapes_cache()
+
+    async def deactivate_properties(
+        self,
+        property_uris: Set[str],
+    ) -> None:
+        """Deactivate property shapes and close ordering gaps."""
+        normalized_uris = sorted(set(property_uris))
+
+        if not normalized_uris:
+            return
+
+        _, groups_before = await self._get_property_shape_state(
+            set(normalized_uris)
+        )
+
+        # Preserve the complete shape and its group, but remove its order.
+        property_values = ", ".join(
+            _sparql_iri(uri, "property URI")
+            for uri in normalized_uris
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape
+                        sh:deactivated ?oldDeactivation ;
+                        sh:order ?oldOrder .
+                }}
+            }}
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape sh:deactivated true .
+                }}
+            }}
+            WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?propertyShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+
+                    FILTER (
+                        ?propUri IN ({property_values})
+                    )
+
+                    OPTIONAL {{
+                        ?propertyShape sh:deactivated ?oldDeactivation .
+                    }}
+
+                    OPTIONAL {{
+                        ?propertyShape sh:order ?oldOrder .
+                    }}
+                }}
+            }}
+        """)
+
+        affected_groups = {
+            group_uri
+            for groups in groups_before.values()
+            for group_uri in groups
+        }
+
+        # Compact each affected group after deactivation.
+        for group_uri in sorted(affected_groups):
+            await self._normalize_property_group_order(
+                group_uri
+            )
+
+        self.invalidate_shapes_cache()
+
     async def _set_shape_deactivated(
         self,
         shape_uri: str,
@@ -5369,39 +5797,7 @@ class SHACLProfile:
         class_uri: str,
         prop_uri: str,
     ):
-        prop_shape_uri = shape_uri_for_entity(
-            prop_uri,
-            "property",
-            state["prefix_map"],
-        )
-
-        await self.store.update(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-
-            INSERT {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    <{prop_shape_uri}>
-                        a sh:PropertyShape ;
-                        sh:path <{prop_uri}> .
-                }}
-            }}
-            WHERE {{
-                FILTER NOT EXISTS {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        <{prop_shape_uri}> a sh:PropertyShape .
-                    }}
-                }}
-            }}
-        """)
-
-        # Adding a property to a class explicitly activates its
-        # global PropertyShape, if it was previously deactivated.
-        await self._set_shape_deactivated(
-            prop_shape_uri,
-            False,
-        )
-
-        await self._assign_property_groups(
+        await self.activate_properties(
             {prop_uri}
         )
 
@@ -5554,35 +5950,12 @@ class SHACLProfile:
         self._changed()
 
     async def add_property_global(self, prop_uri: str):
-        shape_uri = shape_uri_for_entity(
-            prop_uri,
-            "property",
-            state["prefix_map"],
+        await self.activate_properties(
+            {prop_uri}
         )
 
-        await self.store.update(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-
-            INSERT {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    <{shape_uri}>
-                        a sh:PropertyShape ;
-                        sh:path <{prop_uri}> .
-                }}
-            }}
-            WHERE {{
-                FILTER NOT EXISTS {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        <{shape_uri}> a sh:PropertyShape .
-                    }}
-                }}
-            }}
-        """)
-
-        await self._set_default_constraints(prop_uri)
-        await self._set_shape_deactivated(shape_uri, False)
-        await self._assign_property_groups(
-            {prop_uri}
+        await self._set_default_constraints(
+            prop_uri
         )
 
         self._changed()
@@ -5599,13 +5972,10 @@ class SHACLProfile:
                 "Core annotation properties cannot be removed.",
             )
 
-        shape_uri = shape_uri_for_entity(
-            prop_uri,
-            "property",
-            state["prefix_map"],
+        await self.deactivate_properties(
+            {prop_uri}
         )
 
-        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def get_active_classes(self) -> List[str]:
@@ -5626,13 +5996,16 @@ class SHACLProfile:
 
     async def get_active_properties(self) -> List[str]:
         rows = await self.store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
+            PREFIX sh: <{SH}>
+
             SELECT DISTINCT ?prop WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape sh:path ?prop .
+                    ?shape
+                        a sh:PropertyShape ;
+                        sh:path ?prop .
 
                     FILTER NOT EXISTS {{
-                        ?shape sh:deactivated true
+                        ?shape sh:deactivated true .
                     }}
                 }}
             }}
@@ -5755,6 +6128,12 @@ class SHACLProfile:
         property_uris = entities["property"]
         datatype_uris = entities["datatype"]
         individual_uris = entities["individual"]
+
+        property_state_before = (
+            await self._get_property_shape_state(
+                property_uris
+            )
+        )
 
         # Infer types for metadata-only properties before assigning their SHACL groups.
         ontology_property_types = (
@@ -5928,12 +6307,16 @@ class SHACLProfile:
             shape_uri_for_entity(uri, role, state["prefix_map"])
             for role, uris in (
                 ("class", class_uris),
-                ("property", property_uris),
                 ("datatype", datatype_uris),
                 ("individual", individual_uris),
             )
             for uri in uris
         }
+
+        await self.activate_properties(
+            property_uris,
+            previous_state=property_state_before,
+        )
 
         if activated_shape_uris:
             shape_values = " ".join(
@@ -5957,61 +6340,9 @@ class SHACLProfile:
                 }}
             """)
 
-        # Assign each integrated property shape to its ontology-type group.
-        await self._assign_property_groups(property_uris)
-
         # Add default constraints only where they do not already exist.
         for prop_uri in sorted(property_uris):
             await self._set_default_constraints(prop_uri)
-
-        # Preserve existing property order. Restore the default order only
-        # when the property shape does not already have an order.
-        order_map = await get_global_property_order()
-        order_values = []
-
-        for prop_uri in sorted(property_uris):
-            if prop_uri not in order_map:
-                continue
-
-            property_shape_uri = _sparql_iri(
-                shape_uri_for_entity(
-                    prop_uri,
-                    "property",
-                    state["prefix_map"],
-                ),
-                "property shape URI",
-            )
-
-            order_value = _format_constraint_value(
-                str(SH.order),
-                order_map[prop_uri],
-            )
-
-            order_values.append(
-                f"({property_shape_uri} {order_value})"
-            )
-
-        if order_values:
-            await self.store.update(f"""
-                PREFIX sh: <{SH}>
-
-                INSERT {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        ?shape sh:order ?ord
-                    }}
-                }}
-                WHERE {{
-                    VALUES (?shape ?ord) {{
-                        {" ".join(order_values)}
-                    }}
-
-                    FILTER NOT EXISTS {{
-                        GRAPH <{SHAPES_GRAPH}> {{
-                            ?shape sh:order ?existing
-                        }}
-                    }}
-                }}
-            """)
 
         integrated_uris = set().union(
             *entities.values()
@@ -6828,7 +7159,7 @@ async def seed_core_active_entities():
             await shacl.add_datatype(uri)
         except Exception:
             pass
-    for uri in CORE_ACTIVE_ANNOTATION_PROPERTIES:
+    for uri in sorted(CORE_ACTIVE_ANNOTATION_PROPERTIES):
         try:
             await shacl.add_property_global(uri)
         except Exception:
@@ -9994,16 +10325,6 @@ async def deactivate_unused_entities_endpoint():
             "?shape a sh:NodeShape ; sh:targetClass ?entity . }"
         )
 
-    if unused_by_role["property"]:
-        values = " ".join(
-            _sparql_iri(uri, "property URI")
-            for uri in unused_by_role["property"]
-        )
-        branches.append(
-            "{ VALUES ?entity { " + values + " } "
-            "?shape sh:path ?entity . }"
-        )
-
     if unused_by_role["datatype"]:
         values = " ".join(
             _sparql_iri(uri, "datatype URI")
@@ -10026,33 +10347,39 @@ async def deactivate_unused_entities_endpoint():
             'FILTER(STRSTARTS(STR(?shape), "urn:shape:individual:")) }'
         )
 
-    shape_match = "\nUNION\n".join(branches)
+    if branches:
+        shape_match = "\nUNION\n".join(branches)
 
-    await store.update(f"""
-        PREFIX sh: <{SH}>
+        await store.update(f"""
+            PREFIX sh: <{SH}>
 
-        DELETE {{
-            GRAPH <{SHAPES_GRAPH}> {{
-                ?shape sh:deactivated ?existing .
-            }}
-        }}
-        INSERT {{
-            GRAPH <{SHAPES_GRAPH}> {{
-                ?shape sh:deactivated true .
-            }}
-        }}
-        WHERE {{
-            GRAPH <{SHAPES_GRAPH}> {{
-                {{
-                    {shape_match}
-                }}
-
-                OPTIONAL {{
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
                     ?shape sh:deactivated ?existing .
                 }}
             }}
-        }}
-    """)
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape sh:deactivated true .
+                }}
+            }}
+            WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    {{
+                        {shape_match}
+                    }}
+
+                    OPTIONAL {{
+                        ?shape sh:deactivated ?existing .
+                    }}
+                }}
+            }}
+        """)
+
+    if unused_by_role["property"]:
+        await shacl.deactivate_properties(
+            set(unused_by_role["property"])
+        )
 
     invalidate_profile()
 

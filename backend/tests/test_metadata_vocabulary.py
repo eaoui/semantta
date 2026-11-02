@@ -239,6 +239,34 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
         assign_property_groups,
     )
 
+    property_shape_state = AsyncMock(
+        side_effect=[
+            (set(), {}),
+            (
+                set(),
+                {
+                    str(EX.title): {
+                        str(main.PROPERTY_GROUP_DATATYPE)
+                    }
+                },
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        profile,
+        "_get_property_shape_state",
+        property_shape_state,
+    )
+
+    normalize_property_order = AsyncMock()
+
+    monkeypatch.setattr(
+        profile,
+        "_normalize_property_group_order",
+        normalize_property_order,
+    )
+
     monkeypatch.setattr(
         main,
         "_get_active_profile_classes",
@@ -284,6 +312,15 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
     )
 
     await profile.generate_from_metadata()
+
+    assign_property_groups.assert_awaited_once_with(
+        {str(EX.title)}
+    )
+
+    normalize_property_order.assert_awaited_once_with(
+        str(main.PROPERTY_GROUP_DATATYPE),
+        {str(EX.title)},
+    )
 
     metadata_roles.assert_awaited_once_with(
         [str(EX.title)]
@@ -639,6 +676,11 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         RDF.type,
         OWL.DatatypeProperty,
     ))
+    ontology_graph.add((
+        EX.existingTitle,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
 
     monkeypatch.setitem(
         main.state,
@@ -683,12 +725,98 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         "property": {str(EX.title)},
     }
 
+    existing_property_shape = URIRef(
+        main.shape_uri_for_entity(
+            str(EX.existingTitle),
+            "property",
+            {},
+        )
+    )
+
+    shapes_graph.add((
+        existing_property_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        existing_property_shape,
+        SH.path,
+        EX.existingTitle,
+    ))
+    shapes_graph.add((
+        existing_property_shape,
+        SH.group,
+        main.PROPERTY_GROUP_DATATYPE,
+    ))
+    shapes_graph.add((
+        existing_property_shape,
+        SH.order,
+        Literal(0),
+    ))
+
+    generated_property_shape = URIRef(
+        main.shape_uri_for_entity(
+            str(EX.title),
+            "property",
+            {},
+        )
+    )
+
+    shapes_graph.add((
+        generated_property_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        generated_property_shape,
+        SH.path,
+        EX.title,
+    ))
+    shapes_graph.add((
+        generated_property_shape,
+        SH.group,
+        main.PROPERTY_GROUP_DATATYPE,
+    ))
+    shapes_graph.add((
+        generated_property_shape,
+        SH.order,
+        Literal(99),
+    ))
+    shapes_graph.add((
+        generated_property_shape,
+        SH.deactivated,
+        Literal(True),
+    ))
+
     first_result = await profile.integrate_metadata_graphs(
         [GRAPH_ONE],
         source="catalog.ttl",
     )
     first_snapshot = set(shapes_graph)
     first_state_snapshot = set(field_state_graph)
+
+    # Metadata integration reactivates the property and puts it first.
+    assert not list(
+        shapes_graph.objects(
+            generated_property_shape,
+            SH.deactivated,
+        )
+    )
+
+    assert set(
+        shapes_graph.objects(
+            generated_property_shape,
+            SH.order,
+        )
+    ) == {Literal(0)}
+
+    # Previously active properties retain their relative order.
+    assert set(
+        shapes_graph.objects(
+            existing_property_shape,
+            SH.order,
+        )
+    ) == {Literal(1)}
 
     second_result = await profile.integrate_metadata_graphs(
         [GRAPH_ONE],
@@ -753,6 +881,12 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
         generated_property_shape,
         SH.path,
         EX.title,
+    ) in shapes_graph
+
+    assert (
+        generated_property_shape,
+        SH.order,
+        Literal(0),
     ) in shapes_graph
 
     # Metadata integration assigns the existing backend property type.
