@@ -18,7 +18,8 @@
         <thead>
           <tr class="bg-gray-50 dark:bg-gray-700">
             <th v-if="isPropertyTab"
-              class="border border-gray-300 dark:border-gray-600 p-2 text-left w-8 text-gray-700 dark:text-gray-300">
+              class="border border-gray-300 dark:border-gray-600 p-2 text-center w-20 text-gray-700 dark:text-gray-300">
+              Order
             </th>
             <th class="border border-gray-300 dark:border-gray-600 p-2 text-left text-gray-700 dark:text-gray-300">
               {{ store.displayFormat === 'label' ? 'Entity' : 'URI' }}
@@ -373,7 +374,7 @@ async function saveNewOrder(list: ProfileEntityItem[]) {
 
   const items = completeGroupOrder.map((entity, index) => ({
     uri: entity.uri,
-    order: index,
+    order: index + 1,
   }))
 
   if (!items.length) return

@@ -234,7 +234,7 @@ async def test_add_property_global_assigns_ontology_type_group(
     assert (
         shape_uri,
         main.SH.order,
-        Literal(0),
+        Literal(1),
     ) in graph
 
     assert (
@@ -322,5 +322,5 @@ async def test_add_property_to_class_assigns_ontology_type_group(
     assert (
         shape_uri,
         main.SH.order,
-        Literal(0),
+        Literal(1),
     ) in graph

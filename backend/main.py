@@ -5184,7 +5184,7 @@ class SHACLProfile:
                 f"{_sparql_iri(shape_by_property[prop_uri], 'property shape URI')} "
                 f"sh:order {Literal(order).n3()} ."
             )
-            for order, prop_uri in enumerate(ordered_properties)
+            for order, prop_uri in enumerate(ordered_properties, start=1)
         )
 
         await self.store.update(f"""
@@ -10445,22 +10445,22 @@ async def update_profile_order(data: dict):
                 f"Duplicate property URI in ordering request: {uri}",
             )
 
-        if type(order_value) is not int or order_value < 0:
+        if type(order_value) is not int or order_value < 1:
             raise HTTPException(
                 400,
-                "Property order values must be non-negative integers.",
+                "Property order values must be positive integers.",
             )
 
         uris.append(uri)
         order_by_uri[uri] = order_value
 
-    expected_orders = list(range(len(items)))
+    expected_orders = list(range(1, len(items) + 1))
 
     if sorted(order_by_uri.values()) != expected_orders:
         raise HTTPException(
             400,
             "Property order values must be unique and contiguous, "
-            "starting at zero.",
+            "starting at one.",
         )
 
     property_values = " ".join(

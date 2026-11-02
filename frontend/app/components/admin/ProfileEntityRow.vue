@@ -2,7 +2,14 @@
   <tr>
     <!-- Drag handle -->
     <td v-if="draggable" class="border border-gray-300 dark:border-gray-600 p-2 text-center drag-handle cursor-grab"
-      :class="mutedTextClass">⠿</td>
+      :class="mutedTextClass">
+      <div class="inline-flex items-center justify-center gap-2">
+        <span class="min-w-5 text-right text-xs tabular-nums">
+          {{ props.entity.order ?? '—' }}
+        </span>
+        <span>⠿</span>
+      </div>
+    </td>
 
     <!-- URI -->
     <td class="border border-gray-300 dark:border-gray-600 p-2" :class="mutedTextClass">
@@ -18,7 +25,7 @@
     <!-- Domain (only for properties) -->
     <td v-if="showDomain" class="border border-gray-300 dark:border-gray-600 p-2 text-sm" :class="mutedTextClass">
       <span v-if="props.entity.domain?.length">{{props.entity.domain.map(d => displayEntityLabel(d)).join(', ')
-      }}</span>
+        }}</span>
       <span v-else class="italic">
         Universal (all classes)
       </span>

@@ -751,7 +751,7 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
     shapes_graph.add((
         existing_property_shape,
         SH.order,
-        Literal(0),
+        Literal(1),
     ))
 
     generated_property_shape = URIRef(
@@ -808,7 +808,7 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
             generated_property_shape,
             SH.order,
         )
-    ) == {Literal(0)}
+    ) == {Literal(1)}
 
     # Previously active properties retain their relative order.
     assert set(
@@ -816,7 +816,7 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
             existing_property_shape,
             SH.order,
         )
-    ) == {Literal(1)}
+    ) == {Literal(2)}
 
     second_result = await profile.integrate_metadata_graphs(
         [GRAPH_ONE],
@@ -886,7 +886,7 @@ async def test_metadata_integration_is_idempotent_and_preserves_custom_constrain
     assert (
         generated_property_shape,
         SH.order,
-        Literal(0),
+        Literal(1),
     ) in shapes_graph
 
     # Metadata integration assigns the existing backend property type.

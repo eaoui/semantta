@@ -379,11 +379,11 @@ async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
         )
     )
 
-    # The remaining object properties have contiguous zero-based orders.
+    # The remaining object properties have contiguous one-based orders.
     for uri, expected_order in (
-        (used_property, 0),
-        (created_property, 1),
-        (created_datatype_property, 2),
+        (used_property, 1),
+        (created_property, 2),
+        (created_datatype_property, 3),
     ):
         assert set(
             shapes_graph.objects(

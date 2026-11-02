@@ -18,8 +18,8 @@ PROPERTY_C = "http://example.org/propertyC"
 async def test_order_map_query_excludes_inactive_properties():
     store = AsyncMock()
     store.query.return_value = [
-        {"propUri": PROPERTY_A, "ord": "0"},
-        {"propUri": PROPERTY_B, "ord": "1"},
+        {"propUri": PROPERTY_A, "ord": "1"},
+        {"propUri": PROPERTY_B, "ord": "2"},
     ]
 
     profile = main.ApplicationProfile(store)
@@ -27,8 +27,8 @@ async def test_order_map_query_excludes_inactive_properties():
     await profile._ensure_order_map()
 
     assert profile._order_map == {
-        PROPERTY_A: 0,
-        PROPERTY_B: 1,
+        PROPERTY_A: 1,
+        PROPERTY_B: 2,
     }
 
     query = store.query.await_args.args[0]
@@ -46,17 +46,17 @@ async def test_list_active_properties_sorts_by_group_then_local_order(
     store.query.return_value = [
         {
             "propUri": PROPERTY_B,
-            "sortOrder": "1",
+            "sortOrder": "2",
             "sortGroupOrder": "1",
         },
         {
             "propUri": PROPERTY_C,
-            "sortOrder": "0",
+            "sortOrder": "1",
             "sortGroupOrder": "2",
         },
         {
             "propUri": PROPERTY_A,
-            "sortOrder": "0",
+            "sortOrder": "1",
             "sortGroupOrder": "1",
         },
     ]
@@ -90,9 +90,9 @@ async def test_list_active_properties_sorts_by_group_then_local_order(
     ]
 
     assert [item["order"] for item in result] == [
-        0,
         1,
-        0,
+        2,
+        1,
     ]
 
 
@@ -118,8 +118,8 @@ async def test_update_profile_order_accepts_one_complete_group(
 
     result = await main.update_profile_order({
         "items": [
-            {"uri": PROPERTY_B, "order": 0},
-            {"uri": PROPERTY_A, "order": 1},
+            {"uri": PROPERTY_B, "order": 1},
+            {"uri": PROPERTY_A, "order": 2},
         ],
     })
 
@@ -145,8 +145,8 @@ async def test_update_profile_order_rejects_duplicate_properties(
     with pytest.raises(HTTPException) as exc_info:
         await main.update_profile_order({
             "items": [
-                {"uri": PROPERTY_A, "order": 0},
                 {"uri": PROPERTY_A, "order": 1},
+                {"uri": PROPERTY_A, "order": 2},
             ],
         })
 
@@ -166,7 +166,7 @@ async def test_update_profile_order_rejects_inactive_properties(
     with pytest.raises(HTTPException) as exc_info:
         await main.update_profile_order({
             "items": [
-                {"uri": PROPERTY_A, "order": 0},
+                {"uri": PROPERTY_A, "order": 1},
             ],
         })
 
@@ -189,8 +189,8 @@ async def test_update_profile_order_rejects_mixed_groups(
     with pytest.raises(HTTPException) as exc_info:
         await main.update_profile_order({
             "items": [
-                {"uri": PROPERTY_A, "order": 0},
-                {"uri": PROPERTY_B, "order": 1},
+                {"uri": PROPERTY_A, "order": 1},
+                {"uri": PROPERTY_B, "order": 2},
             ],
         })
 
@@ -220,7 +220,7 @@ async def test_update_profile_order_rejects_incomplete_group(
     with pytest.raises(HTTPException) as exc_info:
         await main.update_profile_order({
             "items": [
-                {"uri": PROPERTY_A, "order": 0},
+                {"uri": PROPERTY_A, "order": 1},
             ],
         })
 
@@ -239,9 +239,28 @@ async def test_update_profile_order_rejects_noncontiguous_orders(
         await main.update_profile_order({
             "items": [
                 {"uri": PROPERTY_A, "order": 1},
-                {"uri": PROPERTY_B, "order": 2},
+                {"uri": PROPERTY_B, "order": 3},
             ],
         })
 
     assert exc_info.value.status_code == 400
     store.query.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_update_profile_order_rejects_zero_based_values(
+    monkeypatch,
+):
+    store = AsyncMock()
+    monkeypatch.setattr(main, "store", store)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.update_profile_order({
+            "items": [
+                {"uri": PROPERTY_A, "order": 0},
+            ],
+        })
+
+    assert exc_info.value.status_code == 400
+    assert "positive integers" in exc_info.value.detail
+    store.query.assert_not_awaited()
+    store.update.assert_not_awaited()

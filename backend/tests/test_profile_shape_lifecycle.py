@@ -325,7 +325,7 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
         expected_shape_graph.add((
             shape_uri,
             SH.order,
-            Literal(0),
+            Literal(1),
         ))
 
     if role == "property":
@@ -766,7 +766,7 @@ async def test_reactivating_property_does_not_reset_existing_constraints(
 
     assert set(
         graph.objects(shape_uri, SH.order)
-    ) == {Literal(0)}
+    ) == {Literal(1)}
 
     initialize_defaults.assert_awaited_once_with(prop_uri)
     synchronize_domains.assert_awaited_once()
@@ -887,18 +887,18 @@ async def test_property_activation_and_deactivation_maintain_group_order(
     # Add the first object property.
     await profile.add_property_global(object_first)
 
-    assert order_for(object_first) == 0
+    assert order_for(object_first) == 1
 
     # A newly added property is placed before existing group members.
     await profile.add_property_global(object_second)
 
-    assert order_for(object_second) == 0
-    assert order_for(object_first) == 1
+    assert order_for(object_second) == 1
+    assert order_for(object_first) == 2
 
     # Property ordering is independent across type groups.
     await profile.add_property_global(datatype_property)
 
-    assert order_for(datatype_property) == 0
+    assert order_for(datatype_property) == 1
 
     assert (
         shape_for(datatype_property),
@@ -923,21 +923,21 @@ async def test_property_activation_and_deactivation_maintain_group_order(
         )
     ) == {Literal(True)}
 
-    assert order_for(object_first) == 0
-    assert order_for(datatype_property) == 0
+    assert order_for(object_first) == 1
+    assert order_for(datatype_property) == 1
 
     # Reactivation places the property at the top again.
     await profile.add_property_global(object_second)
 
-    assert order_for(object_second) == 0
-    assert order_for(object_first) == 1
-    assert order_for(datatype_property) == 0
+    assert order_for(object_second) == 1
+    assert order_for(object_first) == 2
+    assert order_for(datatype_property) == 1
 
     # Adding an already-active property must not move it.
     await profile.add_property_global(object_first)
 
-    assert order_for(object_second) == 0
-    assert order_for(object_first) == 1
+    assert order_for(object_second) == 1
+    assert order_for(object_first) == 2
 
     assert not list(
         graph.objects(
@@ -1049,7 +1049,7 @@ async def test_batch_property_activation_and_deactivation_preserve_order(
         existing_second,
     ]
 
-    for order, uri in enumerate(expected_order):
+    for order, uri in enumerate(expected_order, start=1):
         assert set(
             graph.objects(
                 shape_for(uri),
@@ -1113,11 +1113,11 @@ async def test_batch_property_activation_and_deactivation_preserve_order(
             shape_for(existing_first),
             SH.order,
         )
-    ) == {Literal(0)}
+    ) == {Literal(1)}
 
     assert set(
         graph.objects(
             shape_for(existing_second),
             SH.order,
         )
-    ) == {Literal(1)}
+    ) == {Literal(2)}
