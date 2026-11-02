@@ -91,9 +91,12 @@
           class="max-h-96 overflow-y-auto overflow-x-hidden border border-gray-300 dark:border-gray-600 rounded py-2 dark:bg-gray-800">
           <button v-for="entity in filteredInactiveEntities" :key="entity.uri"
             class="flex items-stretch justify-between py-1 hover:text-blue-600 dark:hover:text-blue-400 text-sm cursor-pointer border-b border-gray-200 dark:border-gray-700 last:border-0 hover:bg-gray-100 dark:hover:bg-gray-700 w-full"
-            :class="{ 'text-gray-500 dark:text-gray-400': !entity.in_onto && entity.ontology !== 'System' }"
+            :class="{
+              'text-gray-500 dark:text-gray-400': !entity.in_onto && entity.ontology !== 'System',
+              'text-gray-900 dark:text-gray-100': entity.in_onto || entity.ontology === 'System',
+            }"
             @click="addEntity(entity.uri)" title="Add entity">
-            <span class="pl-2 py-2 text-left leading-4 text-gray-900 dark:text-gray-100 break-all">
+            <span class="pl-2 py-2 text-left leading-4 break-all">
               {{ displayEntityLabel(entity) }}
             </span>
           </button>
