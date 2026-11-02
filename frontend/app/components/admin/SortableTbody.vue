@@ -5,7 +5,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, onBeforeUpdate, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUpdate, onUpdated } from 'vue'
 import Sortable from 'sortablejs'
 
 const props = defineProps<{
@@ -42,18 +42,14 @@ onMounted(() => {
   createSortable()
 })
 
-watch(() => props.modelValue.length, () => {
-  if (sortable) {
-    sortable.destroy()
-    sortable = null
-  }
-  nextTick(() => createSortable())
-})
-
 onBeforeUpdate(() => {
   if (sortable) {
     sortable.destroy()
     sortable = null
   }
+})
+
+onUpdated(() => {
+  createSortable()
 })
 </script>

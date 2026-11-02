@@ -17,7 +17,7 @@
       <table class="w-full border-collapse border border-gray-300 dark:border-gray-600">
         <thead>
           <tr class="bg-gray-50 dark:bg-gray-700">
-            <th v-if="isPropertyTab"
+            <th v-if="isSortableTab"
               class="border border-gray-300 dark:border-gray-600 p-2 text-center w-20 text-gray-700 dark:text-gray-300">
               Order
             </th>
@@ -37,20 +37,13 @@
           </tr>
         </thead>
 
-        <SortableTbody v-if="isPropertyTab" :key="sortableKey" v-model="filteredLocalEntities"
-          @orderChanged="saveNewOrder">
+        <SortableTbody :key="sortableKey" :model-value="filteredLocalEntities" @orderChanged="saveNewOrder">
           <ProfileEntityRow v-for="entity in filteredLocalEntities" :key="entity.uri" :entity="entity" :draggable="true"
-            :showDomain="true" @remove="removeEntity" />
+            :showDomain="isPropertyTab" :showTypes="activeTab === 'individual'" @remove="removeEntity" />
         </SortableTbody>
-
-        <tbody v-else>
-          <ProfileEntityRow v-for="entity in sortedActiveEntities" :key="entity.uri" :entity="entity" :draggable="false"
-            :showTypes="activeTab === 'individual'" @remove="removeEntity" />
-        </tbody>
       </table>
 
-      <p v-if="(isPropertyTab ? filteredLocalEntities : sortedActiveEntities).length === 0"
-        class="text-gray-500 dark:text-gray-400 mt-2">
+      <p v-if="filteredLocalEntities.length === 0" class="text-gray-500 dark:text-gray-400 mt-2">
         No active entities of this type.
       </p>
     </div>
@@ -94,8 +87,7 @@
             :class="{
               'text-gray-500 dark:text-gray-400': !entity.in_onto && entity.ontology !== 'System',
               'text-gray-900 dark:text-gray-100': entity.in_onto || entity.ontology === 'System',
-            }"
-            @click="addEntity(entity.uri)" title="Add entity">
+            }" @click="addEntity(entity.uri)" title="Add entity">
             <span class="pl-2 py-2 text-left leading-4 break-all">
               {{ displayEntityLabel(entity) }}
             </span>
@@ -178,6 +170,10 @@ const mainTabs = computed(() => {
 const isPropertyTab = computed(() =>
   ['object_property', 'datatype_property', 'annotation_property'].includes(activeTab.value)
 )
+const isSortableTab = computed(() =>
+  ['class', 'object_property', 'datatype_property', 'annotation_property', 'datatype', 'individual']
+    .includes(activeTab.value)
+)
 
 function entityMatchesSearch(
   entity: ProfileEntityItem,
@@ -214,8 +210,6 @@ const localEntities = ref<ProfileEntityItem[]>([])
 watch(displayedActiveEntities, (val) => { localEntities.value = [...val] }, { immediate: true })
 
 const filteredLocalEntities = computed(() => localEntities.value.filter(entityMatchesFilters))
-
-const sortedActiveEntities = computed(() => localEntities.value.filter(entityMatchesFilters))
 
 const inactiveByType = computed(() => {
   const groups: Record<string, ProfileEntityItem[]> = {}
@@ -352,13 +346,13 @@ async function saveNewOrder(list: ProfileEntityItem[]) {
     list.map(entity => entity.uri)
   )
 
-  // The sortable component must return exactly the visible properties.
+  // The sortable component must return exactly the visible entities.
   if (
     list.length !== visibleUris.size ||
     reorderedUris.size !== visibleUris.size ||
     [...visibleUris].some(uri => !reorderedUris.has(uri))
   ) {
-    toast.error('The reordered property list is inconsistent.')
+    toast.error('The reordered entity list is inconsistent.')
     return
   }
 
@@ -388,13 +382,16 @@ async function saveNewOrder(list: ProfileEntityItem[]) {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({
+        entity_type: isPropertyTab.value ? 'property' : activeTab.value,
+        items,
+      }),
     })
 
     await store.fetchState()
-    toast.success('Property order updated')
+    toast.success('Entity order updated')
   } catch (error: any) {
-    console.error('Property ordering failed:', {
+    console.error('Entity ordering failed:', {
       activeTab: activeTab.value,
       submittedItems: items,
       detail: error?.data?.detail,
@@ -404,7 +401,7 @@ async function saveNewOrder(list: ProfileEntityItem[]) {
     toast.error(
       error?.data?.detail ||
       error?.message ||
-      'Failed to update property order',
+      'Failed to update entity order',
     )
 
     // Restore the order from the persisted profile.
