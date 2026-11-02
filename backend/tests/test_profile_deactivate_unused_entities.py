@@ -420,9 +420,38 @@ async def test_deactivate_unused_entities_preserves_shapes_and_metadata(
         for update in store.update_calls
     )
     
-    assert f"GRAPH <{main.SHAPES_GRAPH}>" in store.update_calls[0]
+    assert all(
+        f"GRAPH <{main.SHAPES_GRAPH}>" in update
+        for update in store.update_calls
+    )
 
-    assert "sh:deactivated" in store.update_calls[0]
+    # Each surviving node-shape type has its own contiguous sequence.
+    active_node_entities = {
+        "class": {used_class, created_class},
+        "datatype": {
+            used_datatype,
+            created_datatype,
+            *main.CORE_ACTIVE_DATATYPES,
+        },
+        "individual": {used_individual, created_individual},
+    }
+
+    for entity_type, active_uris in active_node_entities.items():
+        ordered_values = []
+        for uri in active_uris:
+            shape_uri = URIRef(
+                main.shape_uri_for_entity(uri, entity_type, {})
+            )
+            orders = list(shapes_graph.objects(shape_uri, SH.order))
+            assert len(orders) == 1
+
+            order_value = orders[0]
+            assert isinstance(order_value, Literal)
+            ordered_values.append(int(str(order_value)))
+
+        assert sorted(ordered_values) == list(
+            range(1, len(active_uris) + 1)
+        )
 
 
 @pytest.mark.asyncio

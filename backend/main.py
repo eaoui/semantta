@@ -3971,12 +3971,16 @@ class ApplicationProfile:
         self._dirty = True
         self._order_map: Dict[str, int] = {}
         self._order_loaded = False
+        self._node_order_maps: Dict[str, Dict[str, int]] = {}
+        self._node_order_loaded: Set[str] = set()
         self._cached_domains = None
         self._cache_version = -1
 
     def invalidate(self):
         self._dirty = True
         self._order_loaded = False
+        self._node_order_maps: Dict[str, Dict[str, int]] = {}
+        self._node_order_loaded: Set[str] = set()
         self._cached_domains = None
 
     async def _ensure_order_map(self):
@@ -4019,6 +4023,20 @@ class ApplicationProfile:
 
         self._order_loaded = True
 
+    async def _ensure_node_order_map(
+        self,
+        entity_type: str,
+    ) -> Dict[str, int]:
+        if entity_type in self._node_order_loaded:
+            return self._node_order_maps.get(entity_type, {})
+
+        profile = SHACLProfile(self.store)
+        order_map = await profile.get_active_node_order_map(entity_type)
+
+        self._node_order_maps[entity_type] = order_map
+        self._node_order_loaded.add(entity_type)
+        return order_map
+
     async def get_entity_type(self, uri: str) -> str:
         entities = await self.build_profile_entities()
         if not hasattr(self, '_entity_type_map') or self._dirty:
@@ -4051,17 +4069,17 @@ class ApplicationProfile:
             if "System" not in candidates[uri]["sources"]:
                 candidates[uri]["sources"].append("System")
 
-        active_classes = set(
-            await shacl.get_active_classes()
-        )
+        node_order_maps = {
+            entity_type: await self._ensure_node_order_map(entity_type)
+            for entity_type in ("class", "datatype", "individual")
+        }
+
+        active_classes = set(node_order_maps["class"])
+        active_datatypes = set(node_order_maps["datatype"])
+        active_individuals = set(node_order_maps["individual"])
+
         active_props = set(
             await shacl.get_active_properties()
-        )
-        active_datatypes = set(
-            await shacl.get_active_datatypes()
-        )
-        active_individuals = set(
-            await shacl.get_active_individuals()
         )
 
         if not _used_uris_set:
@@ -4230,6 +4248,9 @@ class ApplicationProfile:
                 if active:
                     await self._ensure_order_map()
                     item.order = self._order_map.get(uri)
+            elif etype in node_order_maps and active:
+                item.order = node_order_maps[etype].get(uri)
+                
             if etype == "individual":
                 onto_entity = next(
                     (e for o in state["ontologies"] for e in o["entities"] if e["uri"] == uri),
@@ -4245,9 +4266,15 @@ class ApplicationProfile:
                 if item.uri in shacl_domains:
                     item.domain = shacl_domains[item.uri]
 
-        result.sort(key=lambda x: (x.order is None, x.order or 0)
-                    if x.type in ("object_property", "datatype_property", "annotation_property")
-                    else (0, 0))
+        result.sort(
+            key=lambda item: (
+                item.type,
+                item.order is None,
+                item.order if item.order is not None else float("inf"),
+                (item.label or "").casefold(),
+                item.uri,
+            )
+        )
         self._cache = result
         self._dirty = False
         self._cache_version = current_version
@@ -5045,70 +5072,131 @@ class SHACLProfile:
 
         return active_properties, groups_by_property
 
-    async def _normalize_property_group_order(
+    @staticmethod
+    def _node_shape_identity(entity_type: str) -> tuple[str, str]:
+        """Return the SHACL target predicate and shape role for a node entity type."""
+        specifications = {
+            "class": ("targetClass", "class"),
+            "datatype": ("targetNode", "datatype"),
+            "individual": ("targetNode", "individual"),
+        }
+
+        try:
+            return specifications[entity_type]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported node-shape entity type: {entity_type}"
+            ) from exc
+
+    async def _get_node_shape_order_rows(
         self,
-        group_uri: str,
-        prepend_uris: Optional[Set[str]] = None,
-    ) -> None:
-        """Assign contiguous zero-based order to active members of a group."""
-        group_ref = _sparql_iri(
-            group_uri,
-            "property group URI",
+        entity_type: str,
+    ) -> List[dict]:
+        target_predicate, shape_role = self._node_shape_identity(
+            entity_type
         )
 
-        rows = await self.store.query(f"""
+        return await self.store.query(f"""
             PREFIX sh: <{SH}>
 
-            SELECT DISTINCT ?propertyShape ?propUri ?order WHERE {{
+            SELECT DISTINCT ?shape ?entity ?order WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propertyShape
-                        a sh:PropertyShape ;
-                        sh:path ?propUri ;
-                        sh:group {group_ref} .
+                    ?shape
+                        a sh:NodeShape ;
+                        sh:{target_predicate} ?entity .
 
                     OPTIONAL {{
-                        ?propertyShape sh:order ?order .
+                        ?shape sh:order ?order .
                     }}
 
+                    FILTER (
+                        STRSTARTS(
+                            STR(?shape),
+                            "urn:shape:{shape_role}:"
+                        )
+                    )
+
                     FILTER NOT EXISTS {{
-                        ?propertyShape sh:deactivated true .
+                        ?shape sh:deactivated true .
                     }}
                 }}
             }}
         """)
 
-        shape_by_property: Dict[str, str] = {}
-        property_by_shape: Dict[str, str] = {}
+    async def _normalize_shape_order(
+        self,
+        entity_type: str,
+        *,
+        group_uri: Optional[str] = None,
+        prepend_uris: Optional[Set[str]] = None,
+    ) -> None:
+        """Assign contiguous one-based order within one SHACL entity scope."""
+        if entity_type == "property":
+            if not group_uri:
+                raise ValueError(
+                    "Property ordering requires a property group URI."
+                )
+
+            scope = (
+                f"?shape a sh:PropertyShape ; sh:path ?entity ; "
+                f"sh:group {_sparql_iri(group_uri, 'property group URI')} ."
+            )
+            role_label = "property"
+        else:
+            target_predicate, shape_role = self._node_shape_identity(
+                entity_type
+            )
+            scope = (
+                f"?shape a sh:NodeShape ; "
+                f"sh:{target_predicate} ?entity . "
+                f'FILTER(STRSTARTS(STR(?shape), "urn:shape:{shape_role}:"))'
+            )
+            role_label = entity_type
+
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?shape ?entity ?order WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    {scope}
+
+                    OPTIONAL {{
+                        ?shape sh:order ?order .
+                    }}
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true .
+                    }}
+                }}
+            }}
+        """)
+
+        shape_by_entity: Dict[str, str] = {}
+        entity_by_shape: Dict[str, str] = {}
         existing_orders: Dict[str, Set[int]] = {}
 
         for row in rows:
-            property_uri = row["propUri"]
-            shape_uri = row["propertyShape"]
+            entity_uri = row["entity"]
+            shape_uri = row["shape"]
 
-            existing_shape = shape_by_property.get(property_uri)
-
+            existing_shape = shape_by_entity.get(entity_uri)
             if existing_shape is not None and existing_shape != shape_uri:
                 raise RuntimeError(
-                    "Multiple active PropertyShapes found for property "
-                    f"{property_uri}."
+                    f"Multiple active shapes found for {role_label} "
+                    f"{entity_uri}."
                 )
 
-            existing_property = property_by_shape.get(shape_uri)
-
-            if (
-                existing_property is not None
-                and existing_property != property_uri
-            ):
+            existing_entity = entity_by_shape.get(shape_uri)
+            if existing_entity is not None and existing_entity != entity_uri:
                 raise RuntimeError(
-                    "A PropertyShape has multiple property paths: "
+                    f"A {role_label} shape has multiple target entities: "
                     f"{shape_uri}."
                 )
 
-            shape_by_property[property_uri] = shape_uri
-            property_by_shape[shape_uri] = property_uri
+            shape_by_entity[entity_uri] = shape_uri
+            entity_by_shape[shape_uri] = entity_uri
 
             raw_order = row.get("order")
-
             if raw_order is not None:
                 try:
                     order_value = int(raw_order)
@@ -5117,28 +5205,24 @@ class SHACLProfile:
 
                 if order_value >= 0:
                     existing_orders.setdefault(
-                        property_uri,
+                        entity_uri,
                         set(),
                     ).add(order_value)
 
-        if not shape_by_property:
+        if not shape_by_entity:
             return
 
         promoted = set(prepend_uris or set())
-        missing_promoted = promoted - set(shape_by_property)
-
+        missing_promoted = promoted - set(shape_by_entity)
         if missing_promoted:
             raise RuntimeError(
-                "Cannot prepend properties that are not active members "
-                f"of group {group_uri}: {sorted(missing_promoted)}"
+                f"Cannot prepend entities that are not active {role_label} "
+                f"shapes: {sorted(missing_promoted)}"
             )
 
-        # Newly activated properties come first.
-        ordered_properties = sorted(promoted)
-
-        # Preserve the relative order of all other active properties.
-        remaining_properties = sorted(
-            set(shape_by_property) - promoted,
+        ordered_entities = sorted(promoted)
+        remaining_entities = sorted(
+            set(shape_by_entity) - promoted,
             key=lambda uri: (
                 min(
                     existing_orders.get(uri, set()),
@@ -5147,44 +5231,41 @@ class SHACLProfile:
                 uri,
             ),
         )
-
-        ordered_properties.extend(remaining_properties)
+        ordered_entities.extend(remaining_entities)
 
         shape_values = ", ".join(
             _sparql_iri(
-                shape_by_property[prop_uri],
-                "property shape URI",
+                shape_by_entity[entity_uri],
+                f"{role_label} shape URI",
             )
-            for prop_uri in ordered_properties
+            for entity_uri in ordered_entities
         )
 
-        # Remove all existing order values from the active group members.
         await self.store.update(f"""
             PREFIX sh: <{SH}>
 
             DELETE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propertyShape sh:order ?oldOrder .
+                    ?shape sh:order ?oldOrder .
                 }}
             }}
             WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propertyShape sh:order ?oldOrder .
+                    ?shape sh:order ?oldOrder .
 
                     FILTER (
-                        ?propertyShape IN ({shape_values})
+                        ?shape IN ({shape_values})
                     )
                 }}
             }}
         """)
 
-        # Insert one contiguous, zero-based order for every active member.
         order_triples = "\n".join(
             (
-                f"{_sparql_iri(shape_by_property[prop_uri], 'property shape URI')} "
+                f"{_sparql_iri(shape_by_entity[entity_uri], f'{role_label} shape URI')} "
                 f"sh:order {Literal(order).n3()} ."
             )
-            for order, prop_uri in enumerate(ordered_properties, start=1)
+            for order, entity_uri in enumerate(ordered_entities, start=1)
         )
 
         await self.store.update(f"""
@@ -5196,6 +5277,246 @@ class SHACLProfile:
                 }}
             }}
         """)
+
+    async def _normalize_property_group_order(
+        self,
+        group_uri: str,
+        prepend_uris: Optional[Set[str]] = None,
+    ) -> None:
+        """Normalize one property group's active shapes using shared ordering logic."""
+        await self._normalize_shape_order(
+            "property",
+            group_uri=group_uri,
+            prepend_uris=prepend_uris,
+        )
+
+    async def get_active_node_order_map(
+        self,
+        entity_type: str,
+    ) -> Dict[str, int]:
+        """Return active node entities' SHACL order, repairing missing or invalid sequences."""
+        rows = await self._get_node_shape_order_rows(entity_type)
+        order_sets: Dict[str, Set[int]] = {}
+
+        for row in rows:
+            raw_order = row.get("order")
+            if raw_order is None:
+                continue
+            try:
+                order_sets.setdefault(row["entity"], set()).add(
+                    int(raw_order)
+                )
+            except (TypeError, ValueError):
+                continue
+
+        entity_uris = {row["entity"] for row in rows}
+        needs_normalization = (
+            any(len(order_sets.get(uri, set())) != 1 for uri in entity_uris)
+            or sorted(
+                next(iter(order_sets[uri]))
+                for uri in entity_uris
+                if len(order_sets.get(uri, set())) == 1
+            ) != list(range(1, len(entity_uris) + 1))
+        )
+
+        if needs_normalization:
+            await self._normalize_shape_order(entity_type)
+            self.invalidate_shapes_cache()
+            rows = await self._get_node_shape_order_rows(entity_type)
+            order_sets = {}
+            for row in rows:
+                raw_order = row.get("order")
+                if raw_order is None:
+                    continue
+                try:
+                    order_sets.setdefault(row["entity"], set()).add(
+                        int(raw_order)
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+        result = {}
+        for entity_uri, orders in order_sets.items():
+            if len(orders) == 1:
+                result[entity_uri] = next(iter(orders))
+
+        return result
+
+    async def _get_active_node_entities(
+        self,
+        entity_type: str,
+        entity_uris: Set[str],
+    ) -> Set[str]:
+        if not entity_uris:
+            return set()
+
+        target_predicate, shape_role = self._node_shape_identity(
+            entity_type
+        )
+        shape_values = " ".join(
+            (
+                f"({_sparql_iri(shape_uri_for_entity(uri, shape_role, state['prefix_map']), f'{entity_type} shape URI')} "
+                f"{_sparql_iri(uri, f'{entity_type} URI')})"
+            )
+            for uri in sorted(entity_uris)
+        )
+
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?entity WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    VALUES (?shape ?entity) {{ {shape_values} }}
+
+                    ?shape
+                        a sh:NodeShape ;
+                        sh:{target_predicate} ?entity .
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true .
+                    }}
+                }}
+            }}
+        """)
+
+        return {row["entity"] for row in rows}
+
+    async def activate_node_entities(
+        self,
+        entity_type: str,
+        entity_uris: Set[str],
+    ) -> None:
+        """Create/reactivate node shapes and maintain type-local ordering."""
+        normalized_uris = sorted(set(entity_uris))
+        if not normalized_uris:
+            return
+
+        target_predicate, shape_role = self._node_shape_identity(
+            entity_type
+        )
+        active_before = await self._get_active_node_entities(
+            entity_type,
+            set(normalized_uris),
+        )
+
+        shape_values = " ".join(
+            (
+                f"({_sparql_iri(shape_uri_for_entity(uri, shape_role, state['prefix_map']), f'{entity_type} shape URI')} "
+                f"{_sparql_iri(uri, f'{entity_type} URI')})"
+            )
+            for uri in normalized_uris
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape a sh:NodeShape ;
+                        sh:{target_predicate} ?entity .
+                }}
+            }}
+            WHERE {{
+                VALUES (?shape ?entity) {{ {shape_values} }}
+
+                FILTER NOT EXISTS {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape a sh:NodeShape ;
+                            sh:{target_predicate} ?entity .
+                    }}
+                }}
+            }}
+        """)
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape sh:deactivated ?oldDeactivation .
+                }}
+            }}
+            WHERE {{
+                VALUES (?shape ?entity) {{ {shape_values} }}
+
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape
+                        a sh:NodeShape ;
+                        sh:{target_predicate} ?entity ;
+                        sh:deactivated ?oldDeactivation .
+                }}
+            }}
+        """)
+
+        promoted = set(normalized_uris) - active_before
+        if promoted:
+            await self._normalize_shape_order(
+                entity_type,
+                prepend_uris=promoted,
+            )
+        else:
+            # An idempotent activation also repairs missing or invalid orders.
+            await self.get_active_node_order_map(entity_type)
+
+        self.invalidate_shapes_cache()
+
+    async def deactivate_node_entities(
+        self,
+        entity_type: str,
+        entity_uris: Set[str],
+    ) -> None:
+        """Deactivate node shapes and close gaps in their type-local order."""
+        normalized_uris = sorted(set(entity_uris))
+        if not normalized_uris:
+            return
+
+        target_predicate, shape_role = self._node_shape_identity(
+            entity_type
+        )
+        shape_values = " ".join(
+            (
+                f"({_sparql_iri(shape_uri_for_entity(uri, shape_role, state['prefix_map']), f'{entity_type} shape URI')} "
+                f"{_sparql_iri(uri, f'{entity_type} URI')})"
+            )
+            for uri in normalized_uris
+        )
+
+        await self.store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape
+                        sh:deactivated ?oldDeactivation ;
+                        sh:order ?oldOrder .
+                }}
+            }}
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape sh:deactivated true .
+                }}
+            }}
+            WHERE {{
+                VALUES (?shape ?entity) {{ {shape_values} }}
+
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape
+                        a sh:NodeShape ;
+                        sh:{target_predicate} ?entity .
+
+                    OPTIONAL {{
+                        ?shape sh:deactivated ?oldDeactivation .
+                    }}
+
+                    OPTIONAL {{
+                        ?shape sh:order ?oldOrder .
+                    }}
+                }}
+            }}
+        """)
+
+        await self._normalize_shape_order(entity_type)
+        self.invalidate_shapes_cache()
 
     async def activate_properties(
         self,
@@ -5762,20 +6083,10 @@ class SHACLProfile:
             """)
 
     async def add_class(self, class_uri: str):
-        shape_uri = shape_uri_for_entity(
-            class_uri,
+        await self.activate_node_entities(
             "class",
-            state["prefix_map"],
+            {class_uri},
         )
-
-        triples = (
-            f"<{shape_uri}> a sh:NodeShape ; "
-            f"sh:targetClass <{class_uri}> .\n"
-        )
-
-        await self.store.insert_shapes(triples)
-        await self._set_shape_deactivated(shape_uri, False)
-
         self._changed()
 
         await _reconcile_property_domain_links(
@@ -5783,13 +6094,10 @@ class SHACLProfile:
         )
 
     async def remove_class(self, class_uri: str):
-        shape_uri = shape_uri_for_entity(
-            class_uri,
+        await self.deactivate_node_entities(
             "class",
-            state["prefix_map"],
+            {class_uri},
         )
-
-        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def add_property_to_class(
@@ -5892,45 +6200,25 @@ class SHACLProfile:
         self._changed()
 
     async def add_datatype(self, uri: str):
-        shape_uri = shape_uri_for_entity(
-            uri,
+        await self.activate_node_entities(
             "datatype",
-            state["prefix_map"],
+            {uri},
         )
-
-        triples = (
-            f"<{shape_uri}> a sh:NodeShape ; "
-            f"sh:targetNode <{uri}> .\n"
-        )
-
-        await self.store.insert_shapes(triples)
-        await self._set_shape_deactivated(shape_uri, False)
         self._changed()
 
-    async def remove_datatype(self, uri: str):
-        shape_uri = shape_uri_for_entity(
-            uri,
-            "datatype",
-            state["prefix_map"],
-        )
 
-        await self._set_shape_deactivated(shape_uri, True)
+    async def remove_datatype(self, uri: str):
+        await self.deactivate_node_entities(
+            "datatype",
+            {uri},
+        )
         self._changed()
 
     async def add_individual(self, uri: str):
-        shape_uri = shape_uri_for_entity(
-            uri,
+        await self.activate_node_entities(
             "individual",
-            state["prefix_map"],
+            {uri},
         )
-
-        triples = (
-            f"<{shape_uri}> a sh:NodeShape ; "
-            f"sh:targetNode <{uri}> .\n"
-        )
-
-        await self.store.insert_shapes(triples)
-        await self._set_shape_deactivated(shape_uri, False)
         self._changed()
 
     async def remove_individual(self, uri: str):
@@ -5940,13 +6228,10 @@ class SHACLProfile:
                 "Core datatypes cannot be removed.",
             )
 
-        shape_uri = shape_uri_for_entity(
-            uri,
+        await self.deactivate_node_entities(
             "individual",
-            state["prefix_map"],
+            {uri},
         )
-
-        await self._set_shape_deactivated(shape_uri, True)
         self._changed()
 
     async def add_property_global(self, prop_uri: str):
@@ -5979,20 +6264,14 @@ class SHACLProfile:
         self._changed()
 
     async def get_active_classes(self) -> List[str]:
-        rows = await self.store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT DISTINCT ?class WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape a sh:NodeShape ;
-                           sh:targetClass ?class .
-
-                    FILTER NOT EXISTS {{
-                        ?shape sh:deactivated true
-                    }}
-                }}
-            }}
-        """)
-        return [r["class"] for r in rows]
+        order_map = await self.get_active_node_order_map("class")
+        return [
+            uri
+            for uri, _ in sorted(
+                order_map.items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        ]
 
     async def get_active_properties(self) -> List[str]:
         rows = await self.store.query(f"""
@@ -6013,54 +6292,24 @@ class SHACLProfile:
         return [r["prop"] for r in rows]
 
     async def get_active_datatypes(self) -> List[str]:
-        rows = await self.store.query(f"""
-            PREFIX sh: <{SH}>
-
-            SELECT DISTINCT ?uri WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape a sh:NodeShape ;
-                           sh:targetNode ?uri .
-
-                    FILTER(
-                        STRSTARTS(
-                            STR(?shape),
-                            "urn:shape:datatype:"
-                        )
-                    )
-
-                    FILTER NOT EXISTS {{
-                        ?shape sh:deactivated true
-                    }}
-                }}
-            }}
-        """)
-
-        return [row["uri"] for row in rows]
+        order_map = await self.get_active_node_order_map("datatype")
+        return [
+            uri
+            for uri, _ in sorted(
+                order_map.items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        ]
 
     async def get_active_individuals(self) -> List[str]:
-        rows = await self.store.query(f"""
-            PREFIX sh: <{SH}>
-
-            SELECT DISTINCT ?uri WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape a sh:NodeShape ;
-                           sh:targetNode ?uri .
-
-                    FILTER(
-                        STRSTARTS(
-                            STR(?shape),
-                            "urn:shape:individual:"
-                        )
-                    )
-
-                    FILTER NOT EXISTS {{
-                        ?shape sh:deactivated true
-                    }}
-                }}
-            }}
-        """)
-
-        return [row["uri"] for row in rows]
+        order_map = await self.get_active_node_order_map("individual")
+        return [
+            uri
+            for uri, _ in sorted(
+                order_map.items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        ]
 
     async def extract_metadata_vocabulary_entities(
         self,
@@ -6228,22 +6477,6 @@ class SHACLProfile:
 
         shape_triples = []
 
-        for class_uri in sorted(class_uris):
-            class_shape_uri = _sparql_iri(
-                shape_uri_for_entity(
-                    class_uri,
-                    "class",
-                    state["prefix_map"],
-                ),
-                "class shape URI",
-            )
-
-            shape_triples.append(
-                f"{class_shape_uri} a sh:NodeShape ; "
-                f"sh:targetClass "
-                f"{_sparql_iri(class_uri, 'class URI')} ."
-            )
-
         for prop_uri in sorted(property_uris):
             property_shape_uri = _sparql_iri(
                 shape_uri_for_entity(
@@ -6260,38 +6493,6 @@ class SHACLProfile:
                 f"{_sparql_iri(prop_uri, 'property URI')} ."
             )
 
-        for datatype_uri in sorted(datatype_uris):
-            datatype_shape_uri = _sparql_iri(
-                shape_uri_for_entity(
-                    datatype_uri,
-                    "datatype",
-                    state["prefix_map"],
-                ),
-                "datatype shape URI",
-            )
-
-            shape_triples.append(
-                f"{datatype_shape_uri} a sh:NodeShape ; "
-                f"sh:targetNode "
-                f"{_sparql_iri(datatype_uri, 'datatype URI')} ."
-            )
-
-        for individual_uri in sorted(individual_uris):
-            individual_shape_uri = _sparql_iri(
-                shape_uri_for_entity(
-                    individual_uri,
-                    "individual",
-                    state["prefix_map"],
-                ),
-                "individual shape URI",
-            )
-
-            shape_triples.append(
-                f"{individual_shape_uri} a sh:NodeShape ; "
-                f"sh:targetNode "
-                f"{_sparql_iri(individual_uri, 'individual URI')} ."
-            )
-
         if shape_triples:
             await self.store.update(f"""
                 PREFIX sh: <{SH}>
@@ -6303,42 +6504,22 @@ class SHACLProfile:
                 }}
             """)
 
-        activated_shape_uris = {
-            shape_uri_for_entity(uri, role, state["prefix_map"])
-            for role, uris in (
-                ("class", class_uris),
-                ("datatype", datatype_uris),
-                ("individual", individual_uris),
-            )
-            for uri in uris
-        }
-
+        await self.activate_node_entities(
+            "class",
+            class_uris,
+        )
+        await self.activate_node_entities(
+            "datatype",
+            datatype_uris,
+        )
+        await self.activate_node_entities(
+            "individual",
+            individual_uris,
+        )
         await self.activate_properties(
             property_uris,
             previous_state=property_state_before,
         )
-
-        if activated_shape_uris:
-            shape_values = " ".join(
-                _sparql_iri(uri, "SHACL shape URI")
-                for uri in sorted(activated_shape_uris)
-            )
-
-            await self.store.update(f"""
-                PREFIX sh: <{SH}>
-
-                DELETE {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        ?shape sh:deactivated ?existing .
-                    }}
-                }}
-                WHERE {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        VALUES ?shape {{ {shape_values} }}
-                        ?shape sh:deactivated ?existing .
-                    }}
-                }}
-            """)
 
         # Add default constraints only where they do not already exist.
         for prop_uri in sorted(property_uris):
@@ -10313,68 +10494,14 @@ async def deactivate_unused_entities_endpoint():
 
     # Match the existing SHACL shapes by entity identity.
     # Their complete RDF configuration and incoming links are preserved.
-    branches = []
-
-    if unused_by_role["class"]:
-        values = " ".join(
-            _sparql_iri(uri, "class URI")
-            for uri in unused_by_role["class"]
-        )
-        branches.append(
-            "{ VALUES ?entity { " + values + " } "
-            "?shape a sh:NodeShape ; sh:targetClass ?entity . }"
-        )
-
-    if unused_by_role["datatype"]:
-        values = " ".join(
-            _sparql_iri(uri, "datatype URI")
-            for uri in unused_by_role["datatype"]
-        )
-        branches.append(
-            "{ VALUES ?entity { " + values + " } "
-            "?shape a sh:NodeShape ; sh:targetNode ?entity . "
-            'FILTER(STRSTARTS(STR(?shape), "urn:shape:datatype:")) }'
-        )
-
-    if unused_by_role["individual"]:
-        values = " ".join(
-            _sparql_iri(uri, "individual URI")
-            for uri in unused_by_role["individual"]
-        )
-        branches.append(
-            "{ VALUES ?entity { " + values + " } "
-            "?shape a sh:NodeShape ; sh:targetNode ?entity . "
-            'FILTER(STRSTARTS(STR(?shape), "urn:shape:individual:")) }'
-        )
-
-    if branches:
-        shape_match = "\nUNION\n".join(branches)
-
-        await store.update(f"""
-            PREFIX sh: <{SH}>
-
-            DELETE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape sh:deactivated ?existing .
-                }}
-            }}
-            INSERT {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?shape sh:deactivated true .
-                }}
-            }}
-            WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    {{
-                        {shape_match}
-                    }}
-
-                    OPTIONAL {{
-                        ?shape sh:deactivated ?existing .
-                    }}
-                }}
-            }}
-        """)
+    # Use the same lifecycle methods as individual activation/deactivation
+    # so shape order is normalized independently for each entity type.
+    for entity_type in ("class", "datatype", "individual"):
+        if unused_by_role[entity_type]:
+            await shacl.deactivate_node_entities(
+                entity_type,
+                set(unused_by_role[entity_type]),
+            )
 
     if unused_by_role["property"]:
         await shacl.deactivate_properties(
@@ -10407,12 +10534,21 @@ async def generate_profile_from_metadata():
 
 @app.post("/api/profile/update-order")
 async def update_profile_order(data: dict):
+    entity_type = data.get("entity_type", "property")
+    supported_types = {"property", "class", "datatype", "individual"}
+
+    if not isinstance(entity_type, str) or entity_type not in supported_types:
+        raise HTTPException(
+            400,
+            "Entity type must be class, property, datatype, or individual.",
+        )
+
     items = data.get("items")
 
     if not isinstance(items, list):
         raise HTTPException(
             400,
-            "Items must be a list of property ordering entries.",
+            "Items must be a list of entity ordering entries.",
         )
 
     if not items:
@@ -10434,21 +10570,21 @@ async def update_profile_order(data: dict):
         if not isinstance(uri, str) or not uri:
             raise HTTPException(
                 400,
-                "Every ordering entry must contain a property URI.",
+                "Every ordering entry must contain an entity URI.",
             )
 
-        _sparql_iri(uri, "property URI")
+        _sparql_iri(uri, "entity URI")
 
         if uri in order_by_uri:
             raise HTTPException(
                 400,
-                f"Duplicate property URI in ordering request: {uri}",
+                f"Duplicate entity URI in ordering request: {uri}",
             )
 
         if type(order_value) is not int or order_value < 1:
             raise HTTPException(
                 400,
-                "Property order values must be positive integers.",
+                "Entity order values must be positive integers.",
             )
 
         uris.append(uri)
@@ -10459,9 +10595,91 @@ async def update_profile_order(data: dict):
     if sorted(order_by_uri.values()) != expected_orders:
         raise HTTPException(
             400,
-            "Property order values must be unique and contiguous, "
+            "Entity order values must be unique and contiguous, "
             "starting at one.",
         )
+
+    if entity_type != "property":
+        profile = SHACLProfile(store)
+        target_predicate, _ = profile._node_shape_identity(entity_type)
+
+        # Normalize legacy or incomplete active node-shape sequences first.
+        await profile.get_active_node_order_map(entity_type)
+        active_rows = await profile._get_node_shape_order_rows(entity_type)
+
+        active_shapes_by_uri: Dict[str, str] = {}
+
+        for row in active_rows:
+            uri = row["entity"]
+            shape_uri = row["shape"]
+
+            existing_shape = active_shapes_by_uri.get(uri)
+
+            if existing_shape is not None and existing_shape != shape_uri:
+                raise HTTPException(
+                    409,
+                    f"Multiple active {entity_type} shapes found for {uri}.",
+                )
+
+            active_shapes_by_uri[uri] = shape_uri
+
+        submitted_uris = set(uris)
+        active_uris = set(active_shapes_by_uri)
+
+        if submitted_uris != active_uris:
+            raise HTTPException(
+                400,
+                (
+                    f"{entity_type.capitalize()} ordering does not match "
+                    f"the active {entity_type} shapes. "
+                    f"Omitted active entities: "
+                    f"{sorted(active_uris - submitted_uris)}. "
+                    f"Entities not belonging to this type: "
+                    f"{sorted(submitted_uris - active_uris)}."
+                ),
+            )
+
+        values = " ".join(
+            (
+                f"({_sparql_iri(active_shapes_by_uri[uri], f'{entity_type} shape URI')} "
+                f"{Literal(order_by_uri[uri]).n3()})"
+            )
+            for uri in sorted(uris)
+        )
+
+        await store.update(f"""
+            PREFIX sh: <{SH}>
+
+            DELETE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape sh:order ?oldOrder .
+                }}
+            }}
+            INSERT {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape sh:order ?newOrder .
+                }}
+            }}
+            WHERE {{
+                VALUES (?shape ?newOrder) {{ {values} }}
+
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?shape a sh:NodeShape ;
+                        sh:{target_predicate} ?entity .
+
+                    OPTIONAL {{
+                        ?shape sh:order ?oldOrder .
+                    }}
+
+                    FILTER NOT EXISTS {{
+                        ?shape sh:deactivated true .
+                    }}
+                }}
+            }}
+        """)
+
+        invalidate_profile()
+        return {"status": "ok"}
 
     property_values = " ".join(
         _sparql_iri(uri, "property URI")

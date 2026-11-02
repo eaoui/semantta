@@ -267,6 +267,14 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
         normalize_property_order,
     )
 
+    activate_node_entities = AsyncMock()
+
+    monkeypatch.setattr(
+        profile,
+        "activate_node_entities",
+        activate_node_entities,
+    )
+
     monkeypatch.setattr(
         main,
         "_get_active_profile_classes",
@@ -316,6 +324,12 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
     assign_property_groups.assert_awaited_once_with(
         {str(EX.title)}
     )
+
+    assert activate_node_entities.await_args_list == [
+        (("class", {str(EX.Book)}),),
+        (("datatype", {"http://www.w3.org/2001/XMLSchema#string"}),),
+        (("individual", set()),),
+    ]
 
     normalize_property_order.assert_awaited_once_with(
         str(main.PROPERTY_GROUP_DATATYPE),

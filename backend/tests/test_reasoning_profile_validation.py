@@ -102,6 +102,26 @@ class InMemoryShapeStore:
         return self.shapes
 
     async def query(self, sparql):
+        if "SELECT DISTINCT ?shape ?entity ?order" in sparql:
+            rows = []
+
+            for shape in self.shapes.subjects(RDF.type, SH.NodeShape):
+                if not str(shape).startswith("urn:shape:class:"):
+                    continue
+
+                if (shape, SH.deactivated, Literal(True)) in self.shapes:
+                    continue
+
+                for entity in self.shapes.objects(shape, SH.targetClass):
+                    for order in self.shapes.objects(shape, SH.order):
+                        rows.append({
+                            "shape": str(shape),
+                            "entity": str(entity),
+                            "order": str(order),
+                        })
+
+            return rows
+
         if "SELECT DISTINCT ?class" in sparql:
             return [{"class": str(EX.Book)}]
 
@@ -117,11 +137,14 @@ class InMemoryShapeStore:
 def make_required_title_shapes():
     graph = Graph()
 
-    class_shape = URIRef("urn:test:BookShape")
+    class_shape = URIRef(
+        main.shape_uri_for_entity(str(EX.Book), "class", {})
+    )
     property_shape = URIRef("urn:test:TitleShape")
 
     graph.add((class_shape, RDF.type, SH.NodeShape))
     graph.add((class_shape, SH.targetClass, EX.Book))
+    graph.add((class_shape, SH.order, Literal(1)))
     graph.add((class_shape, SH.property, property_shape))
 
     graph.add((property_shape, RDF.type, SH.PropertyShape))

@@ -322,11 +322,12 @@ async def test_deactivation_and_reactivation_preserve_complete_shapes(
             )
         }
 
-        expected_shape_graph.add((
-            shape_uri,
-            SH.order,
-            Literal(1),
-        ))
+    # Reactivated entities receive the first position in their own sequence.
+    expected_shape_graph.add((
+        shape_uri,
+        SH.order,
+        Literal(1),
+    ))
 
     if role == "property":
         expected_group = main._get_property_group_uri(uri)
