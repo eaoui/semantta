@@ -152,6 +152,18 @@ PROPERTY_GROUP_DEFINITIONS = (
     ),
 )
 
+PROPERTY_ENTITY_TYPES = frozenset({
+    "object_property",
+    "datatype_property",
+    "annotation_property",
+})
+
+PROPERTY_TYPE_TO_GROUP = {
+    "object_property": PROPERTY_GROUP_OBJECT,
+    "datatype_property": PROPERTY_GROUP_DATATYPE,
+    "annotation_property": PROPERTY_GROUP_ANNOTATION,
+}
+
 PROFILE_FIELD_STATE_VOCAB = Namespace(
     "urn:semantta:profile-field-state#"
 )
@@ -406,11 +418,15 @@ CORE_ACTIVE_ANNOTATION_PROPERTIES = [
 state = {
     "ontologies": [],
     "combined_onto_graph": Graph(),
+    "display_format": "iri",
     "prefix_map": {},
     "display_prefix_map": {},
+    "ontology_property_type_map": {},
+    "metadata_property_type_map": {},
+    "property_type_map": {},
+    "property_type_map_signature": None,
     "instances": [],
     "instance_count_cache": {},
-    "display_format": "iri",
     "metadata_files": [],
     "metadata_graph_stats": {},
     "metadata_only_sources": {},
@@ -492,28 +508,10 @@ def _is_iri_value(value: object) -> bool:
     )
 
 def _is_annotation_property(prop_uri: str) -> bool:
-    """Determine whether a property is an OWL annotation property."""
-    if prop_uri in SYSTEM_ANNOTATION_PROPERTIES:
-        return True
-
-    property_ref = URIRef(prop_uri)
-    ontology_graph = state.get("combined_onto_graph")
-
-    if (
-        ontology_graph is not None
-        and (
-            property_ref,
-            RDF.type,
-            OWL.AnnotationProperty,
-        ) in ontology_graph
-    ):
-        return True
-
-    return any(
-        entity.get("uri") == prop_uri
-        and entity.get("type") == "annotation_property"
-        for ontology in state.get("ontologies", [])
-        for entity in ontology.get("entities", [])
+    """Determine whether a property is an annotation property."""
+    return (
+        _get_property_entity_type(prop_uri)
+        == "annotation_property"
     )
 
 def _metadata_literal(
@@ -1302,49 +1300,74 @@ def apply_reasoning(g: Graph):
 
 def process_ontology(g: Graph, filename: str) -> list:
     def is_domain_uri(uri):
-        return not any(str(uri).startswith(ns) for ns in IGNORE_NAMESPACES)
+        return not any(
+            str(uri).startswith(ns)
+            for ns in IGNORE_NAMESPACES
+        )
 
     entities = []
     known_uris = set()
-    rdf_property_subjects = set()
+    property_uris = set()
+
+    property_declarations = (
+        RDF.Property,
+        OWL.ObjectProperty,
+        OWL.DatatypeProperty,
+        OWL.AnnotationProperty,
+    )
 
     for subj, typ in g.subject_objects(RDF.type):
         if not is_domain_uri(subj) or isinstance(subj, BNode):
             continue
+
         uri = str(subj)
+
         if not is_valid_uri(uri):
             continue
 
         if typ in (OWL.Class, RDFS.Class):
             if uri not in known_uris:
-                entities.append({"uri": uri, "type": "class"})
-                known_uris.add(uri)
-        elif typ == OWL.ObjectProperty:
-            entities.append({"uri": uri, "type": "object_property"})
-            known_uris.add(uri)
-        elif typ == OWL.DatatypeProperty:
-            entities.append({"uri": uri, "type": "datatype_property"})
-            known_uris.add(uri)
-        elif typ == OWL.AnnotationProperty:
-            entities.append({"uri": uri, "type": "annotation_property"})
-            known_uris.add(uri)
-        elif typ == RDF.Property:
-            rdf_property_subjects.add(subj)
-        elif typ == RDFS.Datatype:
-            if uri not in known_uris:
-                entities.append({"uri": uri, "type": "datatype"})
-                known_uris.add(uri)
-        elif typ == OWL.NamedIndividual:
-            if uri not in known_uris:
-                types = [str(t) for t in g.objects(subj, RDF.type)]
-                entities.append({"uri": uri, "type": "individual", "types": types})
+                entities.append({
+                    "uri": uri,
+                    "type": "class",
+                })
                 known_uris.add(uri)
 
-    for subj in rdf_property_subjects:
-        uri = str(subj)
-        if uri not in known_uris and is_domain_uri(subj):
-            entities.append({"uri": uri, "type": "annotation_property"})
-            known_uris.add(uri)
+        elif typ in property_declarations:
+            property_uris.add(subj)
+
+        elif typ == RDFS.Datatype:
+            if uri not in known_uris:
+                entities.append({
+                    "uri": uri,
+                    "type": "datatype",
+                })
+                known_uris.add(uri)
+
+        elif typ == OWL.NamedIndividual:
+            if uri not in known_uris:
+                types = [
+                    str(t)
+                    for t in g.objects(subj, RDF.type)
+                ]
+
+                entities.append({
+                    "uri": uri,
+                    "type": "individual",
+                    "types": types,
+                })
+                known_uris.add(uri)
+
+    # Each property URI produces exactly one normalized entity entry.
+    property_type_map = _build_property_type_map_from_graph(g)
+
+    for property_uri in sorted(property_uris, key=str):
+        uri = str(property_uri)
+
+        entities.append({
+            "uri": uri,
+            "type": property_type_map[uri],
+        })
 
     return entities
 
@@ -1603,34 +1626,52 @@ def _is_datatype_uri(
         for entity in ontology.get("entities", [])
     )
 
-def _get_property_type(
+def _resolve_property_entity_type(
     prop_uri: str,
-    active_datatypes: Optional[set[str]] = None,
+    graph: Optional[Graph] = None,
+    active_datatypes: Optional[Set[str]] = None,
 ) -> str:
-    """Classify a property according to its declared type and ranges."""
-    property_uri = URIRef(prop_uri)
-    ontology_graph = state["combined_onto_graph"]
+    """
+    Resolve the canonical Application Profile type of a property.
 
-    # Explicit OWL property declarations take precedence.
+    Explicit OWL declarations take precedence over generic RDF property
+    declarations and range-based inference.
+    """
+    ontology_graph = graph or state["combined_onto_graph"]
+    property_ref = URIRef(prop_uri)
+
+    declared_types = set(
+        ontology_graph.objects(
+            property_ref,
+            RDF.type,
+        )
+    )
+
+    # System annotation properties retain their system-defined role.
     if (
-        property_uri,
-        RDF.type,
-        OWL.ObjectProperty,
-    ) in ontology_graph:
-        return "object"
+        prop_uri in SYSTEM_ANNOTATION_PROPERTIES
+        or OWL.AnnotationProperty in declared_types
+    ):
+        return "annotation_property"
 
-    if (
-        property_uri,
-        RDF.type,
-        OWL.DatatypeProperty,
-    ) in ontology_graph:
-        return "datatype"
+    # Preserve the existing precedence for conflicting explicit OWL types.
+    if OWL.ObjectProperty in declared_types:
+        return "object_property"
 
-    # Otherwise, classify the property using all known datatype ranges.
+    if OWL.DatatypeProperty in declared_types:
+        return "datatype_property"
+
+    # Generic RDF properties are treated as annotation properties,
+    # unless a more specific OWL property declaration exists.
+    if RDF.Property in declared_types:
+        return "annotation_property"
+
+    # Infer the type from recognized datatype ranges when there is
+    # no explicit property declaration.
     ranges = [
-        str(value)
+        value
         for value in ontology_graph.objects(
-            property_uri,
+            property_ref,
             RDFS.range,
         )
         if isinstance(value, URIRef)
@@ -1638,13 +1679,287 @@ def _get_property_type(
 
     if any(
         _is_datatype_uri(
-            range_uri,
-            ontology_graph,
-            active_datatypes,
+            str(range_uri),
+            graph=ontology_graph,
+            active_datatypes=active_datatypes,
         )
         for range_uri in ranges
     ):
+        return "datatype_property"
+
+    return "object_property"
+
+def _build_property_type_map_from_graph(
+    graph: Graph,
+    active_datatypes: Optional[Set[str]] = None,
+) -> Dict[str, str]:
+    """Build a normalized property-type mapping from an ontology graph."""
+    property_uris = set()
+
+    property_declarations = (
+        RDF.Property,
+        OWL.ObjectProperty,
+        OWL.DatatypeProperty,
+        OWL.AnnotationProperty,
+    )
+
+    for property_type in property_declarations:
+        property_uris.update(
+            subject
+            for subject in graph.subjects(
+                RDF.type,
+                property_type,
+            )
+            if isinstance(subject, URIRef)
+        )
+
+    # Range-only property declarations are also relevant to type inference.
+    property_uris.update(
+        subject
+        for subject in graph.subjects(RDFS.range, None)
+        if isinstance(subject, URIRef)
+    )
+
+    return {
+        str(prop_uri): _resolve_property_entity_type(
+            str(prop_uri),
+            graph,
+            active_datatypes,
+        )
+        for prop_uri in sorted(property_uris, key=str)
+        if is_valid_uri(str(prop_uri))
+    }
+
+def _property_type_map_signature() -> tuple:
+    """Return a signature for the ontology and metadata type-map inputs."""
+    graph = state["combined_onto_graph"]
+    ontologies = state["ontologies"]
+
+    ontology_signature = tuple(
+        (
+            ontology.get("filename"),
+            id(ontology.get("entities")),
+            len(ontology.get("entities") or []),
+        )
+        for ontology in ontologies
+    )
+
+    metadata_signature = tuple(
+        sorted(
+            state["metadata_property_type_map"].items()
+        )
+    )
+
+    return (
+        id(graph),
+        len(graph),
+        id(ontologies),
+        ontology_signature,
+        metadata_signature,
+    )
+
+def _refresh_property_type_map() -> None:
+    """
+    Rebuild the effective property-type mapping.
+
+    The first ontology in the registered ontology list takes precedence
+    when different ontologies declare conflicting types for the same URI.
+    """
+    ontology_map: Dict[str, str] = {}
+    sources: Dict[str, str] = {}
+
+    # System annotation properties have a fixed classification.
+    for uri in SYSTEM_ANNOTATION_PROPERTIES:
+        ontology_map[uri] = "annotation_property"
+        sources[uri] = "System"
+
+    # Preserve the existing first-ontology precedence.
+    for ontology in state["ontologies"]:
+        filename = ontology.get("filename", "Unknown ontology")
+
+        for entity in ontology.get("entities", []):
+            uri = entity.get("uri")
+            entity_type = entity.get("type")
+
+            if (
+                not isinstance(uri, str)
+                or entity_type not in PROPERTY_ENTITY_TYPES
+                or uri in SYSTEM_ANNOTATION_PROPERTIES
+            ):
+                continue
+
+            if uri not in ontology_map:
+                ontology_map[uri] = entity_type
+                sources[uri] = filename
+                continue
+
+            existing_type = ontology_map[uri]
+
+            if existing_type != entity_type:
+                logger.warning(
+                    "Conflicting ontology property types for %s: "
+                    "keeping %s from %s and ignoring %s from %s.",
+                    uri,
+                    existing_type,
+                    sources[uri],
+                    entity_type,
+                    filename,
+                )
+
+    # Include property declarations not represented in the processed
+    # ontology entity lists.
+    graph_map = _build_property_type_map_from_graph(
+        state["combined_onto_graph"]
+    )
+
+    for uri, entity_type in graph_map.items():
+        ontology_map.setdefault(uri, entity_type)
+
+    # System classifications remain authoritative.
+    for uri in SYSTEM_ANNOTATION_PROPERTIES:
+        ontology_map[uri] = "annotation_property"
+
+    metadata_map = state["metadata_property_type_map"]
+
+    effective_map = dict(ontology_map)
+
+    for uri, entity_type in metadata_map.items():
+        if (
+            uri not in effective_map
+            and entity_type in PROPERTY_ENTITY_TYPES
+        ):
+            effective_map[uri] = entity_type
+
+    state["ontology_property_type_map"] = ontology_map
+    state["property_type_map"] = effective_map
+    state["property_type_map_signature"] = (
+        _property_type_map_signature()
+    )
+
+def _get_property_type_map() -> Dict[str, str]:
+    """Return the current canonical property-type mapping."""
+    if (
+        state.get("property_type_map_signature")
+        != _property_type_map_signature()
+    ):
+        _refresh_property_type_map()
+
+    return state["property_type_map"]
+
+def _register_metadata_property_types(
+    role_map: Dict[str, str],
+) -> None:
+    """Register types inferred for properties without ontology declarations."""
+    _get_property_type_map()
+
+    ontology_map = state["ontology_property_type_map"]
+    metadata_map = dict(state["metadata_property_type_map"])
+
+    for uri, entity_type in role_map.items():
+        if (
+            isinstance(uri, str)
+            and entity_type in PROPERTY_ENTITY_TYPES
+            and uri not in ontology_map
+        ):
+            metadata_map[uri] = entity_type
+
+    state["metadata_property_type_map"] = metadata_map
+
+    _refresh_property_type_map()
+
+def _get_property_entity_type(
+    prop_uri: str,
+    active_datatypes: Optional[Set[str]] = None,
+) -> str:
+    """Return the canonical Application Profile type of a property."""
+    _get_property_type_map()
+
+    # Ontology declarations take precedence over metadata-derived types.
+    ontology_map = state["ontology_property_type_map"]
+    metadata_map = state["metadata_property_type_map"]
+
+    if prop_uri in ontology_map:
+        entity_type = ontology_map[prop_uri]
+
+        # Allow active Application Profile datatypes to refine range-based
+        # classification where there is no explicit property declaration.
+        ontology_graph = state["combined_onto_graph"]
+
+        has_explicit_declaration = any(
+            (
+                URIRef(prop_uri),
+                RDF.type,
+                property_type,
+            ) in ontology_graph
+            for property_type in (
+                RDF.Property,
+                OWL.ObjectProperty,
+                OWL.DatatypeProperty,
+                OWL.AnnotationProperty,
+            )
+        )
+
+        if (
+            active_datatypes
+            and not has_explicit_declaration
+            and any(
+                ontology_graph.objects(
+                    URIRef(prop_uri),
+                    RDFS.range,
+                )
+            )
+        ):
+            return _resolve_property_entity_type(
+                prop_uri,
+                ontology_graph,
+                active_datatypes,
+            )
+
+        return entity_type
+
+    if prop_uri in metadata_map:
+        return metadata_map[prop_uri]
+
+    return _resolve_property_entity_type(
+        prop_uri,
+        state["combined_onto_graph"],
+        active_datatypes,
+    )
+
+def _get_property_type(
+    prop_uri: str,
+    active_datatypes: Optional[set[str]] = None,
+) -> str:
+    """Return the effective object/datatype value kind of a property."""
+    entity_type = _get_property_entity_type(
+        prop_uri,
+        active_datatypes,
+    )
+
+    if entity_type == "datatype_property":
         return "datatype"
+
+    if entity_type == "annotation_property":
+        ontology_graph = state["combined_onto_graph"]
+
+        ranges = [
+            range_uri
+            for range_uri in ontology_graph.objects(
+                URIRef(prop_uri),
+                RDFS.range,
+            )
+            if isinstance(range_uri, URIRef)
+        ]
+
+        if any(
+            _is_datatype_uri(
+                str(range_uri),
+                ontology_graph,
+                active_datatypes,
+            )
+            for range_uri in ranges
+        ):
+            return "datatype"
 
     return "object"
 
@@ -1652,14 +1967,16 @@ def _get_property_group_uri(
     prop_uri: str,
     active_datatypes: Optional[Set[str]] = None,
 ) -> URIRef:
-    """Return the SHACL PropertyGroup corresponding to a property's type."""
-    if _is_annotation_property(prop_uri):
-        return PROPERTY_GROUP_ANNOTATION
+    """Return the SHACL PropertyGroup for a property's canonical type."""
+    entity_type = _get_property_entity_type(
+        prop_uri,
+        active_datatypes,
+    )
 
-    if _get_property_type(prop_uri, active_datatypes) == "datatype":
-        return PROPERTY_GROUP_DATATYPE
-
-    return PROPERTY_GROUP_OBJECT
+    return PROPERTY_TYPE_TO_GROUP.get(
+        entity_type,
+        PROPERTY_GROUP_OBJECT,
+    )
 
 def _normalize_namespace_delimiters(uri: str) -> str:
     """Remove trailing namespace delimiters for comparison only."""
@@ -3766,6 +4083,8 @@ class ApplicationProfile:
             else {}
         )
 
+        _register_metadata_property_types(role_map)
+
         for uri in md_uri_list:
             entity_type = role_map.get(uri)
 
@@ -3806,12 +4125,10 @@ class ApplicationProfile:
             if uri in candidates:
                 continue
 
-            if uri in SYSTEM_ANNOTATION_PROPERTIES:
-                entity_type = "annotation_property"
-            elif _get_property_type(uri, active_datatypes) == "datatype":
-                entity_type = "datatype_property"
-            else:
-                entity_type = "object_property"
+            entity_type = _get_property_entity_type(
+                uri,
+                active_datatypes,
+            )
 
             candidates[uri] = {
                 "type": entity_type,
@@ -3853,6 +4170,13 @@ class ApplicationProfile:
                     "in_onto": False,
                 },
             )
+
+        for uri, candidate in candidates.items():
+            if candidate["type"] in PROPERTY_ENTITY_TYPES:
+                candidate["type"] = _get_property_entity_type(
+                    uri,
+                    active_datatypes,
+                )
 
         entity_labels = {
             uri: get_label(uri)
@@ -5432,6 +5756,30 @@ class SHACLProfile:
         datatype_uris = entities["datatype"]
         individual_uris = entities["individual"]
 
+        # Infer types for metadata-only properties before assigning their SHACL groups.
+        ontology_property_types = (
+            _get_property_type_map()
+        )
+
+        metadata_only_property_uris = sorted(
+            uri
+            for uri in property_uris
+            if uri not in ontology_property_types
+        )
+
+        if metadata_only_property_uris:
+            role_profile = ApplicationProfile(self.store)
+
+            metadata_property_roles = (
+                await role_profile._batch_entity_roles(
+                    metadata_only_property_uris
+                )
+            )
+
+            _register_metadata_property_types(
+                metadata_property_roles
+            )
+
         if not any((
             class_uris,
             property_uris,
@@ -6560,6 +6908,7 @@ def get_reasoned_graph(original_path: str, fmt: str) -> tuple[Graph, Graph]:
 def load_saved_ontologies():
     if not os.path.isdir(ONTOLOGY_DIR):
         refresh_display_prefix_map()
+        _refresh_property_type_map()
         return
     for f in os.listdir(ONTOLOGY_DIR):
         if not f.endswith(('.rdf','.owl','.xml','.ttl','.nt','.jsonld','.json','.trig','.trix')):
@@ -6587,6 +6936,7 @@ def load_saved_ontologies():
         except Exception as e:
             logger.warning("Could not load ontology %s: %s", f, e, exc_info=True)
 
+    _refresh_property_type_map()
     refresh_display_prefix_map()
 
 async def ensure_metadata_named_graphs():
@@ -7188,6 +7538,7 @@ async def upload_ontology(file: UploadFile = File(...)):
         state["combined_onto_graph"].add(t)
     update_prefix_map(g, state["prefix_map"])
     refresh_display_prefix_map()
+    _refresh_property_type_map()
     for e in entities:
         await ap.resolve_entity_with_ontology(e["uri"])
     invalidate_caches()
@@ -7254,6 +7605,7 @@ async def delete_ontology(filename: str):
         for t in o["graph"]: state["combined_onto_graph"].add(t)
         update_prefix_map(o["graph"], state["prefix_map"])
     refresh_display_prefix_map()
+    _refresh_property_type_map()
     state["all_ontology_namespaces"].clear()
     for o in state["ontologies"]:
         if "namespaces" in o: state["all_ontology_namespaces"].update(o["namespaces"])
@@ -10268,6 +10620,10 @@ async def purge_all_data():
 
     state["ontologies"].clear()
     state["combined_onto_graph"] = Graph()
+    state["ontology_property_type_map"].clear()
+    state["metadata_property_type_map"].clear()
+    state["property_type_map"].clear()
+    state["property_type_map_signature"] = None
     state["prefix_map"].clear()
     state["metadata_files"].clear()
     clear_metadata_graph_stats()

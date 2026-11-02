@@ -219,6 +219,18 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
 
     profile = main.SHACLProfile(store)
 
+    metadata_roles = AsyncMock(
+        return_value={
+            str(EX.title): "datatype_property",
+        }
+    )
+
+    monkeypatch.setattr(
+        main.ApplicationProfile,
+        "_batch_entity_roles",
+        metadata_roles,
+    )
+
     assign_property_groups = AsyncMock()
 
     monkeypatch.setattr(
@@ -272,6 +284,15 @@ async def test_generate_profile_uses_all_metadata_graphs(monkeypatch):
     )
 
     await profile.generate_from_metadata()
+
+    metadata_roles.assert_awaited_once_with(
+        [str(EX.title)]
+    )
+
+    assert (
+        main.state["metadata_property_type_map"][str(EX.title)]
+        == "datatype_property"
+    )
 
     assign_property_groups.assert_awaited_once_with(
         {str(EX.title)}
