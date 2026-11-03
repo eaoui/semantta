@@ -5301,6 +5301,278 @@ class SHACLProfile:
             prepend_uris=prepend_uris,
         )
 
+    async def normalize_shape_ordering(self) -> None:
+        """Normalize and verify ordering for every persisted profile shape."""
+        graph = await self.store.load_shapes_graph()
+
+        node_shapes = set(
+            graph.subjects(RDF.type, SH.NodeShape)
+        )
+        property_shapes = set(
+            graph.subjects(RDF.type, SH.PropertyShape)
+        )
+
+        overlapping_shapes = node_shapes & property_shapes
+        if overlapping_shapes:
+            raise RuntimeError(
+                "A SHACL shape cannot be both a NodeShape and "
+                f"a PropertyShape: {sorted(map(str, overlapping_shapes))}"
+            )
+
+        all_shapes = node_shapes | property_shapes
+
+        node_shape_roles = {
+            "class": SH.targetClass,
+            "datatype": SH.targetNode,
+            "individual": SH.targetNode,
+        }
+
+        supported_groups = {
+            group_uri
+            for group_uri, _, _ in PROPERTY_GROUP_DEFINITIONS
+        }
+
+        inactive_shapes: Set[URIRef] = set()
+        scope_by_shape: Dict[URIRef, str] = {}
+        active_entities_by_scope: Dict[str, Dict[str, URIRef]] = {}
+
+        # Validate every shape's identity, activation state, and ordering scope
+        # before making any changes to the shapes graph.
+        for shape in sorted(all_shapes, key=str):
+            if not isinstance(shape, URIRef):
+                raise RuntimeError(
+                    f"Profile shape must have a URI identifier: {shape}"
+                )
+
+            markers = set(
+                graph.objects(shape, SH.deactivated)
+            )
+
+            if markers:
+                marker = next(iter(markers))
+
+                if (
+                    len(markers) != 1
+                    or not isinstance(marker, Literal)
+                    or marker.datatype != XSD.boolean
+                    or marker.toPython() is not True
+                ):
+                    raise RuntimeError(
+                        "Invalid activation state on profile shape: "
+                        f"{shape}"
+                    )
+
+                inactive_shapes.add(shape)
+
+            if shape in node_shapes:
+                shape_uri = str(shape)
+
+                entity_type = next(
+                    (
+                        role
+                        for role in node_shape_roles
+                        if shape_uri.startswith(f"urn:shape:{role}:")
+                    ),
+                    None,
+                )
+
+                if entity_type is None:
+                    raise RuntimeError(
+                        f"Unrecognized NodeShape identifier: {shape}"
+                    )
+
+                target_predicate = node_shape_roles[entity_type]
+                entities = set(
+                    graph.objects(shape, target_predicate)
+                )
+
+                if (
+                    len(entities) != 1
+                    or not all(
+                        isinstance(entity, URIRef)
+                        for entity in entities
+                    )
+                ):
+                    raise RuntimeError(
+                        f"NodeShape must have exactly one URI target: {shape}"
+                    )
+
+                entity_uri = str(next(iter(entities)))
+                scope = f"node:{entity_type}"
+
+            else:
+                paths = set(
+                    graph.objects(shape, SH.path)
+                )
+                groups = set(
+                    graph.objects(shape, SH.group)
+                )
+
+                if (
+                    len(paths) != 1
+                    or not isinstance(next(iter(paths), None), URIRef)
+                ):
+                    raise RuntimeError(
+                        "PropertyShape must have exactly one URI path: "
+                        f"{shape}"
+                    )
+
+                if (
+                    len(groups) != 1
+                    or next(iter(groups), None) not in supported_groups
+                ):
+                    raise RuntimeError(
+                        "PropertyShape must belong to exactly one "
+                        f"supported property group: {shape}"
+                    )
+
+                entity_uri = str(next(iter(paths)))
+                group_uri = next(iter(groups))
+                scope = f"property:{group_uri}"
+
+            scope_by_shape[shape] = scope
+
+            if shape not in inactive_shapes:
+                active_entities = active_entities_by_scope.setdefault(
+                    scope,
+                    {},
+                )
+
+                existing_shape = active_entities.get(entity_uri)
+
+                if (
+                    existing_shape is not None
+                    and existing_shape != shape
+                ):
+                    raise RuntimeError(
+                        "Multiple active shapes exist for the same entity "
+                        f"in ordering scope {scope}: {entity_uri}"
+                    )
+
+                active_entities[entity_uri] = shape
+
+        # Inactive shapes retain their configuration but never retain order.
+        if inactive_shapes:
+            inactive_values = " ".join(
+                _sparql_iri(str(shape), "SHACL shape URI")
+                for shape in sorted(inactive_shapes, key=str)
+            )
+
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:order ?oldOrder .
+                    }}
+                }}
+                WHERE {{
+                    VALUES ?shape {{ {inactive_values} }}
+
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:order ?oldOrder .
+                    }}
+                }}
+            """)
+
+        # Normalize each node-shape type independently.
+        for entity_type in node_shape_roles:
+            await self._normalize_shape_order(entity_type)
+
+        # Normalize each property group independently.
+        for group_uri, _, _ in PROPERTY_GROUP_DEFINITIONS:
+            await self._normalize_property_group_order(
+                str(group_uri)
+            )
+
+        # Reload the graph and verify every shape, including inactive shapes.
+        verified_graph = await self.store.load_shapes_graph()
+
+        verified_node_shapes = set(
+            verified_graph.subjects(RDF.type, SH.NodeShape)
+        )
+        verified_property_shapes = set(
+            verified_graph.subjects(RDF.type, SH.PropertyShape)
+        )
+
+        if (
+            verified_node_shapes != node_shapes
+            or verified_property_shapes != property_shapes
+        ):
+            raise RuntimeError(
+                "The profile shape inventory changed during "
+                "ordering normalization."
+            )
+
+        orders_by_scope: Dict[str, List[int]] = defaultdict(list)
+
+        for shape_node in all_shapes:
+            if not isinstance(shape_node, URIRef):
+                raise RuntimeError(
+                    f"Profile shape must have a URI identifier: {shape_node}"
+                )
+
+            shape = shape_node
+            markers = set(
+                verified_graph.objects(shape, SH.deactivated)
+            )
+            orders = set(
+                verified_graph.objects(shape, SH.order)
+            )
+
+            if shape in inactive_shapes:
+                if markers != {Literal(True, datatype=XSD.boolean)}:
+                    raise RuntimeError(
+                        f"Inactive shape has an invalid activation state: {shape}"
+                    )
+
+                if orders:
+                    raise RuntimeError(
+                        f"Inactive shape retains an order: {shape}"
+                    )
+
+                continue
+
+            if markers:
+                raise RuntimeError(
+                    f"Active shape has a deactivation marker: {shape}"
+                )
+
+            if len(orders) != 1:
+                raise RuntimeError(
+                    "Active shape must have exactly one order value: "
+                    f"{shape}"
+                )
+
+            order = next(iter(orders))
+
+            if (
+                not isinstance(order, Literal)
+                or order.datatype != XSD.integer
+                or type(order.toPython()) is not int
+                or order.toPython() < 1
+            ):
+                raise RuntimeError(
+                    "Active shape order must be a positive integer: "
+                    f"{shape}"
+                )
+
+            orders_by_scope[scope_by_shape[shape]].append(
+                order.toPython()
+            )
+
+        for scope, orders in orders_by_scope.items():
+            expected = list(range(1, len(orders) + 1))
+
+            if sorted(orders) != expected:
+                raise RuntimeError(
+                    "Shape ordering is not unique and contiguous "
+                    f"within scope {scope}: {sorted(orders)}"
+                )
+
+        if set(graph) != set(verified_graph):
+            self.invalidate_shapes_cache()
+
     async def get_active_node_order_map(
         self,
         entity_type: str,
@@ -7822,6 +8094,8 @@ async def lifespan(app: FastAPI):
         # Normalize and verify persisted SHACL activation states
         # before initializing the Application Profile.
         await shacl.normalize_shape_activation_states()
+
+        await shacl.normalize_shape_ordering()
 
         progress["phase"] = (
             "Loading metadata…"
