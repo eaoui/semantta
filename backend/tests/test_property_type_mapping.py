@@ -246,6 +246,11 @@ async def test_profile_entity_type_uses_canonical_mapping(
         RDF.type,
         OWL.ObjectProperty,
     ))
+    first_graph.add((
+        EX.rangeOnlyProperty,
+        RDFS.range,
+        EX.ProfileDatatype,
+    ))
 
     second_graph = Graph()
     second_graph.add((
@@ -273,12 +278,16 @@ async def test_profile_entity_type_uses_canonical_mapping(
     monkeypatch.setattr(
         main.shacl,
         "get_active_properties",
-        AsyncMock(return_value=[]),
+        AsyncMock(
+            return_value=[str(EX.rangeOnlyProperty)],
+        ),
     )
     monkeypatch.setattr(
         main.shacl,
         "get_active_datatypes",
-        AsyncMock(return_value=[]),
+        AsyncMock(
+            return_value=[str(EX.ProfileDatatype)],
+        ),
     )
     monkeypatch.setattr(
         main.shacl,
@@ -321,6 +330,15 @@ async def test_profile_entity_type_uses_canonical_mapping(
     )
 
     assert title.type == "object_property"
+
+    range_only_property = next(
+        entity
+        for entity in entities
+        if entity.uri == str(EX.rangeOnlyProperty)
+    )
+
+    assert range_only_property.type == "object_property"
+    assert range_only_property.active is True
 
 
 def test_metadata_only_property_type_is_registered(
@@ -390,15 +408,28 @@ def test_ontology_type_takes_precedence_over_metadata_type(
     )
 
 
-def test_active_application_profile_datatype_refines_range_inference(
+def test_range_only_property_type_is_independent_of_profile_activation(
     monkeypatch,
 ):
     ontology_graph = Graph()
 
+    # This range has no ontology datatype declaration.
     ontology_graph.add((
-        EX.property,
+        EX.unknownRangeProperty,
         RDFS.range,
-        EX.CustomDatatype,
+        EX.ProfileDatatype,
+    ))
+
+    # This range is explicitly declared as an ontology datatype.
+    ontology_graph.add((
+        EX.OntologyDatatype,
+        RDF.type,
+        RDFS.Datatype,
+    ))
+    ontology_graph.add((
+        EX.declaredDatatypeProperty,
+        RDFS.range,
+        EX.OntologyDatatype,
     ))
 
     set_type_registry_state(
@@ -407,34 +438,84 @@ def test_active_application_profile_datatype_refines_range_inference(
         ontology_graph,
     )
 
-    active_datatypes = {
-        str(EX.CustomDatatype),
-    }
+    unknown_property = str(EX.unknownRangeProperty)
+    declared_property = str(EX.declaredDatatypeProperty)
 
-    assert (
-        main._get_property_entity_type(
-            str(EX.property),
-            active_datatypes,
+    active_datatype_sets = (
+        set(),
+        {
+            str(EX.ProfileDatatype),
+            str(EX.OntologyDatatype),
+        },
+    )
+
+    for active_datatypes in active_datatype_sets:
+        # An Application Profile datatype cannot change canonical
+        # property classification through range-based inference.
+        assert (
+            main._get_property_entity_type(unknown_property)
+            == "object_property"
         )
-        == "datatype_property"
+
+        assert (
+            main._get_property_type(
+                unknown_property,
+                active_datatypes,
+            )
+            == "object"
+        )
+
+        assert (
+            main._get_property_group_uri(unknown_property)
+            == main.PROPERTY_GROUP_OBJECT
+        )
+
+        # Ontology datatype declarations remain sufficient for
+        # datatype-property inference, independently of activation.
+        assert (
+            main._get_property_entity_type(declared_property)
+            == "datatype_property"
+        )
+
+        assert (
+            main._get_property_type(
+                declared_property,
+                active_datatypes,
+            )
+            == "datatype"
+        )
+
+        assert (
+            main._get_property_group_uri(declared_property)
+            == main.PROPERTY_GROUP_DATATYPE
+        )
+
+
+def test_property_type_resolver_respects_explicit_empty_graph(
+    monkeypatch,
+):
+    combined_graph = Graph()
+
+    combined_graph.add((
+        EX.property,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        combined_graph,
     )
 
     assert (
-        main._get_property_type(
+        main._resolve_property_entity_type(
             str(EX.property),
-            active_datatypes,
+            graph=Graph(),
         )
-        == "datatype"
+        == "object_property"
     )
-
-    assert (
-        main._get_property_group_uri(
-            str(EX.property),
-            active_datatypes,
-        )
-        == main.PROPERTY_GROUP_DATATYPE
-    )
-
+    
 
 def test_annotation_property_keeps_annotation_group_with_datatype_range(
     monkeypatch,

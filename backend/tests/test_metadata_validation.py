@@ -752,7 +752,7 @@ async def test_live_class_selection_validation_skips_required_fields(
     shacl_check.assert_not_awaited()
 
 
-def test_property_type_recognizes_application_profile_datatypes(
+def test_property_type_does_not_depend_on_profile_datatype_activation(
     monkeypatch,
 ):
     ontology = Graph()
@@ -816,10 +816,19 @@ def test_property_type_recognizes_application_profile_datatypes(
     assert main._get_property_type(str(EX.ISBN)) == "object"
     assert main._get_property_type(str(EX.isbn)) == "datatype"
     assert main._get_property_type(str(EX.pageCount)) == "datatype"
+    assert (
+        main._get_property_entity_type(str(EX.profileValue))
+        == "object_property"
+    )
+
+    assert main._get_property_type(
+        str(EX.profileValue),
+    ) == "object"
+
     assert main._get_property_type(
         str(EX.profileValue),
         active_datatypes,
-    ) == "datatype"
+    ) == "object"
     assert main._get_property_type(str(EX.author)) == "object"
 
 

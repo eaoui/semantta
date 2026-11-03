@@ -1629,15 +1629,19 @@ def _is_datatype_uri(
 def _resolve_property_entity_type(
     prop_uri: str,
     graph: Optional[Graph] = None,
-    active_datatypes: Optional[Set[str]] = None,
 ) -> str:
     """
     Resolve the canonical Application Profile type of a property.
 
     Explicit OWL declarations take precedence over generic RDF property
-    declarations and range-based inference.
+    declarations and range-based inference. Classification is independent
+    of Application Profile activation state.
     """
-    ontology_graph = graph or state["combined_onto_graph"]
+    ontology_graph = (
+        graph
+        if graph is not None
+        else state["combined_onto_graph"]
+    )
     property_ref = URIRef(prop_uri)
 
     declared_types = set(
@@ -1666,8 +1670,8 @@ def _resolve_property_entity_type(
     if RDF.Property in declared_types:
         return "annotation_property"
 
-    # Infer the type from recognized datatype ranges when there is
-    # no explicit property declaration.
+    # Infer the type from ontology-recognized datatype ranges.
+    # Application Profile activation must not influence this decision.
     ranges = [
         value
         for value in ontology_graph.objects(
@@ -1681,7 +1685,6 @@ def _resolve_property_entity_type(
         _is_datatype_uri(
             str(range_uri),
             graph=ontology_graph,
-            active_datatypes=active_datatypes,
         )
         for range_uri in ranges
     ):
@@ -1691,7 +1694,6 @@ def _resolve_property_entity_type(
 
 def _build_property_type_map_from_graph(
     graph: Graph,
-    active_datatypes: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """Build a normalized property-type mapping from an ontology graph."""
     property_uris = set()
@@ -1724,7 +1726,6 @@ def _build_property_type_map_from_graph(
         str(prop_uri): _resolve_property_entity_type(
             str(prop_uri),
             graph,
-            active_datatypes,
         )
         for prop_uri in sorted(property_uris, key=str)
         if is_valid_uri(str(prop_uri))
@@ -1869,7 +1870,6 @@ def _register_metadata_property_types(
 
 def _get_property_entity_type(
     prop_uri: str,
-    active_datatypes: Optional[Set[str]] = None,
 ) -> str:
     """Return the canonical Application Profile type of a property."""
     _get_property_type_map()
@@ -1879,43 +1879,7 @@ def _get_property_entity_type(
     metadata_map = state["metadata_property_type_map"]
 
     if prop_uri in ontology_map:
-        entity_type = ontology_map[prop_uri]
-
-        # Allow active Application Profile datatypes to refine range-based
-        # classification where there is no explicit property declaration.
-        ontology_graph = state["combined_onto_graph"]
-
-        has_explicit_declaration = any(
-            (
-                URIRef(prop_uri),
-                RDF.type,
-                property_type,
-            ) in ontology_graph
-            for property_type in (
-                RDF.Property,
-                OWL.ObjectProperty,
-                OWL.DatatypeProperty,
-                OWL.AnnotationProperty,
-            )
-        )
-
-        if (
-            active_datatypes
-            and not has_explicit_declaration
-            and any(
-                ontology_graph.objects(
-                    URIRef(prop_uri),
-                    RDFS.range,
-                )
-            )
-        ):
-            return _resolve_property_entity_type(
-                prop_uri,
-                ontology_graph,
-                active_datatypes,
-            )
-
-        return entity_type
+        return ontology_map[prop_uri]
 
     if prop_uri in metadata_map:
         return metadata_map[prop_uri]
@@ -1923,18 +1887,17 @@ def _get_property_entity_type(
     return _resolve_property_entity_type(
         prop_uri,
         state["combined_onto_graph"],
-        active_datatypes,
     )
 
 def _get_property_type(
     prop_uri: str,
     active_datatypes: Optional[set[str]] = None,
 ) -> str:
-    """Return the effective object/datatype value kind of a property."""
-    entity_type = _get_property_entity_type(
-        prop_uri,
-        active_datatypes,
-    )
+    """
+    Return the RDF value kind of a property, distinct from its canonical
+    Application Profile property kind.
+    """
+    entity_type = _get_property_entity_type(prop_uri)
 
     if entity_type == "datatype_property":
         return "datatype"
@@ -1965,13 +1928,9 @@ def _get_property_type(
 
 def _get_property_group_uri(
     prop_uri: str,
-    active_datatypes: Optional[Set[str]] = None,
 ) -> URIRef:
     """Return the SHACL PropertyGroup for a property's canonical type."""
-    entity_type = _get_property_entity_type(
-        prop_uri,
-        active_datatypes,
-    )
+    entity_type = _get_property_entity_type(prop_uri)
 
     return PROPERTY_TYPE_TO_GROUP.get(
         entity_type,
@@ -4143,10 +4102,7 @@ class ApplicationProfile:
             if uri in candidates:
                 continue
 
-            entity_type = _get_property_entity_type(
-                uri,
-                active_datatypes,
-            )
+            entity_type = _get_property_entity_type(uri)
 
             candidates[uri] = {
                 "type": entity_type,
@@ -4191,10 +4147,7 @@ class ApplicationProfile:
 
         for uri, candidate in candidates.items():
             if candidate["type"] in PROPERTY_ENTITY_TYPES:
-                candidate["type"] = _get_property_entity_type(
-                    uri,
-                    active_datatypes,
-                )
+                candidate["type"] = _get_property_entity_type(uri)
 
         entity_labels = {
             uri: get_label(uri)
@@ -4933,20 +4886,13 @@ class SHACLProfile:
         if not rows:
             return 0
 
-        active_datatypes = set(
-            await self.get_active_datatypes()
-        )
-
         groups_by_shape: Dict[str, URIRef] = {}
 
         for row in rows:
             shape_uri = row["propertyShape"]
             prop_uri = row["propUri"]
 
-            group_uri = _get_property_group_uri(
-                prop_uri,
-                active_datatypes,
-            )
+            group_uri = _get_property_group_uri(prop_uri)
 
             existing_group = groups_by_shape.get(shape_uri)
 
