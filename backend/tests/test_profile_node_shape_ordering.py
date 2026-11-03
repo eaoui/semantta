@@ -9,7 +9,7 @@ from typing import cast
 import pytest
 from fastapi import HTTPException
 from rdflib import Dataset, Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF, RDFS
+from rdflib.namespace import OWL, RDF, RDFS
 from rdflib.query import Result
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -338,3 +338,172 @@ async def test_application_profile_lists_node_entities_in_shacl_order(
         assert [entity.order for entity in ordered_entities] == [1, 2]
 
     assert await profile.get_active_classes() == [class_b, class_a]
+
+
+@pytest.mark.asyncio
+async def test_ontology_entities_are_not_implicitly_activated_in_profile(
+    dataset_store,
+    monkeypatch,
+):
+    dataset, store = dataset_store
+    shapes_graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+    ontology_graph = Graph()
+
+    entities_by_type = {
+        "class": (str(EX.ActiveClass), str(EX.OntologyOnlyClass)),
+        "datatype": (
+            str(EX.ActiveDatatype),
+            str(EX.OntologyOnlyDatatype),
+        ),
+        "individual": (
+            str(EX.ActiveIndividual),
+            str(EX.OntologyOnlyIndividual),
+        ),
+        "object_property": (
+            str(EX.activeObjectProperty),
+            str(EX.ontologyOnlyObjectProperty),
+        ),
+        "datatype_property": (
+            str(EX.activeDatatypeProperty),
+            str(EX.ontologyOnlyDatatypeProperty),
+        ),
+        "annotation_property": (
+            str(EX.activeAnnotationProperty),
+            str(EX.ontologyOnlyAnnotationProperty),
+        ),
+    }
+
+    ontology_declarations = {
+        "class": OWL.Class,
+        "datatype": RDFS.Datatype,
+        "individual": OWL.NamedIndividual,
+        "object_property": OWL.ObjectProperty,
+        "datatype_property": OWL.DatatypeProperty,
+        "annotation_property": OWL.AnnotationProperty,
+    }
+
+    ontology_entities = []
+
+    for entity_type, uris in entities_by_type.items():
+        for uri in uris:
+            ontology_entities.append({
+                "uri": uri,
+                "type": entity_type,
+            })
+            ontology_graph.add((
+                URIRef(uri),
+                RDF.type,
+                ontology_declarations[entity_type],
+            ))
+
+    # Each already-activated node entity has an active NodeShape.
+    for entity_type in ("class", "datatype", "individual"):
+        active_uri, _ = entities_by_type[entity_type]
+        add_node_shape(
+            shapes_graph,
+            entity_type,
+            active_uri,
+            1,
+        )
+
+    # Each already-activated property has a PropertyShape in its
+    # corresponding property group.
+    property_groups = {
+        "object_property": main.PROPERTY_GROUP_OBJECT,
+        "datatype_property": main.PROPERTY_GROUP_DATATYPE,
+        "annotation_property": main.PROPERTY_GROUP_ANNOTATION,
+    }
+
+    for group_uri, _, group_order in main.PROPERTY_GROUP_DEFINITIONS:
+        shapes_graph.add((group_uri, RDF.type, SH.PropertyGroup))
+        shapes_graph.add((group_uri, SH.order, Literal(group_order)))
+
+    for entity_type, group_uri in property_groups.items():
+        active_uri, _ = entities_by_type[entity_type]
+        shape_uri = URIRef(
+            main.shape_uri_for_entity(active_uri, "property", {})
+        )
+
+        shapes_graph.add((shape_uri, RDF.type, SH.PropertyShape))
+        shapes_graph.add((shape_uri, SH.path, URIRef(active_uri)))
+        shapes_graph.add((shape_uri, SH.group, group_uri))
+        shapes_graph.add((shape_uri, SH.order, Literal(1)))
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "profile-membership-test.ttl",
+            "entities": ontology_entities,
+            "graph": ontology_graph,
+        }],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology_graph,
+    )
+    monkeypatch.setitem(main.state, "metadata_only_sources", {})
+    monkeypatch.setitem(main.state, "metadata_property_type_map", {})
+
+    monkeypatch.setattr(main.shacl, "store", store)
+    monkeypatch.setattr(main, "_used_uris_set", set())
+    monkeypatch.setattr(main, "rebuild_used_uris", AsyncMock())
+    monkeypatch.setattr(main, "get_label", lambda uri: uri)
+    monkeypatch.setattr(
+        main,
+        "_get_stored_labels",
+        AsyncMock(return_value={}),
+    )
+
+    profile = main.ApplicationProfile(store)
+    monkeypatch.setattr(
+        profile,
+        "_get_shacl_domains",
+        AsyncMock(return_value={}),
+    )
+
+    shapes_before = set(shapes_graph)
+
+    profile_entities = await profile.build_profile_entities()
+
+    entities_by_uri = {
+        entity.uri: entity
+        for entity in profile_entities
+    }
+
+    for entity_type, (active_uri, ontology_only_uri) in entities_by_type.items():
+        # Explicitly activated ontology entities are active.
+        assert entities_by_uri[active_uri].type == entity_type
+        assert entities_by_uri[active_uri].active is True
+
+        # Ontology-only entities remain available but inactive.
+        assert entities_by_uri[ontology_only_uri].type == entity_type
+        assert entities_by_uri[ontology_only_uri].active is False
+
+        shape_role = (
+            "property"
+            if entity_type in property_groups
+            else entity_type
+        )
+
+        ontology_only_shape = URIRef(
+            main.shape_uri_for_entity(
+                ontology_only_uri,
+                shape_role,
+                {},
+            )
+        )
+
+        # No SHACL shape is materialized for an entity that was
+        # never activated in the Application Profile.
+        assert not list(
+            shapes_graph.triples((
+                ontology_only_shape,
+                None,
+                None,
+            ))
+        )
+
+    # Building the profile entity list must not mutate the shapes graph.
+    assert set(shapes_graph) == shapes_before
