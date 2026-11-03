@@ -176,6 +176,343 @@ async def test_property_groups_are_created_and_assigned_idempotently(
 
 
 @pytest.mark.asyncio
+async def test_assign_property_groups_reconciles_all_property_shapes(
+    fuseki_store,
+    monkeypatch,
+):
+    ontology_graph = Graph()
+
+    ontology_graph.add((
+        EX.objectProperty,
+        RDF.type,
+        OWL.ObjectProperty,
+    ))
+    ontology_graph.add((
+        EX.datatypeProperty,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+    ontology_graph.add((
+        EX.annotationProperty,
+        RDF.type,
+        OWL.AnnotationProperty,
+    ))
+
+    # This property has no class-domain association.
+    ontology_graph.add((
+        EX.universalProperty,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology_graph,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_property_type_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "property_type_map_signature",
+        None,
+    )
+
+    main._refresh_property_type_map()
+
+    properties = {
+        str(EX.objectProperty),
+        str(EX.datatypeProperty),
+        str(EX.annotationProperty),
+        str(EX.universalProperty),
+    }
+
+    shapes = {
+        prop_uri: URIRef(
+            main.shape_uri_for_entity(
+                prop_uri,
+                "property",
+                {},
+            )
+        )
+        for prop_uri in properties
+    }
+
+    old_group = URIRef("urn:test:old-property-group")
+    second_old_group = URIRef("urn:test:second-old-property-group")
+
+    class_shape = URIRef("urn:test:book-shape")
+
+    triples = [
+        (
+            f"{shapes[str(EX.objectProperty)].n3()} "
+            f"a {main.SH.PropertyShape.n3()} ; "
+            f"{main.SH.path.n3()} {EX.objectProperty.n3()} ; "
+            f"{main.SH.group.n3()} "
+            f"{old_group.n3()}, "
+            f"{second_old_group.n3()} ."
+        ),
+        (
+            f"{shapes[str(EX.datatypeProperty)].n3()} "
+            f"a {main.SH.PropertyShape.n3()} ; "
+            f"{main.SH.path.n3()} {EX.datatypeProperty.n3()} ."
+        ),
+        (
+            f"{shapes[str(EX.annotationProperty)].n3()} "
+            f"a {main.SH.PropertyShape.n3()} ; "
+            f"{main.SH.path.n3()} {EX.annotationProperty.n3()} ; "
+            f"{main.SH.group.n3()} {main.PROPERTY_GROUP_OBJECT.n3()} ; "
+            f"{main.SH.deactivated.n3()} true ."
+        ),
+        (
+            f"{shapes[str(EX.universalProperty)].n3()} "
+            f"a {main.SH.PropertyShape.n3()} ; "
+            f"{main.SH.path.n3()} {EX.universalProperty.n3()} ; "
+            f"{main.SH.group.n3()} {old_group.n3()} ."
+        ),
+        (
+            f"{class_shape.n3()} "
+            f"a {main.SH.NodeShape.n3()} ; "
+            f"{main.SH.targetClass.n3()} {EX.Book.n3()} ; "
+            f"{main.SH.property.n3()} "
+            f"{shapes[str(EX.objectProperty)].n3()} ."
+        ),
+    ]
+
+    await fuseki_store.insert_shapes(
+        "\n".join(triples)
+    )
+
+    profile = main.SHACLProfile(fuseki_store)
+
+    monkeypatch.setattr(
+        profile,
+        "get_active_datatypes",
+        AsyncMock(
+            side_effect=AssertionError(
+                "Property grouping must not access active datatypes."
+            )
+        ),
+    )
+
+    count = await profile._assign_property_groups()
+
+    assert count == 4
+
+    graph = await fuseki_store.load_shapes_graph()
+
+    expected_groups = {
+        str(EX.objectProperty): main.PROPERTY_GROUP_OBJECT,
+        str(EX.datatypeProperty): main.PROPERTY_GROUP_DATATYPE,
+        str(EX.annotationProperty): main.PROPERTY_GROUP_ANNOTATION,
+        str(EX.universalProperty): main.PROPERTY_GROUP_DATATYPE,
+    }
+
+    for prop_uri, expected_group in expected_groups.items():
+        shape_uri = shapes[prop_uri]
+
+        assert set(
+            graph.objects(shape_uri, main.SH.group)
+        ) == {expected_group}
+
+    # Deactivation must not remove or alter group membership.
+    assert (
+        shapes[str(EX.annotationProperty)],
+        main.SH.deactivated,
+        Literal(True),
+    ) in graph
+
+    # Existing class-property associations must remain unchanged.
+    assert (
+        class_shape,
+        main.SH.property,
+        shapes[str(EX.objectProperty)],
+    ) in graph
+
+    # Universality remains independent of property grouping.
+    assert not list(
+        graph.subjects(
+            main.SH.property,
+            shapes[str(EX.universalProperty)],
+        )
+    )
+
+    # Exactly the three canonical group definitions must exist.
+    expected_group_uris = {
+        group_uri
+        for group_uri, _, _ in main.PROPERTY_GROUP_DEFINITIONS
+    }
+
+    assert set(
+        graph.subjects(RDF.type, main.SH.PropertyGroup)
+    ) == expected_group_uris
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        (),
+        (
+            EX.firstPath,
+            EX.secondPath,
+        ),
+    ],
+    ids=[
+        "missing-path",
+        "multiple-paths",
+    ],
+)
+@pytest.mark.asyncio
+async def test_assign_property_groups_rejects_invalid_property_paths(
+    fuseki_store,
+    paths,
+):
+    shape_uri = URIRef("urn:test:invalid-property-shape")
+
+    triples = [
+        f"{shape_uri.n3()} a {main.SH.PropertyShape.n3()} ."
+    ]
+
+    for path in paths:
+        triples.append(
+            f"{shape_uri.n3()} "
+            f"{main.SH.path.n3()} {path.n3()} ."
+        )
+
+    await fuseki_store.insert_shapes(
+        "\n".join(triples)
+    )
+
+    profile = main.SHACLProfile(fuseki_store)
+
+    with pytest.raises(
+        RuntimeError,
+        match="exactly one URI-valued.*sh:path",
+    ):
+        await profile._assign_property_groups()
+
+
+@pytest.mark.asyncio
+async def test_property_group_follows_refreshed_canonical_type(
+    fuseki_store,
+    monkeypatch,
+):
+    ontology_graph = Graph()
+
+    ontology_graph.add((
+        EX.dynamicProperty,
+        RDF.type,
+        OWL.ObjectProperty,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology_graph,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "metadata_property_type_map",
+        {},
+    )
+    monkeypatch.setitem(
+        main.state,
+        "property_type_map_signature",
+        None,
+    )
+
+    main._refresh_property_type_map()
+
+    property_uri = str(EX.dynamicProperty)
+
+    shape_uri = URIRef(
+        main.shape_uri_for_entity(
+            property_uri,
+            "property",
+            {},
+        )
+    )
+
+    await fuseki_store.insert_shapes(
+        f"""
+        {shape_uri.n3()}
+            a {main.SH.PropertyShape.n3()} ;
+            {main.SH.path.n3()} {EX.dynamicProperty.n3()} .
+        """
+    )
+
+    profile = main.SHACLProfile(fuseki_store)
+
+    await profile._assign_property_groups()
+
+    graph = await fuseki_store.load_shapes_graph()
+
+    assert set(
+        graph.objects(shape_uri, main.SH.group)
+    ) == {main.PROPERTY_GROUP_OBJECT}
+
+    # Simulate an ontology update that changes the canonical type.
+    ontology_graph.remove((
+        EX.dynamicProperty,
+        RDF.type,
+        OWL.ObjectProperty,
+    ))
+
+    ontology_graph.add((
+        EX.dynamicProperty,
+        RDF.type,
+        OWL.DatatypeProperty,
+    ))
+
+    main._refresh_property_type_map()
+
+    await profile._assign_property_groups()
+
+    graph = await fuseki_store.load_shapes_graph()
+
+    assert set(
+        graph.objects(shape_uri, main.SH.group)
+    ) == {main.PROPERTY_GROUP_DATATYPE}
+
+
+@pytest.mark.asyncio
+async def test_ensure_property_groups_rejects_unsupported_groups(
+    fuseki_store,
+):
+    unsupported_group = URIRef(
+        "urn:semantta:property-group:universal-properties"
+    )
+
+    await fuseki_store.insert_shapes(
+        f"""
+        {unsupported_group.n3()}
+            a {main.SH.PropertyGroup.n3()} .
+        """
+    )
+
+    profile = main.SHACLProfile(fuseki_store)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Only Object, Datatype, and Annotation",
+    ):
+        await profile._ensure_property_groups()
+
+
+@pytest.mark.asyncio
 async def test_add_property_global_assigns_ontology_type_group(
     fuseki_store,
     monkeypatch,

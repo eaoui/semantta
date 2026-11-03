@@ -4062,6 +4062,15 @@ class ApplicationProfile:
 
         _register_metadata_property_types(role_map)
 
+        active_metadata_properties = (
+            set(role_map).intersection(active_props)
+        )
+
+        if active_metadata_properties:
+            await shacl._assign_property_groups(
+                active_metadata_properties
+            )
+
         for uri in md_uri_list:
             entity_type = role_map.get(uri)
 
@@ -4825,6 +4834,36 @@ class SHACLProfile:
 
     async def _ensure_property_groups(self) -> None:
         """Ensure that the three standard property groups exist."""
+        expected_groups = {
+            str(group_uri)
+            for group_uri, _, _ in PROPERTY_GROUP_DEFINITIONS
+        }
+
+        rows = await self.store.query(f"""
+            PREFIX sh: <{SH}>
+
+            SELECT DISTINCT ?group WHERE {{
+                GRAPH <{SHAPES_GRAPH}> {{
+                    ?group a sh:PropertyGroup .
+                }}
+            }}
+        """)
+
+        unsupported_groups = sorted({
+            row["group"]
+            for row in rows
+            if row["group"] not in expected_groups
+        })
+
+        if unsupported_groups:
+            raise RuntimeError(
+                "Unsupported SHACL property groups found: "
+                + ", ".join(unsupported_groups)
+                + ". Only Object, Datatype, and Annotation "
+                "property groups are supported. "
+                "Reset the profile data instead of migrating groups."
+            )
+
         triples = []
 
         for group_uri, label, order in PROPERTY_GROUP_DEFINITIONS:
@@ -4848,62 +4887,88 @@ class SHACLProfile:
         property_uris: Optional[Set[str]] = None,
     ) -> int:
         """
-        Assign every matching property shape to its ontology-type group.
+        Assign each PropertyShape to exactly one group determined by its
+        property's canonical ontology type.
 
-        When property_uris is None, all property shapes in the profile
-        are processed. Existing sh:group memberships are replaced so
-        every property shape has exactly one type group.
+        When property_uris is None, every PropertyShape in the profile
+        is processed, including deactivated shapes.
         """
-        if property_uris is not None:
+        await self._ensure_property_groups()
+
+        if property_uris is None:
+            rows = await self.store.query(f"""
+                PREFIX sh: <{SH}>
+
+                SELECT DISTINCT ?propertyShape ?propUri WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?propertyShape a sh:PropertyShape .
+
+                        OPTIONAL {{
+                            ?propertyShape sh:path ?propUri .
+                        }}
+                    }}
+                }}
+            """)
+        else:
             normalized_uris = sorted(set(property_uris))
 
             if not normalized_uris:
                 return 0
 
-            property_values = "VALUES ?propUri { " + " ".join(
+            property_values = " ".join(
                 _sparql_iri(uri, "property URI")
                 for uri in normalized_uris
-            ) + " }"
-        else:
-            property_values = ""
+            )
 
-        await self._ensure_property_groups()
+            rows = await self.store.query(f"""
+                PREFIX sh: <{SH}>
 
-        rows = await self.store.query(f"""
-            PREFIX sh: <{SH}>
+                SELECT DISTINCT ?propertyShape ?propUri WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        VALUES ?selectedPropUri {{
+                            {property_values}
+                        }}
 
-            SELECT DISTINCT ?propertyShape ?propUri WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    {property_values}
-
-                    ?propertyShape
-                        a sh:PropertyShape ;
-                        sh:path ?propUri .
+                        ?propertyShape
+                            a sh:PropertyShape ;
+                            sh:path ?selectedPropUri ;
+                            sh:path ?propUri .
+                    }}
                 }}
-            }}
-        """)
+            """)
 
         if not rows:
             return 0
 
-        groups_by_shape: Dict[str, URIRef] = {}
+        paths_by_shape: Dict[str, Set[str]] = {}
 
         for row in rows:
             shape_uri = row["propertyShape"]
-            prop_uri = row["propUri"]
+            prop_uri = row.get("propUri")
+
+            if not isinstance(prop_uri, str) or not is_valid_uri(prop_uri):
+                raise RuntimeError(
+                    "PropertyShape must have exactly one URI-valued "
+                    f"sh:path: {shape_uri}"
+                )
+
+            paths_by_shape.setdefault(
+                shape_uri,
+                set(),
+            ).add(prop_uri)
+
+        groups_by_shape: Dict[str, URIRef] = {}
+
+        for shape_uri, property_paths in paths_by_shape.items():
+            if len(property_paths) != 1:
+                raise RuntimeError(
+                    "PropertyShape must have exactly one URI-valued "
+                    f"sh:path: {shape_uri}"
+                )
+
+            prop_uri = next(iter(property_paths))
 
             group_uri = _get_property_group_uri(prop_uri)
-
-            existing_group = groups_by_shape.get(shape_uri)
-
-            if (
-                existing_group is not None
-                and existing_group != group_uri
-            ):
-                raise RuntimeError(
-                    "A property shape has conflicting property paths: "
-                    f"{shape_uri}"
-                )
 
             groups_by_shape[shape_uri] = group_uri
 
@@ -7655,6 +7720,36 @@ async def lifespan(app: FastAPI):
         set_active_theme(active_theme)
 
         await seed_core_active_entities()
+
+        # Restore metadata-derived property types for persisted profile shapes
+        # before reconciling their canonical SHACL groups.
+        profile_shapes_graph = await store.load_shapes_graph()
+
+        profile_property_uris = {
+            str(prop_uri)
+            for property_shape in profile_shapes_graph.subjects(
+                RDF.type,
+                SH.PropertyShape,
+            )
+            for prop_uri in profile_shapes_graph.objects(
+                property_shape,
+                SH.path,
+            )
+            if isinstance(prop_uri, URIRef)
+        }
+
+        if profile_property_uris:
+            metadata_property_roles = await ap._batch_entity_roles(
+                sorted(profile_property_uris)
+            )
+
+            _register_metadata_property_types(
+                metadata_property_roles
+            )
+
+        # Reconcile every PropertyShape, including deactivated shapes.
+        await shacl._assign_property_groups()
+
         await _reconcile_property_domain_links(
             profile_store=store,
         )
@@ -7997,6 +8092,7 @@ async def upload_ontology(file: UploadFile = File(...)):
     update_prefix_map(g, state["prefix_map"])
     refresh_display_prefix_map()
     _refresh_property_type_map()
+    await shacl._assign_property_groups()
     for e in entities:
         await ap.resolve_entity_with_ontology(e["uri"])
     invalidate_caches()
@@ -8064,6 +8160,7 @@ async def delete_ontology(filename: str):
         update_prefix_map(o["graph"], state["prefix_map"])
     refresh_display_prefix_map()
     _refresh_property_type_map()
+    await shacl._assign_property_groups()
     state["all_ontology_namespaces"].clear()
     for o in state["ontologies"]:
         if "namespaces" in o: state["all_ontology_namespaces"].update(o["namespaces"])
