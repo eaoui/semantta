@@ -3944,6 +3944,7 @@ def _require_keys(data: dict, *keys: str):
 class ApplicationProfile:
     def __init__(self, store: RDFStore):
         self.store = store
+        self._constraint_resolver = SHACLProfile(store)
         self._cache: List[ProfileEntityItem] = []
         self._dirty = True
         self._order_map: Dict[str, int] = {}
@@ -4364,7 +4365,10 @@ class ApplicationProfile:
     ) -> dict:
         pshape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
         if effective_profile is None:
-            profile_data = await get_entity_constraints(prop_uri)
+            profile_data = await self._constraint_resolver.get_entity_constraints(
+                prop_uri,
+                _get_property_entity_type(prop_uri),
+            )
             effective_profile = profile_data.get("effective")
 
         if not isinstance(effective_profile, dict):
@@ -4488,13 +4492,16 @@ class ApplicationProfile:
         prop_refs = await self._list_active_properties(class_uri)
         props = []
         active_datatypes = set(
-            await shacl.get_active_datatypes()
+            await self._constraint_resolver.get_active_datatypes()
         )
         for ref in prop_refs:
             prop_uri = ref["uri"]
-            profile_data = await get_entity_constraints(prop_uri)
+            entity_type = _get_property_entity_type(prop_uri)
+            profile_data = await self._constraint_resolver.get_entity_constraints(
+                prop_uri,
+                entity_type,
+            )
             effective_profile = profile_data["effective"]
-            entity_type = profile_data["type"]
 
             _validate_profile_range_constraint_compatibility(
                 entity_type,
@@ -4849,6 +4856,272 @@ class SHACLProfile:
     def _changed(self):
         if self._on_change:
             self._on_change()
+
+    async def get_entity_constraints(
+        self,
+        entity_uri: str,
+        entity_type: str,
+    ) -> dict:
+        """Resolve original, stored, and effective constraints for an entity."""
+        original = get_original_constraints(
+            entity_uri,
+            entity_type,
+            state["combined_onto_graph"],
+        )
+
+        overrides = {}
+        universal_properties = []
+        inherited_properties = []
+
+        property_types = {
+            "object_property",
+            "datatype_property",
+            "annotation_property",
+        }
+
+        if entity_type in property_types:
+            property_ref = _sparql_iri(
+                entity_uri,
+                "property URI",
+            )
+
+            rows = await self.store.query(f"""
+                PREFIX sh: <http://www.w3.org/ns/shacl#>
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+                SELECT ?pred ?val WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?ps sh:path {property_ref} ;
+                            ?pred ?val .
+
+                        FILTER(
+                            ?pred NOT IN (
+                                sh:path,
+                                sh:order,
+                                sh:group,
+                                sh:deactivated,
+                                rdf:type
+                            )
+                        )
+                    }}
+                }}
+            """)
+
+            grouped = defaultdict(list)
+
+            for row in rows:
+                grouped[row["pred"]].append(row["val"])
+
+            multi_valued = {
+                str(SH["in"]),
+                str(SH.languageIn),
+            }
+
+            for predicate, values in grouped.items():
+                if predicate in multi_valued or len(values) > 1:
+                    overrides[predicate] = values
+                else:
+                    overrides[predicate] = values[0]
+
+            domain_rows = await self.store.query(f"""
+                PREFIX sh: <http://www.w3.org/ns/shacl#>
+
+                SELECT DISTINCT ?class WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?propertyShape
+                            sh:path {property_ref} .
+
+                        ?classShape
+                            a sh:NodeShape ;
+                            sh:targetClass ?class ;
+                            sh:property ?propertyShape .
+                    }}
+                }}
+            """)
+
+            domain_classes = sorted({
+                row["class"]
+                for row in domain_rows
+            })
+
+            if domain_classes:
+                overrides["urn:domainClasses"] = domain_classes
+
+            original_domains = get_property_domains(entity_uri)
+            original["urn:domainClasses"] = (
+                original_domains if original_domains else []
+            )
+
+            ranges = original.get(str(RDFS.range), [])
+
+            if entity_type == "object_property":
+                original[str(SH["class"])] = list(ranges)
+
+            elif entity_type == "datatype_property":
+                original[str(SH.datatype)] = list(ranges)
+
+            elif entity_type == "annotation_property":
+                active_datatypes = set(
+                    await self.get_active_datatypes()
+                )
+
+                class_ranges = []
+                datatype_ranges = []
+
+                for range_uri in ranges:
+                    if _is_datatype_uri(
+                        range_uri,
+                        state["combined_onto_graph"],
+                        active_datatypes,
+                    ):
+                        datatype_ranges.append(range_uri)
+                    else:
+                        class_ranges.append(range_uri)
+
+                original[str(SH["class"])] = class_ranges
+                original[str(SH.datatype)] = datatype_ranges
+
+        elif entity_type == "class":
+            class_shape_uri = shape_uri_for_entity(
+                entity_uri,
+                "class",
+                state["prefix_map"],
+            )
+
+            rows = await self.store.query(f"""
+                PREFIX sh: <http://www.w3.org/ns/shacl#>
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+                SELECT ?pred ?val WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        <{class_shape_uri}> ?pred ?val .
+
+                        FILTER(
+                            ?pred NOT IN (
+                                rdf:type,
+                                sh:targetClass,
+                                sh:property,
+                                sh:deactivated
+                            )
+                        )
+                    }}
+                }}
+            """)
+
+            grouped = defaultdict(list)
+
+            for row in rows:
+                grouped[row["pred"]].append(row["val"])
+
+            multi_valued = {
+                str(SH["in"]),
+                str(SH.languageIn),
+            }
+
+            for predicate, values in grouped.items():
+                if predicate in multi_valued or len(values) > 1:
+                    overrides[predicate] = values
+                else:
+                    overrides[predicate] = values[0]
+
+            active_properties = await self.get_active_properties()
+
+            active_domain_classes = set(
+                await self.get_active_classes()
+            )
+
+            effective_domains = await ap._get_shacl_domains(
+                profile_store=self.store,
+            )
+
+            original_properties = sorted(
+                prop_uri
+                for prop_uri in active_properties
+                if entity_uri in get_property_domains(prop_uri)
+            )
+
+            effective_properties = sorted(
+                prop_uri
+                for prop_uri in active_properties
+                if entity_uri in effective_domains.get(prop_uri, [])
+            )
+
+            universal_properties = sorted(
+                prop_uri
+                for prop_uri in active_properties
+                if not effective_domains.get(prop_uri, [])
+            )
+
+            inherited_properties = sorted(
+                prop_uri
+                for prop_uri in active_properties
+                if (
+                    entity_uri not in effective_domains.get(prop_uri, [])
+                    and effective_domains.get(prop_uri, [])
+                    and _property_applies_to_class(
+                        entity_uri,
+                        effective_domains[prop_uri],
+                        active_domain_classes,
+                    )
+                )
+            )
+
+            original[str(SH.property)] = original_properties
+            overrides[str(SH.property)] = effective_properties
+
+        stored_modes = await _load_stored_profile_field_modes(
+            entity_uri,
+            profile_store=self.store,
+        )
+
+        if entity_type in property_types:
+            # Domain Classes are ontology-derived by default.
+            # Incomplete SHACL links must not imply an override.
+            stored_modes.setdefault(
+                "urn:domainClasses",
+                PROFILE_FIELD_MODE_DEFAULT,
+            )
+
+        if entity_type == "class":
+            # Ignore legacy class-side relationship modes.
+            # The effective list is derived from property Domain Classes.
+            stored_modes.pop(str(SH.property), None)
+
+        field_modes = _resolve_profile_field_modes(
+            entity_type,
+            original,
+            overrides,
+            stored_modes,
+        )
+
+        effective = _resolve_effective_profile_constraints(
+            entity_type,
+            original,
+            overrides,
+            field_modes,
+        )
+
+        _validate_profile_range_constraint_compatibility(
+            entity_type,
+            effective,
+            entity_uri=entity_uri,
+            status_code=409,
+        )
+
+        result = {
+            "uri": entity_uri,
+            "type": entity_type,
+            "original": original,
+            "overrides": overrides,
+            "field_modes": field_modes,
+            "effective": effective,
+        }
+
+        if entity_type == "class":
+            result["universal_properties"] = universal_properties
+            result["inherited_properties"] = inherited_properties
+
+        return result
 
     async def _ensure_property_groups(self) -> None:
         """Ensure that the three standard property groups exist."""
@@ -6418,15 +6691,14 @@ class SHACLProfile:
         value: object | None = None,
     ) -> Optional[str]:
         """Return the effective datatype for a metadata property."""
-        try:
-            profile_data = await get_entity_constraints(prop_uri)
-        except HTTPException as exc:
-            # Properties absent from the Application Profile may still
-            # have SHACL or ontology datatype information.
-            if exc.status_code != 404:
-                raise
-        else:
-            effective_profile = profile_data.get("effective")
+        profile_data = await self.get_entity_constraints(
+            prop_uri,
+            _get_property_entity_type(prop_uri),
+        )
+
+        effective_profile = profile_data.get("effective")
+
+        if isinstance(effective_profile, dict):
 
             if isinstance(effective_profile, dict):
                 class_values = _effective_profile_field_values(
@@ -10450,225 +10722,12 @@ async def get_properties_for_class(class_uri: str):
 
 @app.get("/api/profile/constraints/{entity_uri:path}")
 async def get_entity_constraints(entity_uri: str):
-    etype = await ap.get_entity_type(entity_uri)
-    original = get_original_constraints(entity_uri, etype, state["combined_onto_graph"])
-    overrides = {}
-    universal_properties = []
-    inherited_properties = []
+    entity_type = await ap.get_entity_type(entity_uri)
 
-    if etype in ("object_property", "datatype_property", "annotation_property"):
-        property_ref = _sparql_iri(
-            entity_uri,
-            "property URI",
-        )
-
-        rows = await store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?pred ?val WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?ps sh:path {property_ref} ; ?pred ?val .
-                    FILTER(
-                        ?pred NOT IN (
-                            sh:path,
-                            sh:order,
-                            sh:group,
-                            sh:deactivated,
-                            rdf:type
-                        )
-                    )
-                }}
-            }}
-        """)
-        grouped = defaultdict(list)
-        for r in rows: grouped[r["pred"]].append(r["val"])
-        multi_valued = {str(SH["in"]), str(SH.languageIn)}
-        for pred, vals in grouped.items():
-            if pred in multi_valued or len(vals) > 1: overrides[pred] = vals
-            else: overrides[pred] = vals[0]
-
-        domain_rows = await store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-
-            SELECT DISTINCT ?class WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    ?propertyShape
-                        sh:path {property_ref} .
-
-                    ?classShape
-                        a sh:NodeShape ;
-                        sh:targetClass ?class ;
-                        sh:property ?propertyShape .
-                }}
-            }}
-        """)
-
-        domain_classes = sorted({
-            row["class"]
-            for row in domain_rows
-        })
-
-        if domain_classes:
-            overrides["urn:domainClasses"] = domain_classes
-            
-        orig_domains = get_property_domains(entity_uri)
-        original["urn:domainClasses"] = orig_domains if orig_domains else []
-
-        ranges = original.get(str(RDFS.range), [])
-
-        if etype == "object_property":
-            original[str(SH["class"])] = list(ranges)
-
-        elif etype == "datatype_property":
-            original[str(SH.datatype)] = list(ranges)
-
-        elif etype == "annotation_property":
-            active_datatypes = set(
-                await shacl.get_active_datatypes()
-            )
-
-            class_ranges = []
-            datatype_ranges = []
-
-            for range_uri in ranges:
-                if _is_datatype_uri(
-                    range_uri,
-                    state["combined_onto_graph"],
-                    active_datatypes,
-                ):
-                    datatype_ranges.append(range_uri)
-                else:
-                    class_ranges.append(range_uri)
-
-            original[str(SH["class"])] = class_ranges
-            original[str(SH.datatype)] = datatype_ranges
-
-    elif etype == "class":
-        class_shape_uri = shape_uri_for_entity(entity_uri, "class", state["prefix_map"])
-        rows = await store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?pred ?val WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    <{class_shape_uri}> ?pred ?val .
-                    FILTER(
-                        ?pred NOT IN (
-                            rdf:type,
-                            sh:targetClass,
-                            sh:property,
-                            sh:deactivated
-                        )
-                    )
-                }}
-            }}
-        """)
-        grouped = defaultdict(list)
-        for r in rows: grouped[r["pred"]].append(r["val"])
-        multi_valued = {str(SH["in"]), str(SH.languageIn)}
-        for pred, vals in grouped.items():
-            if pred in multi_valued or len(vals) > 1: overrides[pred] = vals
-            else: overrides[pred] = vals[0]
-
-        active_properties = await shacl.get_active_properties()
-
-        active_domain_classes = set(
-            await shacl.get_active_classes()
-        )
-
-        effective_domains = await ap._get_shacl_domains()
-
-        original_props = sorted(
-            prop_uri
-            for prop_uri in active_properties
-            if entity_uri in get_property_domains(prop_uri)
-        )
-
-        effective_props = sorted(
-            prop_uri
-            for prop_uri in active_properties
-            if entity_uri in effective_domains.get(prop_uri, [])
-        )
-
-        universal_properties = sorted(
-            prop_uri
-            for prop_uri in active_properties
-            if not effective_domains.get(prop_uri, [])
-        )
-
-        inherited_properties = sorted(
-            prop_uri
-            for prop_uri in active_properties
-            if (
-                entity_uri not in effective_domains.get(prop_uri, [])
-                and effective_domains.get(prop_uri, [])
-                and _property_applies_to_class(
-                    entity_uri,
-                    effective_domains[prop_uri],
-                    active_domain_classes,
-                )
-            )
-        )
-
-        original[str(SH.property)] = original_props
-        overrides[str(SH.property)] = effective_props
-
-    stored_modes = await _load_stored_profile_field_modes(
+    return await shacl.get_entity_constraints(
         entity_uri,
+        entity_type,
     )
-
-    if etype in {
-        "object_property",
-        "datatype_property",
-        "annotation_property",
-    }:
-        # Domain Classes are ontology-derived by default.
-        # Incomplete SHACL links must not imply an override.
-        stored_modes.setdefault(
-            "urn:domainClasses",
-            PROFILE_FIELD_MODE_DEFAULT,
-        )
-
-    if etype == "class":
-        # Ignore legacy class-side relationship modes.
-        # The effective list is derived from property Domain Classes.
-        stored_modes.pop(str(SH.property), None)
-
-    field_modes = _resolve_profile_field_modes(
-        etype,
-        original,
-        overrides,
-        stored_modes,
-    )
-
-    effective = _resolve_effective_profile_constraints(
-        etype,
-        original,
-        overrides,
-        field_modes,
-    )
-
-    _validate_profile_range_constraint_compatibility(
-        etype,
-        effective,
-        entity_uri=entity_uri,
-        status_code=409,
-    )
-
-    result = {
-        "uri": entity_uri,
-        "type": etype,
-        "original": original,
-        "overrides": overrides,
-        "field_modes": field_modes,
-        "effective": effective,
-    }
-
-    if etype == "class":
-        result["universal_properties"] = universal_properties
-        result["inherited_properties"] = inherited_properties
-
-    return result
-
 
 @app.put("/api/profile/constraints/{entity_uri:path}")
 async def set_entity_constraints(entity_uri: str, constraints: dict):

@@ -29,6 +29,24 @@ async def test_annotation_property_accepts_both_effective_range_kinds(
         },
     }
 
+    ontology_graph = Graph()
+    ontology_graph.add((
+        URIRef(property_uri),
+        RDF.type,
+        OWL.AnnotationProperty,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        ontology_graph,
+    )
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [],
+    )
+
     monkeypatch.setattr(
         profile,
         "_list_active_properties",
@@ -41,13 +59,13 @@ async def test_annotation_property_accepts_both_effective_range_kinds(
     )
 
     monkeypatch.setattr(
-        main.shacl,
+        profile._constraint_resolver,
         "get_active_datatypes",
         AsyncMock(return_value=set()),
     )
 
     monkeypatch.setattr(
-        main,
+        profile._constraint_resolver,
         "get_entity_constraints",
         AsyncMock(return_value=property_data),
     )

@@ -737,6 +737,11 @@ async def test_property_constraints_return_stored_domain_override(
         cast(main.RDFStore, store),
     )
     monkeypatch.setattr(
+        main.shacl,
+        "store",
+        cast(main.RDFStore, store),
+    )
+    monkeypatch.setattr(
         main.ap,
         "get_entity_type",
         AsyncMock(return_value="datatype_property"),

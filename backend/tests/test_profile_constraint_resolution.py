@@ -137,7 +137,7 @@ async def test_datatype_resolution_respects_explicit_empty_override(
     profile._shapes_cache = Graph()
 
     monkeypatch.setattr(
-        main,
+        profile,
         "get_entity_constraints",
         AsyncMock(return_value={
             "type": "datatype_property",
@@ -169,7 +169,7 @@ async def test_datatype_resolution_uses_effective_default(
     profile._shapes_cache = Graph()
 
     monkeypatch.setattr(
-        main,
+        profile,
         "get_entity_constraints",
         AsyncMock(return_value={
             "type": "datatype_property",
@@ -210,12 +210,12 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
     )
 
     monkeypatch.setattr(
-        main.shacl,
+        profile._constraint_resolver,
         "get_active_datatypes",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
-        main,
+        profile._constraint_resolver,
         "get_entity_constraints",
         AsyncMock(return_value={
             "type": "object_property",
