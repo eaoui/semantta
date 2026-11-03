@@ -341,6 +341,120 @@ async def test_application_profile_lists_node_entities_in_shacl_order(
 
 
 @pytest.mark.asyncio
+async def test_xsd_datatypes_are_not_misclassified_as_classes_during_ordering(
+    dataset_store,
+    monkeypatch,
+):
+    dataset, store = dataset_store
+    shapes_graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    string_uri = "http://www.w3.org/2001/XMLSchema#string"
+    datetime_uri = "http://www.w3.org/2001/XMLSchema#dateTime"
+
+    # Simulate ontology reasoning that also identifies these datatype
+    # resources as rdfs:Class.
+    ontology_graph = Graph()
+
+    for uri in (string_uri, datetime_uri):
+        ontology_graph.add((
+            URIRef(uri),
+            RDF.type,
+            RDFS.Class,
+        ))
+
+    ontology_entities = main.process_ontology(
+        ontology_graph,
+        "xsd-types.ttl",
+    )
+
+    extracted_types = {
+        entity["uri"]: entity["type"]
+        for entity in ontology_entities
+    }
+
+    assert extracted_types == {
+        string_uri: "datatype",
+        datetime_uri: "datatype",
+    }
+
+    add_node_shape(
+        shapes_graph,
+        "datatype",
+        string_uri,
+        1,
+    )
+    add_node_shape(
+        shapes_graph,
+        "datatype",
+        datetime_uri,
+        2,
+    )
+
+    monkeypatch.setattr(main.shacl, "store", store)
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "xsd-types.ttl",
+            "entities": ontology_entities,
+            "graph": ontology_graph,
+        }],
+    )
+    monkeypatch.setitem(main.state, "metadata_only_sources", {})
+    monkeypatch.setattr(main, "_used_uris_set", set())
+    monkeypatch.setattr(main, "rebuild_used_uris", AsyncMock())
+    monkeypatch.setattr(main, "get_label", lambda uri: uri)
+    monkeypatch.setattr(
+        main,
+        "_get_stored_labels",
+        AsyncMock(return_value={}),
+    )
+
+    profile = main.ApplicationProfile(store)
+
+    monkeypatch.setattr(
+        profile,
+        "_get_shacl_domains",
+        AsyncMock(return_value={}),
+    )
+
+    entities = await profile.build_profile_entities()
+    entities_by_uri = {
+        entity.uri: entity
+        for entity in entities
+    }
+
+    for uri, expected_order in (
+        (string_uri, 1),
+        (datetime_uri, 2),
+    ):
+        entity = entities_by_uri[uri]
+
+        assert entity.type == "datatype"
+        assert entity.active is True
+        assert entity.order == expected_order
+
+    # The complete datatype order submitted by the editor must be accepted.
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main, "invalidate_profile", lambda: None)
+
+    result = await main.update_profile_order({
+        "entity_type": "datatype",
+        "items": [
+            {"uri": datetime_uri, "order": 1},
+            {"uri": string_uri, "order": 2},
+        ],
+    })
+
+    assert result == {"status": "ok"}
+
+    order_map = await main.shacl.get_active_node_order_map("datatype")
+
+    assert order_map[string_uri] == 2
+    assert order_map[datetime_uri] == 1
+
+
+@pytest.mark.asyncio
 async def test_ontology_entities_are_not_implicitly_activated_in_profile(
     dataset_store,
     monkeypatch,

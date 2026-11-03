@@ -1309,6 +1309,16 @@ def process_ontology(g: Graph, filename: str) -> list:
     known_uris = set()
     property_uris = set()
 
+    declared_datatypes = {
+        str(subject)
+        for subject in g.subjects(RDF.type, RDFS.Datatype)
+        if (
+            not isinstance(subject, BNode)
+            and is_domain_uri(subject)
+            and is_valid_uri(str(subject))
+        )
+    }
+
     property_declarations = (
         RDF.Property,
         OWL.ObjectProperty,
@@ -1325,6 +1335,22 @@ def process_ontology(g: Graph, filename: str) -> list:
         if not is_valid_uri(uri):
             continue
 
+        # Recognized datatypes must not be classified as classes merely
+        # because ontology reasoning also assigns them rdf:type rdfs:Class.
+        if (
+            uri in declared_datatypes
+            or uri in SYSTEM_DATATYPES
+            or uri.startswith(XSD_NAMESPACE)
+        ):
+            if uri not in known_uris:
+                entities.append({
+                    "uri": uri,
+                    "type": "datatype",
+                })
+                known_uris.add(uri)
+
+            continue
+
         if typ in (OWL.Class, RDFS.Class):
             if uri not in known_uris:
                 entities.append({
@@ -1335,14 +1361,6 @@ def process_ontology(g: Graph, filename: str) -> list:
 
         elif typ in property_declarations:
             property_uris.add(subj)
-
-        elif typ == RDFS.Datatype:
-            if uri not in known_uris:
-                entities.append({
-                    "uri": uri,
-                    "type": "datatype",
-                })
-                known_uris.add(uri)
 
         elif typ == OWL.NamedIndividual:
             if uri not in known_uris:
