@@ -183,6 +183,7 @@ async def test_saving_empty_domain_classes_clears_relationships(
             main.SH.order,
             main.SH.group,
             main.SH.property,
+            main.SH.deactivated,
         },
     )
 
@@ -244,6 +245,7 @@ async def test_saving_empty_class_properties_clears_relationships(
             main.RDF.type,
             main.SH.targetClass,
             main.SH.property,
+            main.SH.deactivated,
         },
     )
 

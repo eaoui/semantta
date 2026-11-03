@@ -59,7 +59,7 @@ from schemas import (
 
 from rdflib import BNode, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
-from rdflib.namespace import OWL, RDF, RDFS, split_uri
+from rdflib.namespace import OWL, RDF, RDFS, XSD, split_uri
 
 
 from config import FUSEKI_CONFIG, is_loopback_host
@@ -5777,6 +5777,178 @@ class SHACLProfile:
                 }}
             """)
 
+    async def normalize_shape_activation_states(self) -> int:
+        """
+        Normalize and verify activation states for all profile shapes.
+
+        Active shapes have no sh:deactivated statement.
+        Inactive shapes have exactly one sh:deactivated true statement.
+
+        Explicit boolean false markers are removed. Invalid non-boolean
+        markers are rejected rather than interpreted implicitly.
+        """
+        shapes_graph = await self.store.load_shapes_graph()
+
+        shape_uris = set(
+            shapes_graph.subjects(
+                RDF.type,
+                SH.NodeShape,
+            )
+        )
+        shape_uris.update(
+            shapes_graph.subjects(
+                RDF.type,
+                SH.PropertyShape,
+            )
+        )
+
+        false_shapes = set()
+        true_markers = set()
+        invalid_markers = []
+
+        for shape_uri in shape_uris:
+            for marker in shapes_graph.objects(
+                shape_uri,
+                SH.deactivated,
+            ):
+                if (
+                    not isinstance(marker, Literal)
+                    or marker.datatype != XSD.boolean
+                ):
+                    invalid_markers.append(
+                        f"{shape_uri}: {marker.n3()}"
+                    )
+                    continue
+
+                marker_value = marker.toPython()
+
+                if marker_value is False:
+                    false_shapes.add(shape_uri)
+
+                elif marker_value is True:
+                    true_markers.add((
+                        shape_uri,
+                        marker,
+                    ))
+
+                else:
+                    invalid_markers.append(
+                        f"{shape_uri}: {marker.n3()}"
+                    )
+
+        if invalid_markers:
+            raise RuntimeError(
+                "Invalid sh:deactivated values found in profile shapes: "
+                + "; ".join(sorted(invalid_markers))
+                + ". Expected xsd:boolean values. "
+                "Reset the profile data to resolve the inconsistency."
+            )
+
+        if false_shapes:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:deactivated ?marker .
+                    }}
+                }}
+                WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape
+                            a ?shapeType ;
+                            sh:deactivated ?marker .
+
+                        VALUES ?shapeType {{
+                            sh:NodeShape
+                            sh:PropertyShape
+                        }}
+                    }}
+
+                    FILTER (?marker = false)
+                }}
+            """)
+
+        canonical_true = Literal(True, datatype=XSD.boolean)
+
+        needs_true_normalization = any(
+            marker.n3() != canonical_true.n3()
+            for _, marker in true_markers
+        )
+
+        if needs_true_normalization:
+            await self.store.update(f"""
+                PREFIX sh: <{SH}>
+
+                DELETE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:deactivated ?marker .
+                    }}
+                }}
+                INSERT {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape sh:deactivated true .
+                    }}
+                }}
+                WHERE {{
+                    GRAPH <{SHAPES_GRAPH}> {{
+                        ?shape
+                            a ?shapeType ;
+                            sh:deactivated ?marker .
+
+                        VALUES ?shapeType {{
+                            sh:NodeShape
+                            sh:PropertyShape
+                        }}
+                    }}
+
+                    FILTER (?marker = true)
+                }}
+            """)
+
+        # Reload the persisted graph and verify the resulting states.
+        verified_graph = await self.store.load_shapes_graph()
+
+        verified_shape_uris = set(
+            verified_graph.subjects(
+                RDF.type,
+                SH.NodeShape,
+            )
+        )
+        verified_shape_uris.update(
+            verified_graph.subjects(
+                RDF.type,
+                SH.PropertyShape,
+            )
+        )
+
+        for shape_uri in verified_shape_uris:
+            markers = set(
+                verified_graph.objects(
+                    shape_uri,
+                    SH.deactivated,
+                )
+            )
+
+            if markers and markers != {canonical_true}:
+                raise RuntimeError(
+                    "Invalid activation state for SHACL shape "
+                    f"{shape_uri}: expected no deactivation marker "
+                    "or exactly one sh:deactivated true statement."
+                )
+
+        if false_shapes or needs_true_normalization:
+            self.invalidate_shapes_cache()
+
+        if false_shapes:
+            logger.info(
+                "Removed explicit sh:deactivated false markers "
+                "from %d profile shapes.",
+                len(false_shapes),
+            )
+
+        return len(false_shapes)
+
     async def _repair_legacy_datatype_constraints(
         self,
         shapes_graph: Graph,
@@ -7646,6 +7818,10 @@ async def lifespan(app: FastAPI):
         )
 
         await ensure_metadata_named_graphs()
+
+        # Normalize and verify persisted SHACL activation states
+        # before initializing the Application Profile.
+        await shacl.normalize_shape_activation_states()
 
         progress["phase"] = (
             "Loading metadata…"
@@ -10000,7 +10176,15 @@ async def get_entity_constraints(entity_uri: str):
             SELECT ?pred ?val WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     ?ps sh:path {property_ref} ; ?pred ?val .
-                    FILTER(?pred NOT IN (sh:path, sh:order, sh:group, rdf:type))
+                    FILTER(
+                        ?pred NOT IN (
+                            sh:path,
+                            sh:order,
+                            sh:group,
+                            sh:deactivated,
+                            rdf:type
+                        )
+                    )
                 }}
             }}
         """)
@@ -10075,7 +10259,14 @@ async def get_entity_constraints(entity_uri: str):
             SELECT ?pred ?val WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
                     <{class_shape_uri}> ?pred ?val .
-                    FILTER(?pred NOT IN (rdf:type, sh:targetClass, sh:property))
+                    FILTER(
+                        ?pred NOT IN (
+                            rdf:type,
+                            sh:targetClass,
+                            sh:property,
+                            sh:deactivated
+                        )
+                    )
                 }}
             }}
         """)
@@ -10193,6 +10384,15 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
 
     # Extract UI state metadata before validating actual SHACL constraints.
     constraints = dict(constraints)
+    if any(
+        str(predicate) == str(SH.deactivated)
+        for predicate in constraints
+    ):
+        raise HTTPException(
+            400,
+            "Shape activation state is managed by the profile lifecycle "
+            "and cannot be edited as a constraint.",
+        )
     raw_field_modes = constraints.pop(
         PROFILE_FIELD_MODES_KEY,
         None,
@@ -10261,6 +10461,7 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
                     SH.order,
                     SH.group,
                     SH.property,
+                    SH.deactivated,
                 },
             )
 
@@ -10329,6 +10530,7 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
                 RDF.type,
                 SH.targetClass,
                 SH.property,
+                SH.deactivated,
             },
         )
 

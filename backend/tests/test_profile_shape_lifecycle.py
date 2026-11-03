@@ -71,6 +71,19 @@ class DatasetBackedStore:
             "subjects": len(set(graph.subjects())),
         }
 
+    async def load_shapes_graph(self) -> Graph:
+        """Return a copy of the SHACL shapes graph."""
+        source_graph = self.dataset.graph(
+            URIRef(main.SHAPES_GRAPH)
+        )
+
+        graph = Graph()
+
+        for triple in source_graph:
+            graph.add(triple)
+
+        return graph
+
 
 def add_shape(
     graph,
@@ -106,8 +119,8 @@ def add_shape(
 
     graph.add((shape_uri, RDFS.label, Literal(f"Preserved {role}")))
 
-    # A false marker is valid SHACL and should be replaced by true
-    # when the entity is deactivated.
+    # Legacy explicit false marker used to verify that lifecycle
+    # operations replace or remove noncanonical activation state.
     if deactivated:
         graph.add((shape_uri, SH.deactivated, Literal(False)))
 
@@ -1122,3 +1135,345 @@ async def test_batch_property_activation_and_deactivation_preserve_order(
             SH.order,
         )
     ) == {Literal(2)}
+
+
+@pytest.mark.asyncio
+async def test_normalize_shape_activation_states(
+    dataset_store,
+):
+    dataset, store = dataset_store
+    graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    # Explicit false markers must be removed, making these shapes active.
+    active_class = add_shape(
+        graph,
+        "class",
+        str(EX.ActiveClass),
+        deactivated=True,
+    )
+
+    active_property = add_shape(
+        graph,
+        "property",
+        str(EX.activeProperty),
+        deactivated=True,
+    )
+
+    # When both values exist, true must be preserved and false removed.
+    inactive_class = add_shape(
+        graph,
+        "class",
+        str(EX.InactiveClass),
+    )
+
+    graph.add((
+        inactive_class,
+        SH.deactivated,
+        Literal(False),
+    ))
+    graph.add((
+        inactive_class,
+        SH.deactivated,
+        Literal(True),
+    ))
+
+    # An ordinary active shape must remain unchanged.
+    ordinary_active = add_shape(
+        graph,
+        "class",
+        str(EX.OrdinaryActiveClass),
+    )
+
+    profile = main.SHACLProfile(store)
+
+    cleaned_count = await profile.normalize_shape_activation_states()
+
+    assert cleaned_count == 3
+
+    normalized_graph = await store.load_shapes_graph()
+
+    assert not list(
+        normalized_graph.objects(
+            active_class,
+            SH.deactivated,
+        )
+    )
+
+    assert not list(
+        normalized_graph.objects(
+            active_property,
+            SH.deactivated,
+        )
+    )
+
+    assert set(
+        normalized_graph.objects(
+            inactive_class,
+            SH.deactivated,
+        )
+    ) == {Literal(True)}
+
+    assert not list(
+        normalized_graph.objects(
+            ordinary_active,
+            SH.deactivated,
+        )
+    )
+
+    # Existing shape configurations must remain untouched.
+    assert (
+        active_class,
+        SH.closed,
+        Literal(True),
+    ) in normalized_graph
+
+    assert (
+        active_property,
+        SH.minCount,
+        Literal(1),
+    ) in normalized_graph
+
+    # Verify the state of every existing NodeShape and PropertyShape.
+    shape_uris = set(
+        normalized_graph.subjects(RDF.type, SH.NodeShape)
+    )
+    shape_uris.update(
+        normalized_graph.subjects(RDF.type, SH.PropertyShape)
+    )
+
+    for shape_uri in shape_uris:
+        markers = set(
+            normalized_graph.objects(
+                shape_uri,
+                SH.deactivated,
+            )
+        )
+
+        assert (
+            not markers
+            or markers == {Literal(True)}
+        )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        Literal("false"),
+        URIRef("urn:test:invalid-deactivation-value"),
+    ],
+    ids=[
+        "non-boolean-literal",
+        "resource-value",
+    ],
+)
+@pytest.mark.asyncio
+async def test_normalize_shape_activation_states_rejects_invalid_values(
+    dataset_store,
+    marker,
+):
+    dataset, store = dataset_store
+    graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    shape_uri = add_shape(
+        graph,
+        "class",
+        str(EX.InvalidClass),
+    )
+
+    graph.add((
+        shape_uri,
+        SH.deactivated,
+        marker,
+    ))
+
+    profile = main.SHACLProfile(store)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Invalid sh:deactivated values",
+    ):
+        await profile.normalize_shape_activation_states()
+
+    # Invalid data must be rejected before any cleanup operation.
+    assert store.update_calls == []
+
+    assert (
+        shape_uri,
+        SH.deactivated,
+        marker,
+    ) in graph
+
+
+@pytest.mark.parametrize(
+    (
+        "role",
+        "entity_type",
+        "constraint_predicate",
+        "constraint_value",
+    ),
+    [
+        (
+            "property",
+            "object_property",
+            SH.minCount,
+            2,
+        ),
+        (
+            "class",
+            "class",
+            SH.closed,
+            False,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_constraint_updates_preserve_shape_activation_state(
+    dataset_store,
+    monkeypatch,
+    role,
+    entity_type,
+    constraint_predicate,
+    constraint_value,
+):
+    dataset, store = dataset_store
+    graph = dataset.graph(URIRef(main.SHAPES_GRAPH))
+
+    monkeypatch.setitem(
+        main.state,
+        "prefix_map",
+        {},
+    )
+
+    active_uri = str(EX.ActiveEntity)
+    inactive_uri = str(EX.InactiveEntity)
+
+    active_shape = add_shape(
+        graph,
+        role,
+        active_uri,
+    )
+
+    inactive_shape = add_shape(
+        graph,
+        role,
+        inactive_uri,
+    )
+
+    graph.add((
+        inactive_shape,
+        SH.deactivated,
+        Literal(True),
+    ))
+
+    monkeypatch.setattr(main, "store", store)
+
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value=entity_type),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "validate_constraints",
+        lambda *args, **kwargs: True,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_validate_profile_range_constraint_compatibility",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        AsyncMock(return_value={}),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None,
+    )
+
+    constraint = {
+        str(constraint_predicate): constraint_value,
+    }
+
+    await main.set_entity_constraints(
+        active_uri,
+        constraint,
+    )
+
+    await main.set_entity_constraints(
+        inactive_uri,
+        constraint,
+    )
+
+    # Ordinary constraint editing must not alter activation state.
+    assert not list(
+        graph.objects(
+            active_shape,
+            SH.deactivated,
+        )
+    )
+
+    assert set(
+        graph.objects(
+            inactive_shape,
+            SH.deactivated,
+        )
+    ) == {Literal(True)}
+
+    # The submitted constraint must still be applied.
+    expected_value = Literal(constraint_value)
+
+    assert (
+        active_shape,
+        constraint_predicate,
+        expected_value,
+    ) in graph
+
+    assert (
+        inactive_shape,
+        constraint_predicate,
+        expected_value,
+    ) in graph
+
+
+@pytest.mark.parametrize(
+    "entity_type",
+    [
+        "object_property",
+        "class",
+    ],
+)
+@pytest.mark.asyncio
+async def test_constraint_updates_reject_deactivation_marker(
+    monkeypatch,
+    entity_type,
+):
+    store = AsyncMock()
+
+    monkeypatch.setattr(main, "store", store)
+
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value=entity_type),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.set_entity_constraints(
+            str(EX.TestEntity),
+            {
+                str(SH.deactivated): False,
+            },
+        )
+
+    assert exc_info.value.status_code == 400
+
+    # Reject before querying or modifying persisted profile data.
+    store.query.assert_not_awaited()
+    store.update.assert_not_awaited()
