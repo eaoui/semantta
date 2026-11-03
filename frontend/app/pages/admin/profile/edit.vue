@@ -5,7 +5,7 @@
       <button @click="navigateTo(`/admin/profile?tab=${entityType || ''}`)"
         class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 pr-2"
         title="Back to Application Profile">
-        <PhosphorIcon name="arrow-left" :ize="24" />
+        <PhosphorIcon name="arrow-left" :size="24" />
       </button>
       <h2 class="text-2xl font-bold text-gray-900 dark:text-gray-100">
         Edit Constraints – {{ entityDisplayLabel }}
@@ -160,6 +160,28 @@ const { formatUri } = useDisplay()
 const apiBase = useRuntimeConfig().public.apiBase
 const toast = useToast()
 
+const LANGUAGE_IN_PREDICATE =
+  'http://www.w3.org/ns/shacl#languageIn'
+
+function languageListToText(value: unknown): string {
+  const values = Array.isArray(value)
+    ? value
+    : value == null || value === ''
+      ? []
+      : [value]
+
+  return values.map(String).join(', ')
+}
+
+function parseLanguageList(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+
+  return value
+    .split(',')
+    .map(language => language.trim())
+    .filter(Boolean)
+}
+
 const entityUri = ref('')
 const entityType = ref('')
 const entityDisplayLabel = computed(() => {
@@ -249,6 +271,10 @@ function getDefaultValue(pred: string): any {
   const config = constraintConfig[pred]
   if (!config) return undefined
   const orig = original.value[pred]
+
+  if (pred === LANGUAGE_IN_PREDICATE) {
+    return languageListToText(orig)
+  }
 
   if (orig !== undefined) {
     if (['class', 'property', 'datatype'].includes(config.type)) {
@@ -434,6 +460,9 @@ async function fetchConstraints() {
       if (config.type === 'boolean') {
         formData[pred] = raw === true || raw === 'true'
 
+      } else if (pred === LANGUAGE_IN_PREDICATE) {
+        formData[pred] = languageListToText(raw)
+
       } else if (
         ['class', 'property', 'datatype'].includes(config.type)
       ) {
@@ -535,6 +564,12 @@ async function save() {
         payload[pred] = arr[0]
       } else if (mode === 'override') {
         payload[pred] = []
+      }
+    } else if (pred === LANGUAGE_IN_PREDICATE) {
+      const languages = parseLanguageList(formData[pred])
+
+      if (languages.length > 0 || mode === 'override') {
+        payload[pred] = languages
       }
     } else if (
       config.type === 'integer' ||

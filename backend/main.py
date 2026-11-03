@@ -3384,6 +3384,117 @@ def save_settings(settings):
 # ---------------------------------------------------------------------------
 #  Constraint Helpers
 # ---------------------------------------------------------------------------
+RDF_LIST_CONSTRAINTS = frozenset({
+    str(SH["in"]),
+    str(SH.languageIn),
+})
+
+_LANGUAGE_TAG_PATTERN = re.compile(
+    r"^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$"
+)
+
+class RDFListError(ValueError):
+    """Raised when an RDF collection is malformed."""
+
+def _read_rdf_list(graph: Graph, head) -> list[str]:
+    """Read an RDF collection while validating its structure."""
+    if head == RDF.nil:
+        return []
+
+    if not isinstance(head, (BNode, URIRef)):
+        raise RDFListError(
+            "The collection head must be an IRI, blank node, or rdf:nil."
+        )
+
+    members: list[str] = []
+    visited: set = set()
+    current = head
+
+    while current != RDF.nil:
+        if not isinstance(current, (BNode, URIRef)):
+            raise RDFListError(
+                "An rdf:rest value is not an IRI, blank node, or rdf:nil."
+            )
+
+        if current in visited:
+            raise RDFListError(
+                "The RDF collection contains a cycle."
+            )
+
+        visited.add(current)
+
+        first_values = set(
+            graph.objects(current, RDF.first)
+        )
+        rest_values = set(
+            graph.objects(current, RDF.rest)
+        )
+
+        if len(first_values) != 1:
+            raise RDFListError(
+                "Every collection cell must have exactly one rdf:first value."
+            )
+
+        if len(rest_values) != 1:
+            raise RDFListError(
+                "Every collection cell must have exactly one rdf:rest value."
+            )
+
+        member = next(iter(first_values))
+        rest = next(iter(rest_values))
+
+        if not isinstance(member, (URIRef, BNode, Literal)):
+            raise RDFListError(
+                "The collection contains an unsupported RDF member."
+            )
+
+        members.append(str(member))
+        current = rest
+
+    return members
+
+def _normalize_rdf_list_constraint_value(
+    predicate: str,
+    value: object,
+) -> list:
+    """Validate list-valued profile constraint input."""
+    if not isinstance(value, list):
+        raise HTTPException(
+            400,
+            f"Constraint {predicate} must be submitted as an array.",
+        )
+
+    if predicate == str(SH.languageIn):
+        normalized = []
+
+        for item in value:
+            if not isinstance(item, str):
+                raise HTTPException(
+                    400,
+                    "sh:languageIn members must be language-tag strings.",
+                )
+
+            language_tag = item.strip()
+
+            if not _LANGUAGE_TAG_PATTERN.fullmatch(language_tag):
+                raise HTTPException(
+                    400,
+                    f"Invalid language tag in sh:languageIn: {item!r}.",
+                )
+
+            normalized.append(language_tag)
+
+        return normalized
+
+    for item in value:
+        if not isinstance(item, (str, int, float, bool)):
+            raise HTTPException(
+                400,
+                "sh:in members must be scalar RDF values.",
+            )
+
+    return value
+
 def get_original_constraints(entity_uri: str, entity_type: str, g: Graph) -> dict:
     u = URIRef(entity_uri)
     constraints = defaultdict(list)
@@ -3860,8 +3971,21 @@ def validate_constraints(entity_uri: str, entity_type: str, proposed: dict):
             raise HTTPException(400, f"Cannot remove {pred}")
     return True
 
-async def _apply_constraints(shape_uri: str, constraints: dict,
-                             keep_predicates: set) -> None:
+async def _apply_constraints(
+    shape_uri: str,
+    constraints: dict,
+    keep_predicates: set,
+) -> None:
+    constraints = dict(constraints)
+    for predicate in RDF_LIST_CONSTRAINTS:
+        if predicate in constraints:
+            constraints[predicate] = (
+                _normalize_rdf_list_constraint_value(
+                    predicate,
+                    constraints[predicate],
+                )
+            )
+
     keep_filter = ", ".join(f"<{p}>" for p in keep_predicates)
     await store.update(f"""
         DELETE {{ GRAPH <{SHAPES_GRAPH}> {{ <{shape_uri}> ?p ?o }} }}
@@ -3871,11 +3995,6 @@ async def _apply_constraints(shape_uri: str, constraints: dict,
         }} }}
     """)
 
-    list_constraints = {
-        str(SH["in"]),
-        str(SH.languageIn),
-    }
-
     triples = ""
     next_list_id = 0
 
@@ -3883,7 +4002,7 @@ async def _apply_constraints(shape_uri: str, constraints: dict,
         if val is None or val == "":
             continue
 
-        if isinstance(val, list) and pred in list_constraints:
+        if pred in RDF_LIST_CONSTRAINTS:
             if not val:
                 triples += (
                     f"<{shape_uri}> <{pred}> "
@@ -4363,7 +4482,6 @@ class ApplicationProfile:
         prop_uri: str,
         effective_profile: dict | None = None,
     ) -> dict:
-        pshape_uri = shape_uri_for_entity(prop_uri, "property", state["prefix_map"])
         if effective_profile is None:
             profile_data = await self._constraint_resolver.get_entity_constraints(
                 prop_uri,
@@ -4379,42 +4497,6 @@ class ApplicationProfile:
                     f"for property {prop_uri}."
                 ),
             )
-
-        rows = await self.store.query(f"""
-            PREFIX sh: <http://www.w3.org/ns/shacl#>
-            SELECT ?pred ?val WHERE {{
-                GRAPH <{SHAPES_GRAPH}> {{
-                    <{pshape_uri}> ?pred ?val .
-                    FILTER(?pred IN (sh:class, sh:datatype, sh:minCount, sh:maxCount,
-                                    sh:minLength, sh:maxLength, sh:pattern, sh:flags,
-                                    sh:languageIn, sh:in, sh:hasValue, sh:nodeKind))
-                }}
-            }}""")
-        constraints = {}
-        for r in rows:
-            p, v = r["pred"], r["val"]
-            if p == str(SH["class"]):
-                constraints["class"] = v
-            elif p == str(SH.datatype):
-                constraints["datatype"] = v
-            elif p in (str(SH.minCount), str(SH.maxCount),
-                       str(SH.minLength), str(SH.maxLength)):
-                try:
-                    constraints[p.split('#')[-1]] = int(v)
-                except ValueError:
-                    pass
-            elif p == str(SH.pattern):
-                constraints["pattern"] = v
-            elif p == str(SH.flags):
-                constraints["flags"] = v
-            elif p == str(SH.languageIn):
-                constraints["languageIn"] = v.split() if v else []
-            elif p == str(SH['in']):
-                constraints["in"] = v
-            elif p == str(SH.nodeKind):
-                constraints["nodeKind"] = v
-            elif p == str(SH.hasValue):
-                constraints["hasValue"] = v
 
         effective_field_map = {
             str(SH["class"]): "class",
@@ -4433,14 +4515,24 @@ class ApplicationProfile:
             str(SH.maxInclusive): "maxInclusive",
         }
 
+        constraints = {}
+
         for predicate, field_name in effective_field_map.items():
             if predicate not in effective_profile:
                 continue
 
             value = effective_profile[predicate]
 
+            # These fields must remain arrays, including explicitly empty
+            # arrays. A one-member RDF list is still a list.
+            if field_name in {"in", "languageIn"}:
+                constraints[field_name] = [
+                    str(item)
+                    for item in _effective_profile_field_values(value)
+                ]
+                continue
+
             if value is None or value == "" or value == []:
-                constraints.pop(field_name, None)
                 continue
 
             if field_name in {
@@ -4468,20 +4560,13 @@ class ApplicationProfile:
                 values = _effective_profile_field_values(value)
 
                 if values:
-                    # Preserve every effective value. The consumer must
-                    # not silently collapse multiple range classes or
-                    # datatypes to the first one.
                     constraints[field_name] = values
-                else:
-                    constraints.pop(field_name, None)
 
             elif isinstance(value, list):
                 if len(value) == 1:
                     constraints[field_name] = value[0]
                 elif value:
                     constraints[field_name] = value
-                else:
-                    constraints.pop(field_name, None)
 
             else:
                 constraints[field_name] = value
@@ -4885,42 +4970,130 @@ class SHACLProfile:
                 "property URI",
             )
 
-            rows = await self.store.query(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
-                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            shapes_graph = await self.store.load_shapes_graph()
 
-                SELECT ?pred ?val WHERE {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        ?ps sh:path {property_ref} ;
-                            ?pred ?val .
+            property_shapes = sorted(
+                set(
+                    shapes_graph.subjects(
+                        SH.path,
+                        URIRef(entity_uri),
+                    )
+                ),
+                key=str,
+            )
 
-                        FILTER(
-                            ?pred NOT IN (
-                                sh:path,
-                                sh:order,
-                                sh:group,
-                                sh:deactivated,
-                                rdf:type
-                            )
-                        )
-                    }}
-                }}
-            """)
-
-            grouped = defaultdict(list)
-
-            for row in rows:
-                grouped[row["pred"]].append(row["val"])
-
-            multi_valued = {
-                str(SH["in"]),
-                str(SH.languageIn),
+            reserved_predicates = {
+                RDF.type,
+                SH.path,
+                SH.order,
+                SH.group,
+                SH.deactivated,
             }
 
-            for predicate, values in grouped.items():
-                if predicate in multi_valued or len(values) > 1:
+            grouped_values = defaultdict(list)
+
+            list_sequences: dict[
+                str,
+                list[tuple[str, ...] | None],
+            ] = {
+                predicate: []
+                for predicate in RDF_LIST_CONSTRAINTS
+            }
+
+            for property_shape in property_shapes:
+                for predicate_uri in RDF_LIST_CONSTRAINTS:
+                    predicate = URIRef(predicate_uri)
+
+                    heads = set(
+                        shapes_graph.objects(
+                            property_shape,
+                            predicate,
+                        )
+                    )
+
+                    if len(heads) > 1:
+                        raise HTTPException(
+                            409,
+                            f"Property shape {property_shape} has multiple "
+                            f"RDF-list heads for {predicate_uri}.",
+                        )
+
+                    if not heads:
+                        list_sequences[predicate_uri].append(None)
+                        continue
+
+                    head = next(iter(heads))
+
+                    try:
+                        sequence = tuple(
+                            _read_rdf_list(shapes_graph, head)
+                        )
+                    except RDFListError as exc:
+                        raise HTTPException(
+                            409,
+                            f"Invalid RDF list for {predicate_uri} "
+                            f"on property shape {property_shape}: {exc}",
+                        ) from exc
+
+                    list_sequences[predicate_uri].append(sequence)
+
+                for predicate, value in shapes_graph.predicate_objects(
+                    property_shape
+                ):
+                    predicate_uri = str(predicate)
+
+                    if (
+                        predicate in reserved_predicates
+                        or predicate_uri in RDF_LIST_CONSTRAINTS
+                    ):
+                        continue
+
+                    grouped_values[predicate_uri].append(
+                        str(value)
+                    )
+
+            # A property must not have conflicting list constraints across
+            # its PropertyShapes.
+            for predicate_uri, sequences in list_sequences.items():
+                if not sequences or all(
+                    sequence is None for sequence in sequences
+                ):
+                    continue
+
+                if any(sequence is None for sequence in sequences):
+                    raise HTTPException(
+                        409,
+                        f"Inconsistent {predicate_uri} constraints exist "
+                        f"across PropertyShapes for {entity_uri}.",
+                    )
+
+                unique_sequences = set(sequences)
+
+                if len(unique_sequences) != 1:
+                    raise HTTPException(
+                        409,
+                        f"Conflicting RDF lists exist for {predicate_uri} "
+                        f"across PropertyShapes for {entity_uri}.",
+                    )
+
+                selected_sequence = next(iter(unique_sequences))
+
+                if selected_sequence is None:
+                    raise HTTPException(
+                        409,
+                        f"Invalid RDF-list state for {predicate_uri} "
+                        f"on property {entity_uri}.",
+                    )
+
+                overrides[predicate_uri] = list(selected_sequence)
+
+            # Preserve the existing scalar and ordinary multi-value behavior.
+            for predicate, values in grouped_values.items():
+                values = list(dict.fromkeys(values))
+
+                if len(values) > 1:
                     overrides[predicate] = values
-                else:
+                elif values:
                     overrides[predicate] = values[0]
 
             domain_rows = await self.store.query(f"""
@@ -10744,6 +10917,16 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
             "Shape activation state is managed by the profile lifecycle "
             "and cannot be edited as a constraint.",
         )
+
+    for predicate in RDF_LIST_CONSTRAINTS:
+        if predicate in constraints:
+            constraints[predicate] = (
+                _normalize_rdf_list_constraint_value(
+                    predicate,
+                    constraints[predicate],
+                )
+            )
+
     raw_field_modes = constraints.pop(
         PROFILE_FIELD_MODES_KEY,
         None,

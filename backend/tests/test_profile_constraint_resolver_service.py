@@ -3,8 +3,9 @@ import sys
 from unittest.mock import AsyncMock
 
 import pytest
-from rdflib import Namespace
-from rdflib.namespace import RDFS, XSD
+from rdflib import Graph, Literal, Namespace, URIRef
+from rdflib.namespace import RDF, RDFS, XSD
+from typing import cast
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -23,26 +24,41 @@ async def test_property_constraint_resolver_uses_injected_store(
     profile_store = AsyncMock()
     unrelated_store = AsyncMock()
 
-    profile = main.SHACLProfile(profile_store)
-
     property_uri = str(EX.title)
+    property_ref = URIRef(property_uri)
+    shape_uri = URIRef("urn:test:title-shape")
 
-    profile_store.query.side_effect = [
-        [
-            {
-                "pred": str(SH.datatype),
-                "val": str(XSD.integer),
-            },
-            {
-                "pred": str(SH.minCount),
-                "val": "2",
-            },
-        ],
-        [
-            {
-                "class": str(EX.Book),
-            },
-        ],
+    shapes_graph = Graph()
+
+    shapes_graph.add((
+        shape_uri,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        shape_uri,
+        SH.path,
+        property_ref,
+    ))
+    shapes_graph.add((
+        shape_uri,
+        SH.datatype,
+        XSD.integer,
+    ))
+    shapes_graph.add((
+        shape_uri,
+        SH.minCount,
+        Literal(2),
+    ))
+
+    profile_store.load_shapes_graph = AsyncMock(
+        return_value=shapes_graph
+    )
+
+    profile_store.query.return_value = [
+        {
+            "class": str(EX.Book),
+        },
     ]
 
     monkeypatch.setattr(
@@ -81,6 +97,10 @@ async def test_property_constraint_resolver_uses_injected_store(
         lambda *args, **kwargs: None,
     )
 
+    profile = main.SHACLProfile(
+        cast(main.RDFStore, profile_store)
+    )
+
     result = await profile.get_entity_constraints(
         property_uri,
         "datatype_property",
@@ -92,11 +112,15 @@ async def test_property_constraint_resolver_uses_injected_store(
         str(XSD.string),
     ]
 
-    assert result["overrides"][str(SH.datatype)] == str(XSD.integer)
+    assert result["overrides"][str(SH.datatype)] == (
+        str(XSD.integer)
+    )
 
     assert result["effective"][str(SH.datatype)] == [
         str(XSD.integer),
     ]
+
+    assert result["overrides"][str(SH.minCount)] == "2"
 
     assert result["effective"]["urn:domainClasses"] == [
         str(EX.Book),
@@ -106,7 +130,10 @@ async def test_property_constraint_resolver_uses_injected_store(
         main.PROFILE_FIELD_MODE_OVERRIDE
     )
 
-    assert profile_store.query.await_count == 2
+    profile_store.load_shapes_graph.assert_awaited_once()
+    profile_store.query.assert_awaited_once()
+
+    unrelated_store.load_shapes_graph.assert_not_awaited()
     unrelated_store.query.assert_not_awaited()
 
     load_modes.assert_awaited_once_with(

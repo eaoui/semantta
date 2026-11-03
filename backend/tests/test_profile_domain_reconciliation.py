@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
-from rdflib import Dataset, Literal, Namespace, URIRef
+from rdflib import Dataset, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF
 from rdflib.query import Result
 from types import SimpleNamespace
@@ -54,6 +54,14 @@ class DatasetBackedStore:
             }
             for row in rows
         ]
+
+    async def load_shapes_graph(self) -> Graph:
+        graph = Graph()
+        source = self.dataset.graph(
+            URIRef(main.SHAPES_GRAPH)
+        )
+        graph += source
+        return graph
 
     async def update(self, sparql: str) -> None:
         self.update_calls.append(sparql)
