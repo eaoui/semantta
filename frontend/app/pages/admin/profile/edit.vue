@@ -160,6 +160,10 @@ import { constraintConfig } from '~/utils/constraintConfig'
 import EntitySelector from '@/components/admin/EntitySelector.vue'
 import LanguageTagSelector from '@/components/admin/LanguageTagSelector.vue'
 import { normalizeLanguageTagSelection } from '~/utils/bcp47LanguageTags'
+import {
+  getClassPropertyOptions,
+  getProfileEntityDisplayLabel,
+} from '~/utils/profileEntities'
 
 const route = useRoute()
 const store = useAppStore()
@@ -174,31 +178,23 @@ const entityDisplayLabel = computed(() => {
   const uri = entityUri.value
   const entity = store.profileEntities.find(item => item.uri === uri)
 
-  if (store.displayFormat === 'label') {
-    return entity?.label || formatUri(uri, 'label') || uri
-  }
-
-  return formatUri(uri) || uri
+  return getProfileEntityDisplayLabel(
+    uri,
+    store.displayFormat,
+    formatUri,
+    entity?.label,
+  )
 })
 const original = ref<Record<string, string[]>>({})
 const overrides = ref<Record<string, string>>({})
 const universalProperties = ref<string[]>([])
 const inheritedProperties = ref<string[]>([])
 const classPropertyOptions = computed(() =>
-  store.profileEntities
-    .filter(entity =>
-      entity.active &&
-      [
-        'object_property',
-        'datatype_property',
-        'annotation_property',
-      ].includes(entity.type) &&
-      !universalProperties.value.includes(entity.uri)
-    )
-    .map(entity => ({
-      uri: entity.uri,
-      label: entity.label || entity.uri,
-    })),
+  getClassPropertyOptions(
+    store.profileEntities,
+    inheritedProperties.value,
+    universalProperties.value,
+  ),
 )
 
 function profileEntityLabel(uri: string): string {
@@ -206,7 +202,12 @@ function profileEntityLabel(uri: string): string {
     item => item.uri === uri,
   )
 
-  return entity?.label || formatUri(uri) || uri
+  return getProfileEntityDisplayLabel(
+    uri,
+    store.displayFormat,
+    formatUri,
+    entity?.label,
+  )
 }
 
 const loading = ref(true)
