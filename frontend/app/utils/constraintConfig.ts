@@ -6,7 +6,7 @@ export const constraintConfig: Record<
   string,
   {
     label: string
-    type: 'class' | 'integer' | 'boolean' | 'text' | 'number' | 'dropdown' | 'datatype' | 'property'
+    type: 'class' | 'integer' | 'boolean' | 'text' | 'number' | 'dropdown' | 'datatype' | 'property' | 'language'
     multiple?: boolean
     appliesTo: string[]
     options?: string[]
@@ -75,8 +75,9 @@ export const constraintConfig: Record<
     ],
   },
   'http://www.w3.org/ns/shacl#languageIn': {
-    label: 'Language (comma‑separated)',
-    type: 'text',
+    label: 'Language',
+    type: 'language',
+    multiple: true,
     appliesTo: ['datatype_property'],
   },
   'http://www.w3.org/ns/shacl#minInclusive': {

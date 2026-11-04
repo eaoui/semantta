@@ -18,6 +18,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "start": "node .output/server/index.mjs",
+    "test:unit": "vitest run",
     "electron": "electron .",
     "electron:generate": "node scripts/generate-electron.mjs",
     "electron:prepare-runtime": "python scripts/prepare_runtime.py",
@@ -47,10 +48,12 @@
     "@types/node": "^26.1.0",
     "@types/sortablejs": "^1.15.9",
     "@vite-pwa/nuxt": "^1.1.1",
+    "cldr-core": "^48.2.0",
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
     "nuxt-phosphor-icons": "^2.3.3",
-    "tailwindcss": "^4.3.2"
+    "tailwindcss": "^4.3.2",
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "@nuxt/devtools": "4.0.0-beta.4"

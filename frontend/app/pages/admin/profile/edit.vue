@@ -103,6 +103,12 @@
               </select>
             </template>
 
+            <!-- BCP 47 language-tag selector -->
+            <template v-else-if="config.type === 'language'">
+              <LanguageTagSelector :modelValue="formData[pred] || []"
+                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" />
+            </template>
+
             <!-- Default text input -->
             <template v-else>
               <input v-model="formData[pred]" type="text" @input="markOverride(pred)"
@@ -149,9 +155,11 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from '@/composables/useDisplay'
 import { useAppStore } from '@/stores/app'
+import { useToast } from '@/composables/useToast'
 import { constraintConfig } from '~/utils/constraintConfig'
 import EntitySelector from '@/components/admin/EntitySelector.vue'
-import { useToast } from '@/composables/useToast'
+import LanguageTagSelector from '@/components/admin/LanguageTagSelector.vue'
+import { normalizeLanguageTagSelection } from '~/utils/bcp47LanguageTags'
 
 const route = useRoute()
 const store = useAppStore()
@@ -159,28 +167,6 @@ const router = useRouter()
 const { formatUri } = useDisplay()
 const apiBase = useRuntimeConfig().public.apiBase
 const toast = useToast()
-
-const LANGUAGE_IN_PREDICATE =
-  'http://www.w3.org/ns/shacl#languageIn'
-
-function languageListToText(value: unknown): string {
-  const values = Array.isArray(value)
-    ? value
-    : value == null || value === ''
-      ? []
-      : [value]
-
-  return values.map(String).join(', ')
-}
-
-function parseLanguageList(value: unknown): string[] {
-  if (typeof value !== 'string') return []
-
-  return value
-    .split(',')
-    .map(language => language.trim())
-    .filter(Boolean)
-}
 
 const entityUri = ref('')
 const entityType = ref('')
@@ -270,10 +256,11 @@ const hasRightColumn = computed(() => Object.keys(rightConstraints.value).length
 function getDefaultValue(pred: string): any {
   const config = constraintConfig[pred]
   if (!config) return undefined
+
   const orig = original.value[pred]
 
-  if (pred === LANGUAGE_IN_PREDICATE) {
-    return languageListToText(orig)
+  if (config.type === 'language') {
+    return normalizeLanguageTagSelection(orig)
   }
 
   if (orig !== undefined) {
@@ -300,6 +287,15 @@ function valuesAreEqual(a: any, b: any, type: string): boolean {
     const sortedA = [...arrA].sort()
     const sortedB = [...arrB].sort()
     return sortedA.every((v, i) => v === sortedB[i])
+  }
+  if (type === 'language') {
+    const arrA = normalizeLanguageTagSelection(a)
+    const arrB = normalizeLanguageTagSelection(b)
+
+    return (
+      arrA.length === arrB.length &&
+      arrA.every((value, index) => value === arrB[index])
+    )
   }
   if (type === 'boolean') return a === b
   if (type === 'integer' || type === 'number') {
@@ -460,9 +456,6 @@ async function fetchConstraints() {
       if (config.type === 'boolean') {
         formData[pred] = raw === true || raw === 'true'
 
-      } else if (pred === LANGUAGE_IN_PREDICATE) {
-        formData[pred] = languageListToText(raw)
-
       } else if (
         ['class', 'property', 'datatype'].includes(config.type)
       ) {
@@ -473,6 +466,9 @@ async function fetchConstraints() {
             : [raw]
 
         formData[pred] = values.map(String)
+
+      } else if (config.type === 'language') {
+        formData[pred] = normalizeLanguageTagSelection(raw)
 
       } else if (
         config.type === 'integer' ||
@@ -565,8 +561,8 @@ async function save() {
       } else if (mode === 'override') {
         payload[pred] = []
       }
-    } else if (pred === LANGUAGE_IN_PREDICATE) {
-      const languages = parseLanguageList(formData[pred])
+    } else if (config.type === 'language') {
+      const languages = normalizeLanguageTagSelection(value)
 
       if (languages.length > 0 || mode === 'override') {
         payload[pred] = languages
