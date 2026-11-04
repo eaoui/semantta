@@ -24,8 +24,12 @@
 
     <!-- Domain (only for properties) -->
     <td v-if="showDomain" class="border border-gray-300 dark:border-gray-600 p-2 text-sm" :class="mutedTextClass">
-      <span v-if="props.entity.domain?.length">{{props.entity.domain.map(d => displayEntityLabel(d)).join(', ')
-        }}</span>
+      <span v-if="domainUris.length">
+        <template v-for="(domainUri, index) in domainUris" :key="domainUri">
+          <span :class="{ 'opacity-50': isInactiveEntity(domainUri) }">
+            {{ displayEntityLabel(domainUri) }}
+          </span>{{ index < domainUris.length - 1 ? ', ' : '' }} </template>
+      </span>
       <span v-else class="italic">
         Universal (all classes)
       </span>
@@ -57,6 +61,7 @@ import type { ProfileEntityItem } from '@/types'
 import { useDisplay } from '@/composables/useDisplay'
 import { useAppStore } from '@/stores/app'
 import { CORE_ENTITY_URIS } from '@/utils/coreEntities'
+import { isInactiveProfileEntity } from '@/utils/profileEntityActivity'
 
 const props = defineProps<{
   entity: ProfileEntityItem
@@ -71,6 +76,12 @@ defineEmits<{
 
 const { formatUri } = useDisplay()
 const store = useAppStore()
+
+const domainUris = computed(() => props.entity.domain ?? [])
+
+function isInactiveEntity(uri: string): boolean {
+  return isInactiveProfileEntity(uri, store.profileEntities)
+}
 
 function displayEntityLabel(
   uri: string,

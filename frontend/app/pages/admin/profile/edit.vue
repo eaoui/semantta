@@ -43,13 +43,14 @@
 
             <!-- Datatype picker -->
             <template v-if="config.type === 'datatype'">
-              <EntitySelector entityType="datatype" :modelValue="formData[pred] || []"
-                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search datatypes…" />
+              <EntitySelector entityType="datatype" :indicate-inactive-entities="true"
+                :modelValue="formData[pred] || []" @update:modelValue="(val: string[]) => setFieldValue(pred, val)"
+                placeholder="Search datatypes…" />
             </template>
 
             <!-- Class list -->
             <template v-else-if="config.type === 'class'">
-              <EntitySelector entityType="class" :modelValue="formData[pred] || []"
+              <EntitySelector entityType="class" :indicate-inactive-entities="true" :modelValue="formData[pred] || []"
                 @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search classes…" />
 
               <p v-if="pred === 'urn:domainClasses' && !(formData[pred] || []).length"
@@ -60,9 +61,9 @@
 
             <!-- Property list -->
             <template v-else-if="config.type === 'property'">
-              <EntitySelector entityType="property" :availableEntities="classPropertyOptions"
-                :modelValue="formData[pred] || []" @update:modelValue="(val: string[]) => setFieldValue(pred, val)"
-                placeholder="Search properties…" />
+              <EntitySelector entityType="property" :indicate-inactive-entities="true"
+                :availableEntities="classPropertyOptions" :modelValue="formData[pred] || []"
+                @update:modelValue="(val: string[]) => setFieldValue(pred, val)" placeholder="Search properties…" />
 
               <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                 This list manages class-specific associations. Properties inherited
@@ -77,7 +78,9 @@
 
                 <ul class="mt-1 list-disc list-inside text-sm text-gray-500 dark:text-gray-400">
                   <li v-for="uri in inheritedProperties" :key="uri">
-                    {{ profileEntityLabel(uri) }}
+                    <span :class="{ 'opacity-50': isInactiveEntity(uri) }">
+                      {{ profileEntityLabel(uri) }}
+                    </span>
                   </li>
                 </ul>
               </div>
@@ -89,7 +92,9 @@
 
                 <ul class="mt-1 list-disc list-inside text-sm text-gray-500 dark:text-gray-400">
                   <li v-for="uri in universalProperties" :key="uri">
-                    {{ profileEntityLabel(uri) }}
+                    <span :class="{ 'opacity-50': isInactiveEntity(uri) }">
+                      {{ profileEntityLabel(uri) }}
+                    </span>
                   </li>
                 </ul>
               </div>
@@ -164,6 +169,7 @@ import {
   getClassPropertyOptions,
   getProfileEntityDisplayLabel,
 } from '~/utils/profileEntities'
+import { isInactiveProfileEntity } from '~/utils/profileEntityActivity'
 
 const route = useRoute()
 const store = useAppStore()
@@ -196,6 +202,10 @@ const classPropertyOptions = computed(() =>
     universalProperties.value,
   ),
 )
+
+function isInactiveEntity(uri: string): boolean {
+  return isInactiveProfileEntity(uri, store.profileEntities)
+}
 
 function profileEntityLabel(uri: string): string {
   const entity = store.profileEntities.find(

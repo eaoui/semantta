@@ -4,7 +4,9 @@
     <div class="flex flex-wrap gap-1 mb-2">
       <span v-for="uri in selected" :key="uri"
         class="inline-flex items-center gap-1 bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 text-sm px-2 py-1 rounded">
-        {{ getLabel(uri) }}
+        <span :class="{ 'opacity-50': isInactiveEntity(uri) }">
+          {{ getLabel(uri) }}
+        </span>
         <button type="button" @click="remove(uri)"
           class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200">&times;</button>
       </span>
@@ -35,6 +37,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useDisplay } from '@/composables/useDisplay'
+import { isInactiveProfileEntity } from '@/utils/profileEntityActivity'
 
 const { formatUri } = useDisplay()
 
@@ -52,11 +55,13 @@ const props = withDefaults(defineProps<{
   entityType?: 'class' | 'property' | 'datatype'
   disabled?: boolean
   invalid?: boolean
+  indicateInactiveEntities?: boolean
 }>(), {
   placeholder: 'Search…',
   entityType: 'class',
   disabled: false,
   invalid: false,
+  indicateInactiveEntities: false,
 })
 
 const emit = defineEmits<{
@@ -64,6 +69,11 @@ const emit = defineEmits<{
 }>()
 
 const store = useAppStore()
+
+function isInactiveEntity(uri: string): boolean {
+  return props.indicateInactiveEntities &&
+    isInactiveProfileEntity(uri, store.profileEntities)
+}
 
 function displayEntityLabel(
   uri: string,
