@@ -552,6 +552,7 @@ async def test_absent_empty_sh_in_remains_absent_in_default_mode(
     monkeypatch,
 ):
     store = DatasetStore()
+    monkeypatch.setattr(main, "store", store)
 
     property_uri = EX.status
     shape_uri = EX.StatusShape
