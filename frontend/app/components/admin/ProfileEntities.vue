@@ -124,6 +124,7 @@ import ProfileEntityRow from '@/components/admin/ProfileEntityRow.vue'
 import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
 import SearchBox from '@/components/shared/SearchBox.vue'
 import ConfirmDialog from '@/components/admin/ConfirmDialog.vue'
+import { PROFILE_ENTITY_TAB_TYPES } from '@/utils/profileEntityTabs'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
@@ -160,12 +161,7 @@ const sourceOptions = computed(() => {
   return options
 })
 
-const mainTabs = computed(() => {
-  const types = new Set(store.profileEntities.map(e => e.type))
-  const base = ['class', 'object_property', 'datatype_property', 'annotation_property', 'datatype']
-  if (types.has('individual')) base.push('individual')
-  return base
-})
+const mainTabs = PROFILE_ENTITY_TAB_TYPES
 
 const isPropertyTab = computed(() =>
   ['object_property', 'datatype_property', 'annotation_property'].includes(activeTab.value)

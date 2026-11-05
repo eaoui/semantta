@@ -559,3 +559,45 @@ def test_annotation_property_keeps_annotation_group_with_datatype_range(
         main._get_property_group_uri(str(EX.label))
         == main.PROPERTY_GROUP_ANNOTATION
     )
+
+
+def test_process_ontology_includes_named_individuals():
+    graph = Graph()
+
+    graph.add((
+        EX.Agent,
+        RDF.type,
+        OWL.Class,
+    ))
+
+    graph.add((
+        EX.Person,
+        RDF.type,
+        OWL.NamedIndividual,
+    ))
+
+    graph.add((
+        EX.Person,
+        RDF.type,
+        EX.Agent,
+    ))
+
+    entities = main.process_ontology(
+        graph,
+        "individuals.ttl",
+    )
+
+    individuals = [
+        entity
+        for entity in entities
+        if entity["type"] == "individual"
+    ]
+
+    assert len(individuals) == 1
+
+    assert individuals[0]["uri"] == str(EX.Person)
+
+    assert set(individuals[0]["types"]) == {
+        str(OWL.NamedIndividual),
+        str(EX.Agent),
+    }
