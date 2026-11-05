@@ -6,7 +6,17 @@ export const constraintConfig: Record<
   string,
   {
     label: string
-    type: 'class' | 'integer' | 'boolean' | 'text' | 'number' | 'dropdown' | 'datatype' | 'property' | 'language'
+    type:
+  | 'class'
+  | 'property'
+  | 'datatype'
+  | 'individual'
+  | 'integer'
+  | 'boolean'
+  | 'text'
+  | 'number'
+  | 'dropdown'
+  | 'language'
     multiple?: boolean
     appliesTo: string[]
     options?: string[]
@@ -92,13 +102,13 @@ export const constraintConfig: Record<
   },
   'http://www.w3.org/ns/shacl#in': {
     label: 'Allowed Values',
-    type: 'class',
+    type: 'individual',
     multiple: true,
     appliesTo: ['object_property'],
   },
   'http://www.w3.org/ns/shacl#hasValue': {
-    label: 'Fixed Values',
-    type: 'class',
+    label: 'Required Value',
+    type: 'individual',
     appliesTo: ['object_property'],
   },
 }

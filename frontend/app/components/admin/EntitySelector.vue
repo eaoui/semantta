@@ -38,6 +38,10 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useDisplay } from '@/composables/useDisplay'
 import { isInactiveProfileEntity } from '@/utils/profileEntityActivity'
+import {
+  getActiveIndividualOptions,
+  getNextEntitySelection,
+} from '~/utils/entitySelector'
 
 const { formatUri } = useDisplay()
 
@@ -52,13 +56,15 @@ const props = withDefaults(defineProps<{
   modelValue: string[]
   placeholder?: string
   availableEntities?: { uri: string; label: string }[]
-  entityType?: 'class' | 'property' | 'datatype'
+  entityType?: 'class' | 'property' | 'datatype' | 'individual'
+  multiple?: boolean
   disabled?: boolean
   invalid?: boolean
   indicateInactiveEntities?: boolean
 }>(), {
   placeholder: 'Search…',
   entityType: 'class',
+  multiple: true,
   disabled: false,
   invalid: false,
   indicateInactiveEntities: false,
@@ -111,6 +117,21 @@ watch(
       uri: entity.uri,
       label: entity.label,
     }))
+  },
+  { immediate: true },
+)
+
+watch(
+  () => store.profileEntities,
+  entities => {
+    if (
+      props.entityType !== 'individual' ||
+      props.availableEntities !== undefined
+    ) {
+      return
+    }
+
+    rawEntities.value = getActiveIndividualOptions(entities)
   },
   { immediate: true },
 )
@@ -173,9 +194,23 @@ const filteredOptions = computed(() => {
 
 function add(uri: string) {
   if (props.disabled) return
-  if (!selected.value.includes(uri)) {
-    emit('update:modelValue', [...selected.value, uri])
+
+  const nextSelection = getNextEntitySelection(
+    selected.value,
+    uri,
+    props.multiple,
+  )
+
+  const changed =
+    nextSelection.length !== selected.value.length ||
+    nextSelection.some(
+      (value, index) => value !== selected.value[index],
+    )
+
+  if (changed) {
+    emit('update:modelValue', nextSelection)
   }
+
   search.value = ''
   open.value = false
   highlightIndex.value = -1

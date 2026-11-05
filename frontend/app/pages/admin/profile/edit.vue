@@ -57,16 +57,6 @@
                 class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                 Empty = Universal: The property applies to all classes.
               </p>
-
-              <p v-if="shouldShowEmptyShInNotice(
-                pred,
-                formData[pred],
-                fieldModes[pred],
-              )" class="mt-2 rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/30 dark:text-yellow-200">
-                An empty overridden list allows no values. Use the reset button above
-                to restore the default mode; when no default list exists, this removes
-                the controlled-vocabulary restriction.
-              </p>
             </template>
 
             <!-- Property list -->
@@ -108,6 +98,26 @@
                   </li>
                 </ul>
               </div>
+            </template>
+
+            <!-- Individual selector -->
+            <template v-else-if="config.type === 'individual'">
+              <EntitySelector entityType="individual" :multiple="config.multiple ?? false"
+                :modelValue="formData[pred] || []" @update:modelValue="(val: string[]) => setFieldValue(pred, val)"
+                :placeholder="config.multiple
+                  ? 'Search individuals…'
+                  : 'Select an individual…'" />
+
+              <p v-if="shouldShowEmptyShInNotice(
+                pred,
+                formData[pred],
+                fieldModes[pred],
+              )"
+                class="mt-2 rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/30 dark:text-yellow-200">
+                An empty overridden list allows no values. Use the reset button above
+                to restore the default mode; when no default list exists, this removes
+                the controlled-vocabulary restriction.
+              </p>
             </template>
 
             <!-- Dropdown -->
@@ -181,6 +191,9 @@ import {
 } from '~/utils/profileEntities'
 import { isInactiveProfileEntity } from '~/utils/profileEntityActivity'
 import { shouldShowEmptyShInNotice } from '~/utils/profileConstraintNotices'
+import {
+  getIndividualConstraintPayloadValue,
+} from '~/utils/profileConstraintValues'
 
 const route = useRoute()
 const store = useAppStore()
@@ -286,7 +299,7 @@ function getDefaultValue(pred: string): any {
   }
 
   if (orig !== undefined) {
-    if (['class', 'property', 'datatype'].includes(config.type)) {
+    if (['class', 'property', 'datatype', 'individual'].includes(config.type)) {
       return Array.isArray(orig) ? [...orig] : (orig ? [orig] : [])
     }
     if (config.type === 'boolean') {
@@ -295,14 +308,14 @@ function getDefaultValue(pred: string): any {
     return Array.isArray(orig) ? (orig[0] != null ? String(orig[0]) : '') : (orig != null ? String(orig) : '')
   }
 
-  if (['class', 'property', 'datatype'].includes(config.type)) return []
+  if (['class', 'property', 'datatype', 'individual'].includes(config.type)) return []
   if (config.type === 'boolean') return false
   if (config.type === 'integer' || config.type === 'number') return null
   return ''
 }
 
 function valuesAreEqual(a: any, b: any, type: string): boolean {
-  if (['class', 'property', 'datatype'].includes(type)) {
+  if (['class', 'property', 'datatype', 'individual'].includes(type)) {
     const arrA: string[] = Array.isArray(a) ? a : (a ? [a] : [])
     const arrB: string[] = Array.isArray(b) ? b : (b ? [b] : [])
     if (arrA.length !== arrB.length) return false
@@ -479,7 +492,7 @@ async function fetchConstraints() {
         formData[pred] = raw === true || raw === 'true'
 
       } else if (
-        ['class', 'property', 'datatype'].includes(config.type)
+        ['class', 'property', 'datatype', 'individual'].includes(config.type)
       ) {
         const values = Array.isArray(raw)
           ? raw
@@ -560,6 +573,15 @@ async function save() {
       if (val === true || val === 'true') {
         payload[pred] = 'true'
       }
+    } else if (config.type === 'individual') {
+      const individualValue = getIndividualConstraintPayloadValue(
+        value,
+        config.multiple ?? false,
+      )
+
+      if (individualValue !== undefined) {
+        payload[pred] = individualValue
+      }
     } else if (
       ['class', 'property', 'datatype'].includes(config.type)
     ) {
@@ -575,13 +597,11 @@ async function save() {
         .filter(value => value.trim() !== '')
 
       if (config.multiple) {
-        // An empty list is meaningful: it clears existing links
-        // or removes a multi-valued constraint.
+        // An empty list remains meaningful for sh:in and other
+        // multi-valued constraints.
         payload[pred] = arr
       } else if (arr.length > 0) {
         payload[pred] = arr[0]
-      } else if (mode === 'override') {
-        payload[pred] = []
       }
     } else if (config.type === 'language') {
       const languages = normalizeLanguageTagSelection(value)
