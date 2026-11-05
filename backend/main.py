@@ -4496,6 +4496,7 @@ class ApplicationProfile:
         self,
         prop_uri: str,
         effective_profile: dict | None = None,
+        field_modes: dict[str, str] | None = None,
     ) -> dict:
         if effective_profile is None:
             profile_data = await self._constraint_resolver.get_entity_constraints(
@@ -4503,6 +4504,9 @@ class ApplicationProfile:
                 _get_property_entity_type(prop_uri),
             )
             effective_profile = profile_data.get("effective")
+
+            if field_modes is None:
+                field_modes = profile_data.get("field_modes")
 
         if not isinstance(effective_profile, dict):
             raise HTTPException(
@@ -4541,10 +4545,25 @@ class ApplicationProfile:
             # These fields must remain arrays, including explicitly empty
             # arrays. A one-member RDF list is still a list.
             if field_name in {"in", "languageIn"}:
-                constraints[field_name] = [
+                values = [
                     str(item)
                     for item in _effective_profile_field_values(value)
                 ]
+
+                # An absent constraint in default mode is not an empty
+                # enumeration constraint. Preserve an explicitly empty
+                # override because it is semantically meaningful.
+                if (
+                    not values
+                    and field_modes is not None
+                    and field_modes.get(
+                        predicate,
+                        PROFILE_FIELD_MODE_DEFAULT,
+                    ) == PROFILE_FIELD_MODE_DEFAULT
+                ):
+                    continue
+
+                constraints[field_name] = values
                 continue
 
             if value is None or value == "" or value == []:
@@ -4613,6 +4632,7 @@ class ApplicationProfile:
             shacl_constraints = await self._get_property_constraints(
                 prop_uri,
                 effective_profile=effective_profile,
+                field_modes=profile_data.get("field_modes", {}),
             )
 
             # Ontology-native property type remains authoritative.
@@ -10956,6 +10976,39 @@ async def set_entity_constraints(entity_uri: str, constraints: dict):
             raw_field_modes,
             etype,
         )
+
+    sh_in_predicate = str(SH["in"])
+
+    if (
+        sh_in_predicate in constraints
+        and not constraints[sh_in_predicate]
+    ):
+        stored_modes = {}
+
+        # Use the submitted mode when available. Otherwise, retain an
+        # existing explicit mode; missing state means default mode.
+        if (
+            field_modes is None
+            or sh_in_predicate not in field_modes
+        ):
+            stored_modes = await _load_stored_profile_field_modes(
+                entity_uri,
+                profile_store=store,
+            )
+
+        sh_in_mode = (field_modes or {}).get(
+            sh_in_predicate,
+            stored_modes.get(
+                sh_in_predicate,
+                PROFILE_FIELD_MODE_DEFAULT,
+            ),
+        )
+
+        if sh_in_mode == PROFILE_FIELD_MODE_DEFAULT:
+            # An empty default is absence of a constraint, not rdf:nil.
+            # _apply_constraints() will remove any previously persisted
+            # sh:in predicate when it replaces the shape constraints.
+            constraints.pop(sh_in_predicate)
 
     validate_constraints(entity_uri, etype, constraints)
 

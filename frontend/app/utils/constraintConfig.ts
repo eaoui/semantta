@@ -91,13 +91,13 @@ export const constraintConfig: Record<
     appliesTo: ['datatype_property'],
   },
   'http://www.w3.org/ns/shacl#in': {
-    label: 'Controlled Vocabulary',
+    label: 'Allowed Values',
     type: 'class',
     multiple: true,
     appliesTo: ['object_property'],
   },
   'http://www.w3.org/ns/shacl#hasValue': {
-    label: 'Fixed Value',
+    label: 'Fixed Values',
     type: 'class',
     appliesTo: ['object_property'],
   },

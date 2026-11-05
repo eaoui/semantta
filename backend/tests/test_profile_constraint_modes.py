@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 from unittest.mock import AsyncMock
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
@@ -277,3 +278,138 @@ async def test_save_rejects_incompatible_range_before_mutating_profile(
     assert exc_info.value.status_code == 400
     store.query.assert_not_awaited()
     store.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("submitted_mode", "stored_mode", "expected_constraints"),
+    [
+        pytest.param(
+            "default",
+            "override",
+            {},
+            id="submitted-default-removes-empty-list",
+        ),
+        pytest.param(
+            "override",
+            "default",
+            {str(SH["in"]): []},
+            id="submitted-override-preserves-empty-list",
+        ),
+        pytest.param(
+            None,
+            "default",
+            {},
+            id="stored-default-removes-empty-list",
+        ),
+        pytest.param(
+            None,
+            "override",
+            {str(SH["in"]): []},
+            id="stored-override-preserves-empty-list",
+        ),
+    ],
+)
+async def test_empty_sh_in_save_respects_field_mode(
+    monkeypatch,
+    submitted_mode,
+    stored_mode,
+    expected_constraints,
+):
+    property_uri = str(EX.status)
+    property_shape = "urn:test:status-shape"
+    predicate = str(SH["in"])
+
+    store = AsyncMock()
+    store.query.return_value = [{"ps": property_shape}]
+
+    apply_constraints = AsyncMock()
+    load_modes = AsyncMock(
+        return_value={predicate: stored_mode},
+    )
+    persist_modes = AsyncMock()
+
+    monkeypatch.setattr(main, "store", store)
+
+    monkeypatch.setattr(
+        main.ap,
+        "get_entity_type",
+        AsyncMock(return_value="object_property"),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "validate_constraints",
+        lambda *_: True,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_validate_profile_range_constraint_compatibility",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_apply_constraints",
+        apply_constraints,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        load_modes,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_persist_profile_field_modes",
+        persist_modes,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None,
+    )
+
+    payload: dict[str, Any] = {
+        predicate: [],
+    }
+
+    if submitted_mode is not None:
+        payload[main.PROFILE_FIELD_MODES_KEY] = {
+            predicate: submitted_mode,
+        }
+
+    await main.set_entity_constraints(
+        property_uri,
+        payload,
+    )
+
+    apply_constraints.assert_awaited_once_with(
+        property_shape,
+        expected_constraints,
+        keep_predicates={
+            main.RDF.type,
+            main.SH.path,
+            main.SH.order,
+            main.SH.group,
+            main.SH.property,
+            main.SH.deactivated,
+        },
+    )
+
+    if submitted_mode is None:
+        load_modes.assert_awaited_once_with(
+            property_uri,
+            profile_store=store,
+        )
+        persist_modes.assert_not_awaited()
+    else:
+        load_modes.assert_not_awaited()
+
+        persist_modes.assert_awaited_once_with(
+            property_uri,
+            {predicate: submitted_mode},
+        )

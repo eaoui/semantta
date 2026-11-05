@@ -489,7 +489,17 @@ async def test_property_form_preserves_single_and_multiple_list_members():
 
 
 @pytest.mark.asyncio
-async def test_property_form_preserves_explicitly_empty_in_list():
+@pytest.mark.parametrize(
+    ("predicate", "field_name"),
+    [
+        (str(SH["in"]), "in"),
+        (str(SH.languageIn), "languageIn"),
+    ],
+)
+async def test_property_form_preserves_explicitly_empty_list_override(
+    predicate,
+    field_name,
+):
     profile = main.ApplicationProfile(
         store=AsyncMock(),
     )
@@ -497,9 +507,114 @@ async def test_property_form_preserves_explicitly_empty_in_list():
     result = await profile._get_property_constraints(
         str(EX.status),
         effective_profile={
-            str(SH["in"]): [],
+            predicate: [],
+        },
+        field_modes={
+            predicate: main.PROFILE_FIELD_MODE_OVERRIDE,
         },
     )
 
-    assert "in" in result
-    assert result["in"] == []
+    assert field_name in result
+    assert result[field_name] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("predicate", "field_name"),
+    [
+        (str(SH["in"]), "in"),
+        (str(SH.languageIn), "languageIn"),
+    ],
+)
+async def test_property_form_omits_absent_empty_list_in_default_mode(
+    predicate,
+    field_name,
+):
+    profile = main.ApplicationProfile(
+        store=AsyncMock(),
+    )
+
+    result = await profile._get_property_constraints(
+        str(EX.status),
+        effective_profile={
+            predicate: [],
+        },
+        field_modes={
+            predicate: main.PROFILE_FIELD_MODE_DEFAULT,
+        },
+    )
+
+    assert field_name not in result
+
+
+@pytest.mark.asyncio
+async def test_absent_empty_sh_in_remains_absent_in_default_mode(
+    monkeypatch,
+):
+    store = DatasetStore()
+
+    property_uri = EX.status
+    shape_uri = EX.StatusShape
+    predicate = str(SH["in"])
+
+    add_property_shape(
+        store.shapes,
+        shape_uri,
+        property_uri,
+    )
+
+    # Start with an existing nonempty constraint.
+    await main._apply_constraints(
+        str(shape_uri),
+        {
+            predicate: [str(EX.Draft)],
+        },
+        keep_predicates={
+            RDF.type,
+            SH.path,
+        },
+    )
+
+    # Replacing the constraints without sh:in must remove the old list.
+    await main._apply_constraints(
+        str(shape_uri),
+        {},
+        keep_predicates={
+            RDF.type,
+            SH.path,
+        },
+    )
+
+    shapes = await store.load_shapes_graph()
+
+    assert not list(
+        shapes.objects(
+            shape_uri,
+            SH["in"],
+        )
+    )
+
+    profile = configure_resolver(
+        monkeypatch,
+        predicate,
+        store,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        AsyncMock(return_value={
+            predicate: main.PROFILE_FIELD_MODE_DEFAULT,
+        }),
+    )
+
+    result = await profile.get_entity_constraints(
+        str(property_uri),
+        "object_property",
+    )
+
+    assert predicate not in result["overrides"]
+    assert result["field_modes"][predicate] == (
+        main.PROFILE_FIELD_MODE_DEFAULT
+    )
+    assert result["effective"][predicate] == []

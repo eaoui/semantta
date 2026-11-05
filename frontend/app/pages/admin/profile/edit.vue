@@ -57,6 +57,16 @@
                 class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                 Empty = Universal: The property applies to all classes.
               </p>
+
+              <p v-if="shouldShowEmptyShInNotice(
+                pred,
+                formData[pred],
+                fieldModes[pred],
+              )" class="mt-2 rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/30 dark:text-yellow-200">
+                An empty overridden list allows no values. Use the reset button above
+                to restore the default mode; when no default list exists, this removes
+                the controlled-vocabulary restriction.
+              </p>
             </template>
 
             <!-- Property list -->
@@ -170,6 +180,7 @@ import {
   getProfileEntityDisplayLabel,
 } from '~/utils/profileEntities'
 import { isInactiveProfileEntity } from '~/utils/profileEntityActivity'
+import { shouldShowEmptyShInNotice } from '~/utils/profileConstraintNotices'
 
 const route = useRoute()
 const store = useAppStore()

@@ -920,5 +920,5 @@ async def test_list_active_properties_uses_distinct_aggregate_alias(
     assert "sh:PropertyGroup" in query
     assert "sh:deactivated true" in query
     assert "SAMPLE(?group) AS ?groupUri" in query
-    assert "SAMPLE(?groupLabel) AS ?groupLabel" in query
+    assert "SAMPLE(?groupLabel) AS ?sampledGroupLabel" in query
     assert "rdfs:label" in query

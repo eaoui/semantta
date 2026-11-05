@@ -208,10 +208,6 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
         }]
     )
 
-    profile._get_property_constraints = AsyncMock(
-        return_value={},
-    )
-
     monkeypatch.setattr(
         profile._constraint_resolver,
         "get_active_datatypes",
@@ -230,6 +226,7 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
             },
             "field_modes": {
                 str(SH["class"]): "override",
+                str(SH["in"]): main.PROFILE_FIELD_MODE_DEFAULT,
             },
             "effective": {
                 str(SH["class"]): [str(EX.NewAuthor)],
@@ -237,6 +234,7 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
                 "urn:domainClasses": [],
                 str(SH.minCount): None,
                 str(SH.maxCount): None,
+                str(SH["in"]): [],
             },
         }),
     )
@@ -261,3 +259,4 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
     assert len(result) == 1
     assert result[0]["type"] == "object"
     assert result[0]["ranges"] == [str(EX.NewAuthor)]
+    assert "in" not in result[0]["constraints"]
