@@ -481,7 +481,7 @@ async def test_profile_form_property_list_excludes_deactivated_properties(
     graph.add((
         main.PROPERTY_GROUP_OBJECT,
         SH.order,
-        Literal(1),
+        Literal(2),
     ))
 
     graph.add((
@@ -501,7 +501,8 @@ async def test_profile_form_property_list_excludes_deactivated_properties(
     ))
     graph.add((
         inactive_shape,
-        SH.order,Literal(2),
+        SH.order,
+        Literal(2),
     ))
     graph.add((inactive_shape,
         SH.deactivated,

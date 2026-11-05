@@ -136,21 +136,26 @@ PROPERTY_GROUP_ANNOTATION = URIRef(
 
 PROPERTY_GROUP_DEFINITIONS = (
     (
+        PROPERTY_GROUP_ANNOTATION,
+        "Annotation Properties",
+        1,
+    ),
+    (
         PROPERTY_GROUP_OBJECT,
         "Object Properties",
-        1,
+        2,
     ),
     (
         PROPERTY_GROUP_DATATYPE,
         "Datatype Properties",
-        2,
-    ),
-    (
-        PROPERTY_GROUP_ANNOTATION,
-        "Annotation Properties",
         3,
     ),
 )
+
+PROPERTY_GROUP_LABELS = {
+    str(group_uri): label
+    for group_uri, label, _ in PROPERTY_GROUP_DEFINITIONS
+}
 
 PROPERTY_ENTITY_TYPES = frozenset({
     "object_property",
@@ -4390,9 +4395,12 @@ class ApplicationProfile:
     ) -> List[dict]:
         rows = await self.store.query(f"""
             PREFIX sh: <{SH}>
+            PREFIX rdfs: <{RDFS}>
 
             SELECT
                 ?propUri
+                (SAMPLE(?group) AS ?groupUri)
+                (SAMPLE(?groupLabel) AS ?sampledGroupLabel)
                 (SAMPLE(?order) AS ?sortOrder)
                 (SAMPLE(?groupOrder) AS ?sortGroupOrder)
             WHERE {{
@@ -4405,6 +4413,10 @@ class ApplicationProfile:
                     ?group
                         a sh:PropertyGroup ;
                         sh:order ?groupOrder .
+
+                    OPTIONAL {{
+                        ?group rdfs:label ?groupLabel .
+                    }}
 
                     OPTIONAL {{
                         ?propShape sh:order ?order .
@@ -4440,42 +4452,45 @@ class ApplicationProfile:
             ):
                 continue
 
+            group_uri = str(row["groupUri"])
             raw_order = row.get("sortOrder")
             raw_group_order = row.get("sortGroupOrder")
 
+            group_label = (
+                row.get("sampledGroupLabel")
+                or PROPERTY_GROUP_LABELS.get(group_uri)
+                or group_uri
+            )
+
             properties_by_uri[prop_uri] = {
                 "uri": prop_uri,
+                "groupUri": group_uri,
+                "groupLabel": str(group_label),
+                "groupOrder": (
+                    int(raw_group_order)
+                    if raw_group_order is not None
+                    else 999
+                ),
                 "order": (
                     int(raw_order)
                     if raw_order is not None
                     else None
                 ),
-                "_group_order": (
-                    int(raw_group_order)
-                    if raw_group_order is not None
-                    else 999
-                ),
             }
 
-        return [
-            {
-                "uri": item["uri"],
-                "order": item["order"],
-            }
-            for item in sorted(
-                properties_by_uri.values(),
-                key=lambda item: (
-                    item["_group_order"],
-                    item["order"] is None,
-                    (
-                        item["order"]
-                        if item["order"] is not None
-                        else 0
-                    ),
-                    item["uri"],
+        return sorted(
+            properties_by_uri.values(),
+            key=lambda item: (
+                item["groupOrder"],
+                item["order"] is None,
+                (
+                    item["order"]
+                    if item["order"] is not None
+                    else 0
                 ),
-            )
-        ]
+                item["uri"],
+            ),
+        )
 
     async def _get_property_constraints(
         self,
@@ -4719,11 +4734,13 @@ class ApplicationProfile:
                 "datatype": datatype,
                 "suggestions": suggestions,
                 "allowMultiple": card["maxCardinality"] != 1,
+                "groupUri": ref["groupUri"],
+                "groupLabel": ref["groupLabel"],
+                "groupOrder": ref["groupOrder"],
                 "order": ref["order"],
                 "constraints": shacl_constraints,
             })
 
-        props.sort(key=lambda p: (p["order"] is None, p["order"] or 0))
         return props
 
     async def merge_metadata_only_entity(self, uri: str, source: str):

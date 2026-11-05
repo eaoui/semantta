@@ -473,7 +473,7 @@ async def test_inactive_domain_class_does_not_enable_inherited_property(
     graph.add((
         main.PROPERTY_GROUP_OBJECT,
         SH.order,
-        Literal(1),
+        Literal(2),
     ))
     graph.add((
         identifier_shape,

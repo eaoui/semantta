@@ -53,6 +53,9 @@ async def test_annotation_property_accepts_both_effective_range_kinds(
         AsyncMock(
             return_value=[{
                 "uri": property_uri,
+                "groupUri": str(main.PROPERTY_GROUP_ANNOTATION),
+                "groupLabel": "Annotation Properties",
+                "groupOrder": 1,
                 "order": 1,
             }]
         ),

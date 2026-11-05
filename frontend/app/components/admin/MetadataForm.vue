@@ -74,105 +74,112 @@
             class="mb-4 text-sm text-gray-500 dark:text-gray-400">
             No properties match "{{ propertySearch }}".
           </p>
-          <div v-for="prop in visibleProperties" :key="prop.uri"
-            class="mb-4 p-3 border border-gray-300 dark:border-gray-600 rounded" :class="hasFieldError(prop.uri)
-              ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
-              : ''">
-            <label :for="'prop-' + prop.uri" class="block mb-1 font-medium text-gray-900 dark:text-gray-100">
-              {{ getPropDisplayLabel(prop) }}
-            </label>
+          <section v-for="group in visiblePropertyGroups" :key="group.uri" class="mb-6">
+            <h3
+              class="mb-3 border-b border-gray-300 pb-2 text-sm font-semibold text-gray-800 dark:border-gray-600 dark:text-gray-200">
+              {{ group.label }}
+            </h3>
 
-            <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
-              <!-- Datatype property -->
-              <template v-if="prop.type === 'datatype'">
-                <select v-if="isBooleanDatatype(getPropDatatype(prop))"
-                  :value="toLexicalString(getPropValues(prop.uri)[index])"
-                  class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  :class="hasFieldError(prop.uri)
-                    ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
-                    : ''" :aria-invalid="hasFieldError(prop.uri)" @change="setPropValue(
-                      prop.uri,
-                      index,
-                      ($event.target as HTMLSelectElement).value
-                    ); onPropertyInput(prop.uri)">
-                  <option value="">Select a value</option>
-                  <option value="true">True</option>
-                  <option value="false">False</option>
-                </select>
+            <div v-for="prop in group.properties" :key="prop.uri"
+              class="mb-4 rounded border border-gray-300 p-3 dark:border-gray-600" :class="hasFieldError(prop.uri)
+                ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                : ''">
+              <label :for="'prop-' + prop.uri" class="block mb-1 font-medium text-gray-900 dark:text-gray-100">
+                {{ getPropDisplayLabel(prop) }}
+              </label>
 
-                <input v-else :value="toLexicalString(getPropValues(prop.uri)[index])"
-                  :type="inputType(getPropDatatype(prop))"
-                  :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
-                  class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                  :class="hasFieldError(prop.uri)
-                    ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
-                    : ''" :aria-invalid="hasFieldError(prop.uri)" @input="setPropValue(
-                      prop.uri,
-                      index,
-                      ($event.target as HTMLInputElement).value
-                    ); onPropertyInput(prop.uri)" />
-              </template>
-
-
-              <!-- Object property (with suggestions) -->
-              <template v-else>
-                <div class="relative flex-1">
-                  <input v-model="getPropValues(prop.uri)[index]"
-                    @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
-                    @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
-                    class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+              <div v-for="(value, index) in getPropValues(prop.uri)" :key="index" class="flex gap-2 mb-2 items-center">
+                <!-- Datatype property -->
+                <template v-if="prop.type === 'datatype'">
+                  <select v-if="isBooleanDatatype(getPropDatatype(prop))"
+                    :value="toLexicalString(getPropValues(prop.uri)[index])"
+                    class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
                     :class="hasFieldError(prop.uri)
                       ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
-                      : ''" :aria-invalid="hasFieldError(prop.uri)" autocomplete="off" />
-                  <ul v-if="activeSuggestion === `${prop.uri}_${index}` && filteredSuggestions[prop.uri]?.length"
-                    class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-40 overflow-auto w-full mt-1">
-                    <li v-for="sug in filteredSuggestions[prop.uri]" :key="sug.uri"
-                      @mousedown.prevent="selectSuggestion(prop.uri, index, sug.uri)"
-                      class="p-1 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer text-gray-900 dark:text-gray-100">
-                      {{ sug.label }} ({{ sug.uri }})
-                    </li>
-                  </ul>
-                </div>
+                      : ''" :aria-invalid="hasFieldError(prop.uri)" @change="setPropValue(
+                        prop.uri,
+                        index,
+                        ($event.target as HTMLSelectElement).value
+                      ); onPropertyInput(prop.uri)">
+                    <option value="">Select a value</option>
+                    <option value="true">True</option>
+                    <option value="false">False</option>
+                  </select>
 
-                <button v-if="!getPropValues(prop.uri)[index]" type="button"
-                  @click="openCreatePanel(prop.uri, index, prop.ranges)"
-                  class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
-                  title="Create new instance">
-                  <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
-                    size="16" class="animate-spin" aria-hidden="true" />
-                  <PhosphorIcon v-else name="plus" size="16" aria-hidden="true" />
-                </button>
-                <button v-if="getPropValues(prop.uri)[index]" type="button" @click="openEditPanel(prop.uri, index)"
-                  class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-                  title="Edit linked instance">
-                  <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)" name="circle-notch"
-                    size="16" class="animate-spin" aria-hidden="true" />
-                  <PhosphorIcon v-else name="pencil-simple" size="16" aria-hidden="true" />
-                </button>
-              </template>
+                  <input v-else :value="toLexicalString(getPropValues(prop.uri)[index])"
+                    :type="inputType(getPropDatatype(prop))"
+                    :step="inputType(getPropDatatype(prop)) === 'number' ? 'any' : undefined"
+                    class="border border-gray-300 dark:border-gray-600 p-2 rounded flex-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                    :class="hasFieldError(prop.uri)
+                      ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                      : ''" :aria-invalid="hasFieldError(prop.uri)" @input="setPropValue(
+                        prop.uri,
+                        index,
+                        ($event.target as HTMLInputElement).value
+                      ); onPropertyInput(prop.uri)" />
+                </template>
 
-              <PhosphorIcon v-if="prop.allowMultiple && getPropValues(prop.uri).length > 1"
-                @click="removeValue(prop.uri, index)" name="x" size="16"
-                class="text-red-500 hover:text-red-700 cursor-pointer" />
+
+                <!-- Object property (with suggestions) -->
+                <template v-else>
+                  <div class="relative flex-1">
+                    <input v-model="getPropValues(prop.uri)[index]"
+                      @input="filterSuggestions(prop.uri, index, ($event.target as HTMLInputElement).value); onPropertyInput(prop.uri)"
+                      @focus="openSuggestion(prop.uri, index)" @blur="hideSuggestion(prop.uri, index)"
+                      class="border border-gray-300 dark:border-gray-600 p-2 rounded w-full bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      :class="hasFieldError(prop.uri)
+                        ? 'border-red-500! dark:border-red-500! ring-1 ring-red-500/30'
+                        : ''" :aria-invalid="hasFieldError(prop.uri)" autocomplete="off" />
+                    <ul v-if="activeSuggestion === `${prop.uri}_${index}` && filteredSuggestions[prop.uri]?.length"
+                      class="absolute z-10 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded shadow max-h-40 overflow-auto w-full mt-1">
+                      <li v-for="sug in filteredSuggestions[prop.uri]" :key="sug.uri"
+                        @mousedown.prevent="selectSuggestion(prop.uri, index, sug.uri)"
+                        class="p-1 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer text-gray-900 dark:text-gray-100">
+                        {{ sug.label }} ({{ sug.uri }})
+                      </li>
+                    </ul>
+                  </div>
+
+                  <button v-if="!getPropValues(prop.uri)[index]" type="button"
+                    @click="openCreatePanel(prop.uri, index, prop.ranges)"
+                    class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
+                    title="Create new instance">
+                    <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)"
+                      name="circle-notch" size="16" class="animate-spin" aria-hidden="true" />
+                    <PhosphorIcon v-else name="plus" size="16" aria-hidden="true" />
+                  </button>
+                  <button v-if="getPropValues(prop.uri)[index]" type="button" @click="openEditPanel(prop.uri, index)"
+                    class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                    title="Edit linked instance">
+                    <PhosphorIcon v-if="openingPanelActionKey === getPanelActionKey(prop.uri, index)"
+                      name="circle-notch" size="16" class="animate-spin" aria-hidden="true" />
+                    <PhosphorIcon v-else name="pencil-simple" size="16" aria-hidden="true" />
+                  </button>
+                </template>
+
+                <PhosphorIcon v-if="prop.allowMultiple && getPropValues(prop.uri).length > 1"
+                  @click="removeValue(prop.uri, index)" name="x" size="16"
+                  class="text-red-500 hover:text-red-700 cursor-pointer" />
+              </div>
+
+              <button v-if="prop.allowMultiple" @click="addValue(prop.uri)" type="button"
+                class="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline text-sm mt-1">
+                <PhosphorIcon name="list-plus" size="24" />
+                Add value
+              </button>
+
+              <div v-if="getFieldMessages(prop.uri).length" class="mt-1 text-sm text-red-600 dark:text-red-400">
+                <span v-for="(message, index) in getFieldMessages(prop.uri)" :key="`${index}-${message}`" class="block">
+                  {{ message }}
+                </span>
+              </div>
             </div>
 
-            <button v-if="prop.allowMultiple" @click="addValue(prop.uri)" type="button"
-              class="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline text-sm mt-1">
-              <PhosphorIcon name="list-plus" size="24" />
-              Add value
+            <button v-if="!isRootForm" type="submit" :disabled="selectedClasses.length === 0 || props.submitting"
+              class="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+              {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
             </button>
-
-            <div v-if="getFieldMessages(prop.uri).length" class="mt-1 text-sm text-red-600 dark:text-red-400">
-              <span v-for="(message, index) in getFieldMessages(prop.uri)" :key="`${index}-${message}`" class="block">
-                {{ message }}
-              </span>
-            </div>
-          </div>
-
-          <button v-if="!isRootForm" type="submit" :disabled="selectedClasses.length === 0 || props.submitting"
-            class="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
-            {{ mode === 'create' ? 'Create Instance' : 'Update Instance' }}
-          </button>
+          </section>
         </form>
 
       </div>
@@ -237,6 +244,7 @@ import SlideOverPanel from '~/components/shared/SlideOverPanel.vue'
 import EntitySelector from '~/components/admin/EntitySelector.vue'
 import SearchBox from '@/components/shared/SearchBox.vue'
 import LoadingOverlay from '@/components/shared/LoadingOverlay.vue'
+import { groupMetadataProperties } from '~/utils/metadataPropertyGroups'
 
 const store = useAppStore()
 const { formatUri } = useDisplay()
@@ -250,9 +258,18 @@ interface ClassOption {
 }
 
 interface PropDef {
-  uri: string; label: string; type: string; datatype: string | null; ranges: string[];
-  suggestions: { uri: string; label: string }[]; allowMultiple: boolean;
-  constraints: Record<string, any>;
+  uri: string
+  label: string
+  type: string
+  datatype: string | null
+  ranges: string[]
+  suggestions: { uri: string; label: string }[]
+  allowMultiple: boolean
+  groupUri: string
+  groupLabel: string
+  groupOrder: number
+  order: number | null
+  constraints: Record<string, any>
 }
 
 const props = defineProps<{
@@ -397,6 +414,10 @@ const visibleProperties = computed(() => {
     ].some(value => value.toLowerCase().includes(query)),
   )
 })
+
+const visiblePropertyGroups = computed(() =>
+  groupMetadataProperties(visibleProperties.value),
+)
 
 function getPropValues(propUri: string): string[] {
   const existing = formData[propUri] as unknown[] | undefined
@@ -1006,7 +1027,6 @@ onMounted(async () => {
         formData[pred] = values.map(toLexicalString)
       }
     }
-    sortProperties()
 
     if (validateAllFields()) {
       scheduleLiveValidation('metadata')
@@ -1080,7 +1100,6 @@ async function fetchPropertiesForClasses() {
       if (arr.length === 0) arr.push('')
       filteredSuggestions[prop.uri] = prop.suggestions || []
     }
-    sortProperties()
     scheduleLiveValidation('selection')
   } catch (error: unknown) {
     if (revision !== propertyFetchRevision) return
@@ -1344,20 +1363,6 @@ async function onPanelSubmit(
   } finally {
     panelLoadingMsg.value = ''
   }
-}
-
-function sortProperties() {
-  properties.value.sort((a, b) => {
-    const aFilled = getPropValues(a.uri).some(
-      value => toLexicalString(value).trim() !== '',
-    )
-    const bFilled = getPropValues(b.uri).some(
-      value => toLexicalString(value).trim() !== '',
-    )
-    if (aFilled && !bFilled) return -1
-    if (!aFilled && bFilled) return 1
-    return 0
-  })
 }
 
 watch(() => panelState.value, (val) => {

@@ -121,18 +121,18 @@ async def test_property_groups_are_created_and_assigned_idempotently(
 
     group_definitions = (
         (
+            main.PROPERTY_GROUP_ANNOTATION,
+            "Annotation Properties",
+            1,
+        ),
+        (
             main.PROPERTY_GROUP_OBJECT,
             "Object Properties",
-            1,
+            2,
         ),
         (
             main.PROPERTY_GROUP_DATATYPE,
             "Datatype Properties",
-            2,
-        ),
-        (
-            main.PROPERTY_GROUP_ANNOTATION,
-            "Annotation Properties",
             3,
         ),
     )

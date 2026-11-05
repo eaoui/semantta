@@ -175,23 +175,31 @@ async def test_list_active_properties_includes_direct_inherited_and_universal(
     store.query.return_value = [
         {
             "propUri": DIRECT_PROPERTY,
+            "groupUri": str(main.PROPERTY_GROUP_OBJECT),
+            "groupLabel": "Object Properties",
             "sortOrder": "1",
-            "sortGroupOrder": "1",
+            "sortGroupOrder": "2",
         },
         {
             "propUri": INHERITED_PROPERTY,
+            "groupUri": str(main.PROPERTY_GROUP_OBJECT),
+            "groupLabel": "Object Properties",
             "sortOrder": "2",
-            "sortGroupOrder": "1",
+            "sortGroupOrder": "2",
         },
         {
             "propUri": ORPHAN_PROPERTY,
+            "groupUri": str(main.PROPERTY_GROUP_OBJECT),
+            "groupLabel": "Object Properties",
             "sortOrder": "3",
-            "sortGroupOrder": "1",
+            "sortGroupOrder": "2",
         },
         {
             "propUri": UNIVERSAL_PROPERTY,
+            "groupUri": str(main.PROPERTY_GROUP_OBJECT),
+            "groupLabel": "Object Properties",
             "sortOrder": "4",
-            "sortGroupOrder": "1",
+            "sortGroupOrder": "2",
         },
     ]
 
@@ -911,3 +919,6 @@ async def test_list_active_properties_uses_distinct_aggregate_alias(
     assert "sh:group ?group" in query
     assert "sh:PropertyGroup" in query
     assert "sh:deactivated true" in query
+    assert "SAMPLE(?group) AS ?groupUri" in query
+    assert "SAMPLE(?groupLabel) AS ?groupLabel" in query
+    assert "rdfs:label" in query

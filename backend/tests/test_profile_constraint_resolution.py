@@ -201,6 +201,9 @@ async def test_form_properties_use_effective_range_not_stale_shape_value(
     profile._list_active_properties = AsyncMock(
         return_value=[{
             "uri": str(EX.author),
+            "groupUri": str(main.PROPERTY_GROUP_OBJECT),
+            "groupLabel": "Object Properties",
+            "groupOrder": 2,
             "order": None,
         }]
     )
