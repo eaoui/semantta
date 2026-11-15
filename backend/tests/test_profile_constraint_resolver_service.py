@@ -302,3 +302,94 @@ async def test_constraint_endpoint_delegates_to_shacl_profile(
         entity_uri,
         "class",
     )
+
+
+@pytest.mark.asyncio
+async def test_property_constraint_resolver_uses_only_supplied_active_projection_shapes(
+    monkeypatch,
+):
+    shapes_graph = Graph()
+
+    active_shape = URIRef("urn:test:active-title-shape")
+    inactive_shape = URIRef("urn:test:inactive-title-shape")
+
+    shapes_graph.add((
+        active_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        active_shape,
+        SH.path,
+        EX.title,
+    ))
+    shapes_graph.add((
+        active_shape,
+        SH.minCount,
+        Literal(2),
+    ))
+
+    shapes_graph.add((
+        inactive_shape,
+        RDF.type,
+        SH.PropertyShape,
+    ))
+    shapes_graph.add((
+        inactive_shape,
+        SH.path,
+        EX.title,
+    ))
+    shapes_graph.add((
+        inactive_shape,
+        SH.minCount,
+        Literal(9),
+    ))
+    shapes_graph.add((
+        inactive_shape,
+        SH.deactivated,
+        Literal(True),
+    ))
+
+    profile_store = AsyncMock()
+
+    monkeypatch.setattr(
+        main,
+        "get_original_constraints",
+        lambda *_: {},
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_property_domains",
+        lambda _: [],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_load_stored_profile_field_modes",
+        AsyncMock(return_value={}),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_validate_profile_range_constraint_compatibility",
+        lambda *args, **kwargs: None,
+    )
+
+    profile = main.SHACLProfile(
+        cast(main.RDFStore, profile_store)
+    )
+
+    result = await profile.get_entity_constraints(
+        str(EX.title),
+        "object_property",
+        source_shapes=shapes_graph,
+        active_property_shapes={active_shape},
+    )
+
+    assert result["overrides"][str(SH.minCount)] == "2"
+    assert result["effective"][str(SH.minCount)] == "2"
+
+    # The resolver must use the supplied graph rather than loading
+    # the entire persisted shapes graph again.
+    profile_store.load_shapes_graph.assert_not_awaited()

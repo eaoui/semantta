@@ -150,6 +150,21 @@ async def test_effective_domains_respect_default_and_override_modes(
 
     result = await profile._get_shacl_domains()
 
+    domain_query = store.query.await_args_list[0].args[0]
+    normalized_query = " ".join(domain_query.split())
+
+    assert (
+        "?propShape a sh:PropertyShape ; sh:path ?propUri ."
+        in normalized_query
+    )
+
+    assert (
+        "FILTER NOT EXISTS { ?propShape sh:deactivated true . }"
+        in normalized_query
+    )
+
+    assert "?classShape sh:deactivated true" not in normalized_query
+
     # Default mode uses the ontology domain.
     assert result[DIRECT_PROPERTY] == [BOOK]
 

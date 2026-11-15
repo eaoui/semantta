@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 from fastapi import HTTPException
-from rdflib import Graph, Literal, Namespace, URIRef
+from rdflib import Graph, Literal, Namespace, URIRef, BNode
 from rdflib.namespace import RDF, RDFS, XSD
 
 from types import SimpleNamespace
@@ -30,6 +30,64 @@ class StaticShapeStore:
 
     async def load_shapes_graph(self) -> Graph:
         return self.shapes
+
+    async def query(self, sparql: str) -> list[dict]:
+        if "SELECT DISTINCT ?propUri ?class" in sparql:
+            rows = []
+
+            for property_shape in self.shapes.subjects(
+                RDF.type,
+                SH.PropertyShape,
+            ):
+                if (
+                    property_shape,
+                    SH.deactivated,
+                    Literal(True),
+                ) in self.shapes:
+                    continue
+
+                property_uri = self.shapes.value(
+                    property_shape,
+                    SH.path,
+                )
+
+                if not isinstance(property_uri, URIRef):
+                    continue
+
+                class_uris = {
+                    class_uri
+                    for class_shape in self.shapes.subjects(
+                        SH.property,
+                        property_shape,
+                    )
+                    if (
+                        class_shape,
+                        RDF.type,
+                        SH.NodeShape,
+                    ) in self.shapes
+                    for class_uri in self.shapes.objects(
+                        class_shape,
+                        SH.targetClass,
+                    )
+                }
+
+                if class_uris:
+                    rows.extend(
+                        {
+                            "propUri": str(property_uri),
+                            "class": str(class_uri),
+                        }
+                        for class_uri in class_uris
+                    )
+                else:
+                    rows.append({
+                        "propUri": str(property_uri),
+                        "class": None,
+                    })
+
+            return rows
+
+        return []
 
 
 class ReferencedResourceStore(StaticShapeStore):
@@ -72,6 +130,22 @@ def make_property_shape(
 def make_profile(shapes: Graph) -> main.SHACLProfile:
     store = cast(main.RDFStore, StaticShapeStore(shapes))
     return main.SHACLProfile(store)
+
+
+def set_property_entity_types(
+    monkeypatch,
+    property_types: dict[str, str],
+) -> None:
+    original_resolver = main._get_property_entity_type
+
+    monkeypatch.setattr(
+        main,
+        "_get_property_entity_type",
+        lambda property_uri: property_types.get(
+            property_uri,
+            original_resolver(property_uri),
+        ),
+    )
 
 
 def test_validation_ontology_rebuilds_when_index_cache_is_valid(
@@ -379,6 +453,7 @@ async def test_successful_shacl_validation_is_cached_for_identical_graphs(
 
     main._SHACL_VALIDATION_SUCCESS_CACHE.clear()
     calls = []
+    focus_nodes_seen = []
 
     def fake_validate(
         data_graph,
@@ -391,6 +466,7 @@ async def test_successful_shacl_validation_is_cached_for_identical_graphs(
         focus_nodes,
     ):
         calls.append(1)
+        focus_nodes_seen.append(list(focus_nodes))
         return True, Graph(), "Conforms"
 
     monkeypatch.setattr(
@@ -427,6 +503,11 @@ async def test_successful_shacl_validation_is_cached_for_identical_graphs(
 
         assert len(calls) == 2
 
+        assert focus_nodes_seen == [
+            [URIRef("urn:temp:instance")],
+            [URIRef("urn:temp:instance")],
+        ]
+
     finally:
         main._SHACL_VALIDATION_SUCCESS_CACHE.clear()
 
@@ -443,6 +524,24 @@ async def test_superclass_constraints_apply_to_subclass_instances(
 
     ontology = Graph()
     ontology.add((EX.Child, RDFS.subClassOf, EX.Parent))
+
+    monkeypatch.setattr(
+        main,
+        "_subclass_pairs",
+        {
+            (str(EX.Child), str(EX.Parent)),
+        },
+    )
+
+    monkeypatch.setattr(
+        main.ap,
+        "_get_shacl_domains",
+        AsyncMock(
+            return_value={
+                str(EX.title): [str(EX.Parent)],
+            }
+        ),
+    )
 
     monkeypatch.setattr(
         main,
@@ -485,6 +584,13 @@ async def test_form_integer_value_is_validated_as_xsd_integer(
         Graph(),
     )
 
+    set_property_entity_types(
+        monkeypatch,
+        {
+            str(EX.pageCount): "datatype_property",
+        },
+    )
+
     profile = make_profile(shapes)
 
     # Values submitted by MetadataForm.vue arrive as strings.
@@ -516,6 +622,13 @@ async def test_uri_looking_string_is_validated_as_literal(
         main,
         "validation_ontology_graph",
         Graph(),
+    )
+
+    set_property_entity_types(
+        monkeypatch,
+        {
+            str(EX.homepage): "datatype_property",
+        },
     )
 
     profile = make_profile(shapes)
@@ -614,6 +727,17 @@ async def test_validation_does_not_validate_nested_resource_shapes(
         Graph(),
     )
 
+    monkeypatch.setattr(
+        main.ap,
+        "_get_shacl_domains",
+        AsyncMock(
+            return_value={
+                str(EX.contribution): [str(EX.Work)],
+                str(EX.agent): [str(EX.Contribution)],
+            }
+        ),
+    )
+
     # The direct Work -> Contribution class constraint still passes.
     # The nested Contribution -> Agent constraint must not be evaluated
     # while editing Work.
@@ -651,6 +775,41 @@ async def test_direct_object_property_class_constraint_is_still_enforced(
         main,
         "validation_ontology_graph",
         Graph(),
+    )
+
+    property_shape = URIRef("urn:test:PropertyShape")
+
+    focus_node = URIRef("urn:temp:instance")
+
+    projected_shapes = await profile._build_validation_shapes_projection(
+        shapes,
+        [str(EX.Work)],
+        focus_node,
+    )
+
+    assert (
+        property_shape,
+        SH.path,
+        EX.contribution,
+    ) in projected_shapes
+
+    assert (
+        property_shape,
+        SH["class"],
+        EX.Contribution,
+    ) in projected_shapes
+
+    instance_shapes = main._build_instance_validation_shapes(
+        projected_shapes,
+        focus_node,
+    )
+
+    assert any(
+        (shape, SH.property, property_shape) in instance_shapes
+        for shape in instance_shapes.subjects(
+            SH.targetNode,
+            focus_node,
+        )
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -855,3 +1014,81 @@ async def test_shacl_validation_error_identifies_property():
         f"The value of property <{property_uri}> "
         f"does not have class <{required_class}>"
     ) in exc_info.value.detail
+
+
+def test_graph_content_fingerprint_ignores_blank_node_identifiers():
+    first_graph = Graph()
+    first_head = BNode("first-head")
+    first_item = BNode("first-item")
+
+    first_graph.add((
+        EX.shape,
+        SH["in"],
+        first_head,
+    ))
+    first_graph.add((
+        first_head,
+        RDF.first,
+        Literal("one"),
+    ))
+    first_graph.add((
+        first_head,
+        RDF.rest,
+        first_item,
+    ))
+    first_graph.add((
+        first_item,
+        RDF.first,
+        Literal("two"),
+    ))
+    first_graph.add((
+        first_item,
+        RDF.rest,
+        RDF.nil,
+    ))
+
+    second_graph = Graph()
+    second_head = BNode("different-head")
+    second_item = BNode("different-item")
+
+    second_graph.add((
+        EX.shape,
+        SH["in"],
+        second_head,
+    ))
+    second_graph.add((
+        second_head,
+        RDF.first,
+        Literal("one"),
+    ))
+    second_graph.add((
+        second_head,
+        RDF.rest,
+        second_item,
+    ))
+    second_graph.add((
+        second_item,
+        RDF.first,
+        Literal("two"),
+    ))
+    second_graph.add((
+        second_item,
+        RDF.rest,
+        RDF.nil,
+    ))
+
+    assert (
+        main._graph_content_fingerprint(first_graph)
+        == main._graph_content_fingerprint(second_graph)
+    )
+
+    second_graph.set((
+        second_item,
+        RDF.first,
+        Literal("three"),
+    ))
+
+    assert (
+        main._graph_content_fingerprint(first_graph)
+        != main._graph_content_fingerprint(second_graph)
+    )

@@ -60,7 +60,7 @@ from schemas import (
 from rdflib import BNode, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, RDFS, XSD, split_uri
-
+from rdflib.compare import to_canonical_graph
 
 from config import FUSEKI_CONFIG, is_loopback_host
 from fuseki_store import FusekiStore, SHAPES_GRAPH, PROFILE_FIELD_STATE_GRAPH
@@ -75,7 +75,6 @@ from utils import (
     property_shape_uri,
 )
 from logging_config import logger
-
 
 from paths import (
     ACTIVE_THEME_FILE,
@@ -1023,8 +1022,29 @@ def get_property_ranges(prop: str) -> List[str]:
 
 async def _get_active_profile_classes(
     profile_store: Optional[RDFStore] = None,
+    source_shapes: Optional[Graph] = None,
 ) -> Set[str]:
     """Return class URIs whose profile NodeShapes are not deactivated."""
+
+    if source_shapes is not None:
+        return {
+            str(class_uri)
+            for shape in source_shapes.subjects(
+                RDF.type,
+                SH.NodeShape,
+            )
+            if (
+                shape,
+                SH.deactivated,
+                Literal(True),
+            ) not in source_shapes
+            for class_uri in source_shapes.objects(
+                shape,
+                SH.targetClass,
+            )
+            if isinstance(class_uri, URIRef)
+        }
+
     target_store = profile_store or store
 
     rows = await target_store.query(f"""
@@ -2458,6 +2478,179 @@ def _build_validation_ontology_for_instance(
 
     return projected
 
+def _copy_validation_shape_subgraph(
+    source_shapes: Graph,
+    target_shapes: Graph,
+    root,
+    excluded_predicates: Optional[Set[URIRef]] = None,
+) -> None:
+    """Copy a shape and its nested SHACL structures into a derived graph."""
+    excluded_predicates = excluded_predicates or set()
+
+    shape_link_predicates = {
+        SH.node,
+        SH.qualifiedValueShape,
+        SH.property,
+        SH["not"],
+    }
+
+    pending = [root]
+    visited = set()
+
+    while pending:
+        current = pending.pop()
+
+        if current in visited:
+            continue
+
+        visited.add(current)
+
+        for predicate, value in source_shapes.predicate_objects(
+            current
+        ):
+            if (
+                current == root
+                and predicate in excluded_predicates
+            ):
+                continue
+
+            target_shapes.add((
+                current,
+                predicate,
+                value,
+            ))
+
+            if isinstance(value, BNode):
+                pending.append(value)
+
+            elif (
+                value != RDF.nil
+                and (
+                    (value, RDF.first, None) in source_shapes
+                    or (value, RDF.rest, None) in source_shapes
+                )
+            ):
+                pending.append(value)
+
+            elif (
+                predicate in shape_link_predicates
+                and isinstance(value, URIRef)
+            ):
+                pending.append(value)
+
+def _constraint_value_term(
+    predicate_uri: str,
+    value: object,
+):
+    """Convert an effective profile value into its RDF term."""
+    value_graph = Graph()
+    subject = URIRef("urn:semantta:validation:constraint-value")
+
+    value_graph.parse(
+        data=(
+            f"@prefix xsd: <{XSD}> .\n"
+            f"<{subject}> <{predicate_uri}> "
+            f"{_format_constraint_value(predicate_uri, value)} ."
+        ),
+        format="turtle",
+    )
+
+    term = value_graph.value(
+        subject,
+        URIRef(predicate_uri),
+    )
+
+    if term is None:
+        raise ValueError(
+            f"Could not construct RDF value for {predicate_uri}."
+        )
+
+    return term
+
+def _apply_effective_property_constraints(
+    validation_shapes: Graph,
+    property_shapes: List,
+    entity_type: str,
+    profile_data: dict,
+) -> None:
+    """Apply effective editable constraints to projected PropertyShapes."""
+    if not property_shapes:
+        return
+
+    editable_fields = set(
+        PROFILE_EDITABLE_FIELDS_BY_TYPE.get(
+            entity_type,
+            set(),
+        )
+    )
+    editable_fields.discard("urn:domainClasses")
+
+    effective = profile_data.get("effective", {})
+    field_modes = profile_data.get("field_modes", {})
+
+    target_shape = sorted(
+        property_shapes,
+        key=str,
+    )[0]
+
+    for field_uri in sorted(editable_fields):
+        if field_uri not in effective:
+            continue
+
+        predicate = URIRef(field_uri)
+        value = effective[field_uri]
+
+        if field_uri in RDF_LIST_CONSTRAINTS:
+            values = _effective_profile_field_values(value)
+
+            if not values:
+                if field_modes.get(
+                    field_uri,
+                    PROFILE_FIELD_MODE_DEFAULT,
+                ) == PROFILE_FIELD_MODE_OVERRIDE:
+                    validation_shapes.add((
+                        target_shape,
+                        predicate,
+                        RDF.nil,
+                    ))
+
+                continue
+
+            list_head = BNode()
+
+            Collection(
+                validation_shapes,
+                list_head,
+                [
+                    _constraint_value_term(field_uri, item)
+                    for item in values
+                ],
+            )
+
+            validation_shapes.add((
+                target_shape,
+                predicate,
+                list_head,
+            ))
+
+            continue
+
+        values = (
+            list(value)
+            if isinstance(value, (list, tuple, set))
+            else [value]
+        )
+
+        for item in values:
+            if item is None or item == "":
+                continue
+
+            validation_shapes.add((
+                target_shape,
+                predicate,
+                _constraint_value_term(field_uri, item),
+            ))
+
 def _build_instance_validation_shapes(
     source_shapes: Graph,
     focus_node: URIRef,
@@ -2466,7 +2659,11 @@ def _build_instance_validation_shapes(
     validation_shapes = Graph()
 
     for prefix, namespace in source_shapes.namespaces():
-        validation_shapes.bind(prefix, namespace, replace=True)
+        validation_shapes.bind(
+            prefix,
+            namespace,
+            replace=True,
+        )
 
     validation_shapes += source_shapes
 
@@ -2536,8 +2733,6 @@ def _build_instance_validation_shapes(
 
             alternatives.append(branch)
 
-        # Remove the original conjunctive constraints from the
-        # derived graph only. The persisted profile remains unchanged.
         for class_uri in class_ranges:
             validation_shapes.remove((
                 property_shape,
@@ -2553,6 +2748,7 @@ def _build_instance_validation_shapes(
             ))
 
         alternatives_list = BNode()
+
         Collection(
             validation_shapes,
             alternatives_list,
@@ -2565,8 +2761,25 @@ def _build_instance_validation_shapes(
             alternatives_list,
         ))
 
-    property_shapes = set(validation_shapes.subjects(SH.path, None))
-    linked_shapes = set(validation_shapes.objects(None, SH.property))
+    property_shapes = {
+        shape
+        for shape in validation_shapes.subjects(
+            RDF.type,
+            SH.PropertyShape,
+        )
+        if (
+            shape,
+            SH.path,
+            None,
+        ) in validation_shapes
+    }
+
+    linked_shapes = set(
+        validation_shapes.objects(
+            None,
+            SH.property,
+        )
+    )
 
     target_predicates = (
         SH.targetClass,
@@ -2580,7 +2793,7 @@ def _build_instance_validation_shapes(
         for shape in property_shapes
         if shape not in linked_shapes
         and not any(
-            validation_shapes.triples((shape, predicate, None))
+            (shape, predicate, None) in validation_shapes
             for predicate in target_predicates
         )
         and (
@@ -2622,10 +2835,12 @@ _SHACL_VALIDATION_SUCCESS_CACHE: OrderedDict[str, float] = (
 )
 
 def _graph_content_fingerprint(graph: Graph) -> str:
-    """Return a fingerprint of the RDF statements in a graph."""
+    """Return a fingerprint independent of blank-node identifiers."""
+    canonical_graph = to_canonical_graph(graph)
+
     statements = sorted(
         f"{subject.n3()} {predicate.n3()} {obj.n3()} ."
-        for subject, predicate, obj in graph
+        for subject, predicate, obj in canonical_graph
     )
 
     digest = hashlib.sha256()
@@ -4877,12 +5092,20 @@ class ApplicationProfile:
 
         rows = await target_store.query(f"""
             PREFIX sh: <http://www.w3.org/ns/shacl#>
+
             SELECT DISTINCT ?propUri ?class WHERE {{
                 GRAPH <{SHAPES_GRAPH}> {{
-                    ?propShape sh:path ?propUri .
+                    ?propShape
+                        a sh:PropertyShape ;
+                        sh:path ?propUri .
+
+                    FILTER NOT EXISTS {{
+                        ?propShape sh:deactivated true .
+                    }}
 
                     OPTIONAL {{
                         ?classShape
+                            a sh:NodeShape ;
                             sh:targetClass ?class ;
                             sh:property ?propShape .
                     }}
@@ -4983,6 +5206,9 @@ class SHACLProfile:
         self,
         entity_uri: str,
         entity_type: str,
+        *,
+        source_shapes: Optional[Graph] = None,
+        active_property_shapes: Optional[Set] = None,
     ) -> dict:
         """Resolve original, stored, and effective constraints for an entity."""
         original = get_original_constraints(
@@ -5007,7 +5233,11 @@ class SHACLProfile:
                 "property URI",
             )
 
-            shapes_graph = await self.store.load_shapes_graph()
+            shapes_graph = (
+                source_shapes
+                if source_shapes is not None
+                else await self.store.load_shapes_graph()
+            )
 
             property_shapes = sorted(
                 set(
@@ -5018,6 +5248,13 @@ class SHACLProfile:
                 ),
                 key=str,
             )
+
+            if active_property_shapes is not None:
+                property_shapes = [
+                    shape
+                    for shape in property_shapes
+                    if shape in active_property_shapes
+                ]
 
             reserved_predicates = {
                 RDF.type,
@@ -5133,26 +5370,47 @@ class SHACLProfile:
                 elif values:
                     overrides[predicate] = values[0]
 
-            domain_rows = await self.store.query(f"""
-                PREFIX sh: <http://www.w3.org/ns/shacl#>
+            if source_shapes is None:
+                domain_rows = await self.store.query(f"""
+                    PREFIX sh: <http://www.w3.org/ns/shacl#>
 
-                SELECT DISTINCT ?class WHERE {{
-                    GRAPH <{SHAPES_GRAPH}> {{
-                        ?propertyShape
-                            sh:path {property_ref} .
+                    SELECT DISTINCT ?class WHERE {{
+                        GRAPH <{SHAPES_GRAPH}> {{
+                            ?propertyShape
+                                sh:path {property_ref} .
 
-                        ?classShape
-                            a sh:NodeShape ;
-                            sh:targetClass ?class ;
-                            sh:property ?propertyShape .
+                            ?classShape
+                                a sh:NodeShape ;
+                                sh:targetClass ?class ;
+                                sh:property ?propertyShape .
+                        }}
                     }}
-                }}
-            """)
+                """)
 
-            domain_classes = sorted({
-                row["class"]
-                for row in domain_rows
-            })
+                domain_classes = sorted({
+                    row["class"]
+                    for row in domain_rows
+                })
+
+            else:
+                domain_classes = sorted({
+                    str(class_uri)
+                    for property_shape in property_shapes
+                    for class_shape in source_shapes.subjects(
+                        SH.property,
+                        property_shape,
+                    )
+                    if (
+                        class_shape,
+                        RDF.type,
+                        SH.NodeShape,
+                    ) in source_shapes
+                    for class_uri in source_shapes.objects(
+                        class_shape,
+                        SH.targetClass,
+                    )
+                    if isinstance(class_uri, URIRef)
+                })
 
             if domain_classes:
                 overrides["urn:domainClasses"] = domain_classes
@@ -7228,7 +7486,29 @@ class SHACLProfile:
             )
         ]
 
-    async def get_active_properties(self) -> List[str]:
+    async def get_active_properties(
+        self,
+        source_shapes: Optional[Graph] = None,
+    ) -> List[str]:
+        if source_shapes is not None:
+            return sorted({
+                str(prop_uri)
+                for shape in source_shapes.subjects(
+                    RDF.type,
+                    SH.PropertyShape,
+                )
+                if (
+                    shape,
+                    SH.deactivated,
+                    Literal(True),
+                ) not in source_shapes
+                for prop_uri in source_shapes.objects(
+                    shape,
+                    SH.path,
+                )
+                if isinstance(prop_uri, URIRef)
+            })
+
         rows = await self.store.query(f"""
             PREFIX sh: <{SH}>
 
@@ -7244,6 +7524,7 @@ class SHACLProfile:
                 }}
             }}
         """)
+
         return [r["prop"] for r in rows]
 
     async def get_active_datatypes(self) -> List[str]:
@@ -7524,8 +7805,252 @@ class SHACLProfile:
             source="Metadata",
         )
 
+    async def _build_validation_shapes_projection(
+        self,
+        source_shapes: Graph,
+        class_uris: List[str],
+        focus_node: Optional[URIRef] = None,
+    ) -> Graph:
+        """Build validation shapes for the selected classes and their profile."""
+
+        active_class_uris = await _get_active_profile_classes(
+            profile_store=self.store,
+            source_shapes=source_shapes,
+        )
+
+        active_property_uris = set(
+            await self.get_active_properties(
+                source_shapes=source_shapes,
+            )
+        )
+
+        effective_domains = await ap._get_shacl_domains(
+            profile_store=self.store,
+        )
+
+        # Include the selected classes and their named superclasses.
+        candidate_class_uris = set(class_uris)
+        ancestor_index = _get_class_ancestor_index()
+
+        for class_uri in class_uris:
+            candidate_class_uris.update(
+                ancestor_index.get(class_uri, [])
+            )
+
+        selected_class_uris = (
+            candidate_class_uris & active_class_uris
+        )
+
+        # Find active NodeShapes targeting the selected classes.
+        class_shapes_by_uri: Dict[str, Set] = defaultdict(set)
+
+        for class_shape in source_shapes.subjects(
+            RDF.type,
+            SH.NodeShape,
+        ):
+            if (
+                class_shape,
+                SH.deactivated,
+                Literal(True),
+            ) in source_shapes:
+                continue
+
+            for class_uri in source_shapes.objects(
+                class_shape,
+                SH.targetClass,
+            ):
+                if (
+                    isinstance(class_uri, URIRef)
+                    and str(class_uri) in selected_class_uris
+                ):
+                    class_shapes_by_uri[str(class_uri)].add(
+                        class_shape
+                    )
+
+        validation_shapes = Graph()
+
+        for prefix, namespace in source_shapes.namespaces():
+            validation_shapes.bind(
+                prefix,
+                namespace,
+                replace=True,
+            )
+
+        # Copy selected class shapes, but rebuild their property links below.
+        selected_class_shapes = {
+            shape
+            for shapes in class_shapes_by_uri.values()
+            for shape in shapes
+        }
+
+        for class_shape in sorted(
+            selected_class_shapes,
+            key=str,
+        ):
+            _copy_validation_shape_subgraph(
+                source_shapes,
+                validation_shapes,
+                class_shape,
+                excluded_predicates={SH.property},
+            )
+
+            if focus_node is not None:
+                validation_shapes.add((
+                    class_shape,
+                    SH.targetNode,
+                    focus_node,
+                ))
+
+        # Group active PropertyShapes by their property URI.
+        property_shapes_by_uri: Dict[str, Set] = defaultdict(set)
+
+        for property_shape in source_shapes.subjects(
+            RDF.type,
+            SH.PropertyShape,
+        ):
+            if (
+                property_shape,
+                SH.deactivated,
+                Literal(True),
+            ) in source_shapes:
+                continue
+
+            property_uri = source_shapes.value(
+                property_shape,
+                SH.path,
+            )
+
+            if (
+                isinstance(property_uri, URIRef)
+                and str(property_uri) in active_property_uris
+            ):
+                property_shapes_by_uri[str(property_uri)].add(
+                    property_shape
+                )
+
+        for property_uri in sorted(property_shapes_by_uri):
+            property_shapes = sorted(
+                property_shapes_by_uri[property_uri],
+                key=str,
+            )
+
+            domains = effective_domains.get(property_uri)
+
+            if domains is None:
+                domains = get_property_domains(property_uri)
+
+            domains = sorted(set(domains))
+
+            if domains:
+                # A non-empty domain is not universal, even if every
+                # domain class has been deactivated.
+                applies_to_selected_class = any(
+                    _property_applies_to_class(
+                        class_uri,
+                        domains,
+                        active_class_uris,
+                    )
+                    for class_uri in class_uris
+                )
+
+                if not applies_to_selected_class:
+                    continue
+
+                applicable_domain_uris = sorted({
+                    domain_uri
+                    for domain_uri in domains
+                    if (
+                        domain_uri in selected_class_uris
+                        and domain_uri in class_shapes_by_uri
+                    )
+                })
+
+                if not applicable_domain_uris:
+                    continue
+
+            else:
+                # An empty effective domain represents a universal property.
+                applicable_domain_uris = []
+
+            entity_type = _get_property_entity_type(
+                property_uri
+            )
+
+            profile_data = await self.get_entity_constraints(
+                property_uri,
+                entity_type,
+                source_shapes=source_shapes,
+                active_property_shapes=set(property_shapes),
+            )
+
+            editable_fields = set(
+                PROFILE_EDITABLE_FIELDS_BY_TYPE.get(
+                    entity_type,
+                    set(),
+                )
+            )
+            editable_fields.discard("urn:domainClasses")
+
+            excluded_predicates = {
+                URIRef(field_uri)
+                for field_uri in editable_fields
+            }
+
+            # Copy each active PropertyShape without its editable values.
+            for property_shape in property_shapes:
+                _copy_validation_shape_subgraph(
+                    source_shapes,
+                    validation_shapes,
+                    property_shape,
+                    excluded_predicates=excluded_predicates,
+                )
+
+                # Keep the PropertyShape identity and path explicit in the projection.
+                validation_shapes.add((
+                    property_shape,
+                    RDF.type,
+                    SH.PropertyShape,
+                ))
+                validation_shapes.add((
+                    property_shape,
+                    SH.path,
+                    URIRef(property_uri),
+                ))
+
+            # Apply the resolver's effective values instead of the stored values.
+            _apply_effective_property_constraints(
+                validation_shapes,
+                property_shapes,
+                entity_type,
+                profile_data,
+            )
+
+            # Rebuild only the class associations that apply in this context.
+            for domain_uri in applicable_domain_uris:
+                for class_shape in class_shapes_by_uri[domain_uri]:
+                    for property_shape in property_shapes:
+                        validation_shapes.add((
+                            class_shape,
+                            SH.property,
+                            property_shape,
+                        ))
+
+        return validation_shapes
+
     async def validate_instance(self, class_uris: List[str], properties: Dict[str, List[str]]):
         explicit_shapes = await self._get_shapes_graph()
+        inst_uri = URIRef("urn:temp:instance")
+
+        validation_source_shapes = Graph()
+
+        if len(explicit_shapes) > 0:
+            validation_source_shapes = (
+                await self._build_validation_shapes_projection(
+                    explicit_shapes,
+                    class_uris,
+                    inst_uri,
+                )
+            )
 
         data_g = Graph()
         inst_uri = URIRef("urn:temp:instance")
@@ -7539,7 +8064,7 @@ class SHACLProfile:
 
             for val in vals:
                 datatype_uri = await self._property_datatype_from_shapes(
-                    explicit_shapes,
+                    validation_source_shapes,
                     pred,
                     value=val,
                 )
@@ -7581,7 +8106,7 @@ class SHACLProfile:
 
             for val in vals:
                 datatype_uri = await self._property_datatype_from_shapes(
-                    explicit_shapes,
+                    validation_source_shapes,
                     pred,
                     value=val,
                 )
@@ -7652,7 +8177,7 @@ class SHACLProfile:
         # Copy the shapes graph and include universal property shapes
         # for this specific instance.
         validation_shapes = _build_instance_validation_shapes(
-            explicit_shapes,
+            validation_source_shapes,
             inst_uri,
         )
 

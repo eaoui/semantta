@@ -179,7 +179,17 @@ async def test_real_shacl_validation_blocks_invalid_update_before_write(
     monkeypatch.setattr(
         main, "check_disjoint_classes", AsyncMock()
     )
-    monkeypatch.setattr(main, "invalidate_profile", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "invalidate_profile",
+        lambda: None
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_get_property_entity_type",
+        lambda _: "datatype_property",
+    )
 
     # A complete, conforming instance must pass actual pySHACL validation.
     assert await profile.validate_instance(
