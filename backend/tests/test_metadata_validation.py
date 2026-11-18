@@ -154,10 +154,26 @@ def test_validation_ontology_rebuilds_when_index_cache_is_valid(
     ontology = Graph()
     ontology.add((EX.Child, RDFS.subClassOf, EX.Parent))
 
+    reasoned_ontology = Graph()
+    reasoned_ontology += ontology
+    reasoned_ontology.add((
+        EX.inferredProperty,
+        RDFS.range,
+        EX.InferredRange,
+    ))
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "test-ontology.ttl",
+            "original_graph": ontology,
+        }],
+    )
     monkeypatch.setitem(
         main.state,
         "combined_onto_graph",
-        ontology,
+        reasoned_ontology,
     )
     monkeypatch.setattr(
         main,
@@ -187,6 +203,14 @@ def test_validation_ontology_excludes_global_owl_type_declarations(
     ontology.add((EX.Book, RDF.type, OWL.Class))
     ontology.add((EX.title, RDF.type, OWL.DatatypeProperty))
 
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "test-ontology.ttl",
+            "original_graph": ontology,
+        }],
+    )
     monkeypatch.setitem(
         main.state,
         "combined_onto_graph",
@@ -237,6 +261,14 @@ async def test_referenced_ontology_resource_retains_owl_class_type_for_sh_class(
         OWL.Class,
     ))
 
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "test-ontology.ttl",
+            "original_graph": ontology,
+        }],
+    )
     monkeypatch.setitem(
         main.state,
         "combined_onto_graph",
@@ -385,7 +417,56 @@ def test_validation_ontology_projection_preserves_relevant_schema(
         EX.UnrelatedParent,
     ) not in projected
 
-    assert len(projected) < len(ontology)
+    projected_triples = set(projected)
+    original_triples = set(ontology)
+
+    # Class equivalence itself must remain available.
+    assert (
+        EX.Child,
+        OWL.equivalentClass,
+        EX.Parent,
+    ) in projected
+
+    # The projection must contain the derived subclass relationships.
+    assert {
+        (
+            EX.Child,
+            RDFS.subClassOf,
+            EX.Parent,
+        ),
+        (
+            EX.Parent,
+            RDFS.subClassOf,
+            EX.Child,
+        ),
+    }.issubset(projected_triples - original_triples)
+
+    # Only the two unrelated source statements are excluded in this example.
+    assert original_triples - projected_triples == {
+        (
+            EX.UnrelatedChild,
+            RDFS.subClassOf,
+            EX.UnrelatedParent,
+        ),
+        (
+            EX.unusedProperty,
+            RDFS.range,
+            EX.UnrelatedParent,
+        ),
+    }
+
+    # No unrelated ontology terms should leak into the projection.
+    unrelated_terms = {
+        EX.UnrelatedChild,
+        EX.UnrelatedParent,
+        EX.unusedProperty,
+    }
+
+    assert not any(
+        term in triple
+        for triple in projected_triples
+        for term in unrelated_terms
+    )
 
 
 def test_validation_ontology_projection_falls_back_for_custom_shapes(

@@ -10,7 +10,7 @@ from rdf_store import RDFStore
 import pytest
 from fastapi import HTTPException
 from rdflib import Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF, RDFS, XSD
+from rdflib.namespace import OWL, RDF, RDFS, XSD
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -31,6 +31,112 @@ def test_apply_reasoning_infers_superclass_membership():
     main.apply_reasoning(graph)
 
     assert (EX.book1, RDF.type, EX.Work) in graph
+
+
+def test_label_property_identification_uses_reasoned_combined_graph(
+    monkeypatch,
+):
+    original_graph = Graph()
+
+    original_graph.add((
+        EX.preferredLabel,
+        OWL.equivalentProperty,
+        RDFS.label,
+    ))
+    original_graph.add((
+        EX.resource,
+        EX.preferredLabel,
+        Literal("Preferred label"),
+    ))
+
+    # This property is related to rdfs:label through OWL equivalence,
+    # not through an asserted rdfs:subPropertyOf statement.
+    reasoned_graph = Graph()
+    reasoned_graph += original_graph
+    main.apply_reasoning(reasoned_graph)
+
+    inferred_label_relation = (
+        EX.preferredLabel,
+        RDFS.subPropertyOf,
+        RDFS.label,
+    )
+
+    assert inferred_label_relation in reasoned_graph
+    assert inferred_label_relation not in original_graph
+
+    reasoned_triples = set(reasoned_graph)
+    original_triples = set(original_graph)
+
+    monkeypatch.setitem(
+        main.state,
+        "ontologies",
+        [{
+            "filename": "labels.ttl",
+            "original_graph": original_graph,
+            "graph": reasoned_graph,
+            "entities": [],
+        }],
+    )
+    monkeypatch.setitem(
+        main.state,
+        "combined_onto_graph",
+        reasoned_graph,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "validation_ontology_graph",
+        Graph(),
+    )
+    monkeypatch.setattr(
+        main,
+        "LABEL_PROPERTIES",
+        [],
+    )
+    monkeypatch.setattr(
+        main,
+        "load_preferences",
+        lambda: {"excluded_label_properties": []},
+    )
+
+    monkeypatch.setattr(
+        main.store,
+        "set_label_properties",
+        lambda _: None,
+    )
+
+    main._cached_label.cache_clear()
+
+    try:
+        # The validation source must retain asserted statements only.
+        main.rebuild_validation_ontology()
+
+        assert (
+            EX.preferredLabel,
+            OWL.equivalentProperty,
+            RDFS.label,
+        ) in main.validation_ontology_graph
+
+        assert inferred_label_relation not in main.validation_ontology_graph
+
+        # Label-property discovery must still use the reasoned combined graph.
+        main.update_label_hierarchy()
+
+        assert (
+            str(EX.preferredLabel)
+            in main.state["full_label_properties"]
+        )
+        assert str(EX.preferredLabel) in main.LABEL_PROPERTIES
+
+        # Display-label resolution must still use the reasoned ontology.
+        assert main.get_label(str(EX.resource)) == "Preferred label"
+
+        # Neither operation may mutate the source graphs.
+        assert set(original_graph) == original_triples
+        assert set(reasoned_graph) == reasoned_triples
+
+    finally:
+        main._cached_label.cache_clear()
 
 
 def test_reasoned_graph_cache_invalidates_when_source_changes(

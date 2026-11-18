@@ -128,6 +128,10 @@ def install_projection_resolvers(
         **kwargs,
     ):
         return {
+            "uri": entity_uri,
+            "type": entity_type,
+            "original": {},
+            "overrides": {},
             "effective": effective_constraints or {},
             "field_modes": field_modes or {},
         }
@@ -246,11 +250,20 @@ async def test_projection_includes_only_active_applicable_shapes(
         },
     )
 
+    resolved_property_profiles = {}
+
     projection = await profile._build_validation_shapes_projection(
         shapes,
         [str(EX.Book)],
         FOCUS_NODE,
+        resolved_property_profiles,
     )
+
+    assert set(resolved_property_profiles) == {
+        str(EX.title),
+        str(EX.identifier),
+        str(EX.universalProperty),
+    }
 
     # The selected class and its active superclass are retained.
     assert (
