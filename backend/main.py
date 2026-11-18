@@ -28,6 +28,7 @@ from time import monotonic
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Set, cast, Any
+from copy import deepcopy
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -439,6 +440,7 @@ state = {
     "created_instances_graph": Graph(),
     "all_ontology_namespaces": set(),
     "profile_version": 0,
+    "ontology_revision": 0,
     "full_label_properties": [],
     "starred_instance_uris": set(),
     "applied_base_iri": "",
@@ -2563,6 +2565,45 @@ def _collect_validation_property_hierarchy(
 
     return properties
 
+def _get_validation_ontology_projection_context(
+    data_graph: Graph,
+    shapes_graph: Graph,
+) -> tuple[Set, Set[URIRef], Set[URIRef]]:
+    """Return the class, property, and path context of a validation."""
+    paths = set(
+        shapes_graph.objects(None, SH.path)
+    )
+
+    property_seeds: Set[URIRef] = {
+        predicate
+        for _, predicate, _ in data_graph
+        if isinstance(predicate, URIRef)
+        and predicate != RDF.type
+    }
+    property_seeds.update(
+        path
+        for path in paths
+        if isinstance(path, URIRef)
+    )
+
+    class_seeds: Set[URIRef] = {
+        obj
+        for _, obj in data_graph.subject_objects(RDF.type)
+        if isinstance(obj, URIRef)
+    }
+    class_seeds.update(
+        obj
+        for _, obj in shapes_graph.subject_objects(SH.targetClass)
+        if isinstance(obj, URIRef)
+    )
+    class_seeds.update(
+        obj
+        for _, obj in shapes_graph.subject_objects(SH["class"])
+        if isinstance(obj, URIRef)
+    )
+
+    return paths, property_seeds, class_seeds
+
 def _build_validation_ontology_for_instance(
     data_graph: Graph,
     shapes_graph: Graph,
@@ -2602,23 +2643,11 @@ def _build_validation_ontology_for_instance(
             overridden_range_values,
         )
 
-    paths = set(
-        shapes_graph.objects(
-            None,
-            SH.path,
+    paths, property_seeds, class_seeds = (
+        _get_validation_ontology_projection_context(
+            data_graph,
+            shapes_graph,
         )
-    )
-
-    property_seeds: Set[URIRef] = {
-        predicate
-        for _, predicate, _ in data_graph
-        if isinstance(predicate, URIRef)
-        and predicate != RDF.type
-    }
-    property_seeds.update(
-        path
-        for path in paths
-        if isinstance(path, URIRef)
     )
 
     properties = _collect_validation_property_hierarchy(
@@ -2648,22 +2677,6 @@ def _build_validation_ontology_for_instance(
     # Complex property paths are deliberately handled by the full-source path.
     if any(not isinstance(path, URIRef) for path in paths):
         return full_validation_projection()
-
-    class_seeds = {
-        obj
-        for _, obj in data_graph.subject_objects(RDF.type)
-        if isinstance(obj, URIRef)
-    }
-    class_seeds.update(
-        obj
-        for _, obj in shapes_graph.subject_objects(SH.targetClass)
-        if isinstance(obj, URIRef)
-    )
-    class_seeds.update(
-        obj
-        for _, obj in shapes_graph.subject_objects(SH["class"])
-        if isinstance(obj, URIRef)
-    )
 
     # Constraints that explicitly depend on built-in vocabulary retain
     # the full asserted source rather than risk an incomplete projection.
@@ -3390,6 +3403,163 @@ def _remember_shacl_success(cache_key: str) -> None:
     ):
         _SHACL_VALIDATION_SUCCESS_CACHE.popitem(last=False)
 
+_VALIDATION_PROJECTION_CACHE_MAX_ENTRIES = 16
+
+_VALIDATION_SHAPES_PROJECTION_CACHE: OrderedDict[
+    tuple,
+    tuple[Graph, dict],
+] = OrderedDict()
+
+_VALIDATION_ONTOLOGY_PROJECTION_CACHE: OrderedDict[
+    tuple,
+    Graph,
+] = OrderedDict()
+
+def _clear_validation_projection_caches() -> None:
+    """Clear cached validation projections."""
+    _VALIDATION_SHAPES_PROJECTION_CACHE.clear()
+    _VALIDATION_ONTOLOGY_PROJECTION_CACHE.clear()
+
+def _trim_validation_projection_cache(cache: OrderedDict) -> None:
+    """Keep a bounded number of recent validation projections."""
+    while len(cache) > _VALIDATION_PROJECTION_CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
+
+def _validation_shapes_projection_cache_key(
+    source_shapes: Graph,
+    class_uris: List[str],
+    focus_node: Optional[URIRef],
+) -> tuple:
+    """Identify a shapes projection by revisions, source shapes, and classes."""
+    _get_property_type_map()
+
+    return (
+        state.get("ontology_revision", 0),
+        state.get("profile_version", 0),
+        state.get("property_type_map_signature"),
+        _graph_content_fingerprint(source_shapes),
+        tuple(sorted(set(class_uris))),
+        str(focus_node) if focus_node is not None else None,
+    )
+
+def _get_cached_validation_shapes_projection(
+    cache_key: tuple,
+) -> Optional[tuple[Graph, dict]]:
+    """Return independent copies of a cached shapes projection."""
+    cached = _VALIDATION_SHAPES_PROJECTION_CACHE.get(cache_key)
+
+    if cached is None:
+        return None
+
+    _VALIDATION_SHAPES_PROJECTION_CACHE.move_to_end(cache_key)
+
+    shapes_graph, resolved_profiles = cached
+
+    return (
+        _copy_validation_graph(shapes_graph),
+        deepcopy(resolved_profiles),
+    )
+
+def _remember_validation_shapes_projection(
+    cache_key: tuple,
+    shapes_graph: Graph,
+    resolved_profiles: Dict[str, dict],
+) -> None:
+    """Store independent copies of a shapes projection and its profiles."""
+    _VALIDATION_SHAPES_PROJECTION_CACHE[cache_key] = (
+        _copy_validation_graph(shapes_graph),
+        deepcopy(resolved_profiles),
+    )
+    _VALIDATION_SHAPES_PROJECTION_CACHE.move_to_end(cache_key)
+
+    _trim_validation_projection_cache(
+        _VALIDATION_SHAPES_PROJECTION_CACHE
+    )
+
+def _validation_ontology_projection_cache_key(
+    data_graph: Graph,
+    shapes_graph: Graph,
+    *,
+    overridden_domain_properties: Optional[Set[URIRef]] = None,
+    overridden_range_values: Optional[
+        Dict[URIRef, Optional[Set[str]]]
+    ] = None,
+) -> tuple:
+    """Identify an ontology projection by revisions and validation context."""
+    paths, property_seeds, class_seeds = (
+        _get_validation_ontology_projection_context(
+            data_graph,
+            shapes_graph,
+        )
+    )
+
+    _get_property_type_map()
+
+    overridden_domain_properties = (
+        overridden_domain_properties or set()
+    )
+    overridden_range_values = overridden_range_values or {}
+
+    range_overrides_key = tuple(
+        sorted(
+            (
+                str(property_uri),
+                None
+                if values is None
+                else tuple(sorted(str(value) for value in values)),
+            )
+            for property_uri, values in overridden_range_values.items()
+        )
+    )
+
+    return (
+        state.get("ontology_revision", 0),
+        state.get("profile_version", 0),
+        state.get("property_type_map_signature"),
+        _graph_content_fingerprint(validation_ontology_graph),
+        _graph_content_fingerprint(shapes_graph),
+        tuple(sorted(str(path) for path in paths)),
+        tuple(sorted(str(uri) for uri in property_seeds)),
+        tuple(sorted(str(uri) for uri in class_seeds)),
+        tuple(sorted(str(uri) for uri in overridden_domain_properties)),
+        range_overrides_key,
+    )
+
+def _get_cached_validation_ontology_projection(
+    cache_key: tuple,
+) -> Optional[Graph]:
+    """Return an independent copy of a cached reasoned ontology."""
+    cached = _VALIDATION_ONTOLOGY_PROJECTION_CACHE.get(cache_key)
+
+    if cached is None:
+        return None
+
+    _VALIDATION_ONTOLOGY_PROJECTION_CACHE.move_to_end(cache_key)
+
+    return _copy_validation_graph(cached)
+
+def _remember_validation_ontology_projection(
+    cache_key: tuple,
+    ontology_graph: Graph,
+) -> None:
+    """Store an independent copy of a reasoned ontology projection."""
+    _VALIDATION_ONTOLOGY_PROJECTION_CACHE[cache_key] = (
+        _copy_validation_graph(ontology_graph)
+    )
+    _VALIDATION_ONTOLOGY_PROJECTION_CACHE.move_to_end(cache_key)
+
+    _trim_validation_projection_cache(
+        _VALIDATION_ONTOLOGY_PROJECTION_CACHE
+    )
+
+def _increment_ontology_revision() -> None:
+    """Advance the ontology revision and invalidate dependent projections."""
+    state["ontology_revision"] = (
+        state.get("ontology_revision", 0) + 1
+    )
+    _clear_validation_projection_caches()
+
+
 # ---------------------------------------------------------------------------
 #  Cache Invalidation
 # ---------------------------------------------------------------------------
@@ -3410,6 +3580,7 @@ def invalidate_profile():
     ap.invalidate()
     shacl.invalidate_shapes_cache()
     state["profile_version"] = state.get("profile_version", 0) + 1
+    _clear_validation_projection_caches()
 
 def invalidate_everything():
     invalidate_profile()
@@ -8510,14 +8681,39 @@ class SHACLProfile:
         validation_source_shapes = Graph()
 
         if len(explicit_shapes) > 0:
-            validation_source_shapes = (
-                await self._build_validation_shapes_projection(
-                    explicit_shapes,
-                    class_uris,
-                    inst_uri,
-                    resolved_property_profiles,
+            shapes_cache_key = _validation_shapes_projection_cache_key(
+                explicit_shapes,
+                class_uris,
+                inst_uri,
+            )
+
+            cached_projection = (
+                _get_cached_validation_shapes_projection(
+                    shapes_cache_key
                 )
             )
+
+            if cached_projection is None:
+                validation_source_shapes = (
+                    await self._build_validation_shapes_projection(
+                        explicit_shapes,
+                        class_uris,
+                        inst_uri,
+                        resolved_property_profiles,
+                    )
+                )
+
+                _remember_validation_shapes_projection(
+                    shapes_cache_key,
+                    validation_source_shapes,
+                    resolved_property_profiles,
+                )
+
+            else:
+                (
+                    validation_source_shapes,
+                    resolved_property_profiles,
+                ) = cached_projection
 
         data_g = Graph()
         inst_uri = URIRef("urn:temp:instance")
@@ -8647,17 +8843,38 @@ class SHACLProfile:
             resolved_property_profiles
         )
 
-        validation_ontology = _build_validation_ontology_for_instance(
-            data_g,
-            validation_shapes,
-            overridden_domain_properties=overridden_domain_properties,
-            overridden_range_values=overridden_range_values,
+        ontology_cache_key = (
+            _validation_ontology_projection_cache_key(
+                data_g,
+                validation_shapes,
+                overridden_domain_properties=overridden_domain_properties,
+                overridden_range_values=overridden_range_values,
+            )
         )
 
-        # Add the built-in OWL vocabulary and reason over this temporary
-        # asserted projection only. Never reason over or mutate the source
-        # ontology graphs or the global validation source.
-        apply_reasoning(validation_ontology)
+        validation_ontology = (
+            _get_cached_validation_ontology_projection(
+                ontology_cache_key
+            )
+        )
+
+        if validation_ontology is None:
+            validation_ontology = (
+                _build_validation_ontology_for_instance(
+                    data_g,
+                    validation_shapes,
+                    overridden_domain_properties=overridden_domain_properties,
+                    overridden_range_values=overridden_range_values,
+                )
+            )
+
+            # Reason only over this temporary validation projection.
+            apply_reasoning(validation_ontology)
+
+            _remember_validation_ontology_projection(
+                ontology_cache_key,
+                validation_ontology,
+            )
 
         cache_key: str | None = None
 
@@ -9393,6 +9610,7 @@ def load_saved_ontologies():
             }
             onto["namespaces"] = get_ontology_namespaces(g)
             state["ontologies"].append(onto)
+            _increment_ontology_revision()
             state["all_ontology_namespaces"].update(onto["namespaces"])
             for t in g:
                 state["combined_onto_graph"].add(t)
@@ -10033,6 +10251,7 @@ async def upload_ontology(file: UploadFile = File(...)):
     }
     onto["namespaces"] = get_ontology_namespaces(g)
     state["ontologies"].append(onto)
+    _increment_ontology_revision()
     state["all_ontology_namespaces"].update(onto["namespaces"])
     for t in g:
         state["combined_onto_graph"].add(t)
@@ -10089,6 +10308,8 @@ async def delete_ontology(filename: str):
 
     # Validate all paths before changing application state or removing files.
     state["ontologies"].remove(ontology)
+
+    _increment_ontology_revision()
 
     for path in (filepath, cache_path, metadata_path):
         if path.is_file():
@@ -13010,6 +13231,7 @@ async def purge_all_data():
             os.makedirs(directory, exist_ok=True)
 
     state["ontologies"].clear()
+    _increment_ontology_revision()
     state["combined_onto_graph"] = Graph()
     state["ontology_property_type_map"].clear()
     state["metadata_property_type_map"].clear()
